@@ -1,0 +1,20 @@
+{
+  "name": "open-rng-engine",
+  "version": "0.1.0",
+  "description": "Open-source GLI-19 / NIST-aligned RNG engine for casino, poker, slots and iGaming",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "lint": "eslint src --ext .ts"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/hashes": "^1.7.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
