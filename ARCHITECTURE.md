@@ -1,26 +1,20 @@
 # Architecture
 
-Layered design for maximum reusability and certification friendliness.
+Planning notes only. This repository has no implementation yet.
+
+The library is intended to produce unbiased random outcomes (integers, shuffles, and weighted picks) from the platform CSPRNG.
 
 ```
-Game Layer (your poker, slots, roulette, etc.)
+Caller
         ↓
-Mapping & Utilities (Fisher-Yates, unbiased range, weighted selection)
+Mapping (integer ranges, shuffles, weighted picks)
         ↓
-Provably Fair Layer (optional commit-reveal)
-        ↓
-DRBG Core (HMAC-DRBG SHA-256, NIST SP 800-90A)
-        ↓
-Entropy / Seeding (OS CSPRNG)
+Platform CSPRNG
 ```
 
-## Key decisions
+## Scope
 
-- **HMAC-DRBG (SHA-256)** — NIST SP 800-90A approved, easy to audit, widely accepted by labs.
-- **Unbiased mapping** — Rejection sampling for ranges, correct Fisher-Yates.
-- **TypeScript** — Isomorphic (browser + Node + edge) for maximum developer adoption.
-- **Provably Fair optional** — Built on top, never instead of strong cryptography.
-
-## Certification path
-
-Labs certify concrete builds. A well-documented, NIST-aligned core can be certified once and then reused with delta reviews.
+- Outcome types in scope are integers, shuffles, and weighted picks.
+- Random bits come from the platform CSPRNG.
+- GLI-19 and NIST SP 800-22 are reference documents only. NIST STS results are statistical evidence, not proof.
+- This library is not a validated cryptographic module. Certification applies to an operator's or supplier's complete system, never to this library.

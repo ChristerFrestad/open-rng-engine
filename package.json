@@ -1,7 +1,7 @@
 {
   "name": "open-rng-engine",
   "version": "0.1.0",
-  "description": "Open-source GLI-19 / NIST-aligned RNG engine for casino, poker, slots and iGaming",
+  "description": "General-purpose library for unbiased random outcomes (integers, shuffles, weighted picks) on top of the platform CSPRNG",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -9,7 +9,7 @@
     "test": "vitest",
     "lint": "eslint src --ext .ts"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@noble/hashes": "^1.7.1"
   },
