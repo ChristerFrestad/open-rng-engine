@@ -2,8 +2,8 @@
 // strict flags really active, node_modules never scanned. node --test.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { lintTree } from '../tools/claims-lint.mjs';
@@ -57,7 +57,7 @@ test('node_modules is gitignored; a tracked node_modules/ path is red (CPO-R104 
 test('G-10: check:ph0 fails on a tracked node_modules/ path (scratch clone)', () => {
   const c = join(dir, 'clone');
   execFileSync('git', ['clone', '-q', '--no-hardlinks', ROOT, c]);
-  for (const p of execFileSync('git', ['ls-files', '-z'], { cwd: ROOT }).toString().split('\0').filter(Boolean)) if (existsSync(join(ROOT, p))) writeFileSync(join(c, p), readFileSync(join(ROOT, p)));
+  for (const p of execFileSync('git', ['ls-files', '-z'], { cwd: ROOT }).toString().split('\0').filter(Boolean)) if (existsSync(join(ROOT, p))) { mkdirSync(dirname(join(c, p)), { recursive: true }); writeFileSync(join(c, p), readFileSync(join(ROOT, p))); }
   execFileSync('git', ['add', '-A'], { cwd: c });
   const lint = () => spawnSync(process.execPath, [join(c, 'tools/claims-lint.mjs')], { cwd: c, encoding: 'utf8' });
   assert.equal(lint().status, 0, lint().stdout);
