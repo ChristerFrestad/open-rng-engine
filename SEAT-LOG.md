@@ -10,3 +10,4 @@ One line per commit, written before the commit by the committing seat. Columns: 
 | 2026-11-18 07:46:18 CET | CTO via executor | PH0: known-bad fixtures materialised in scratch from u-escaped source; drop literal fixture files | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 | 2026-11-18 07:50:13 CET | CTO via executor | PH0: record DoD status (local PASS items; remote items pending CoS go) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 | 2026-11-18 07:50:37 CET | CTO via executor | PH1 skeleton: strict tsconfig, src/ and packages/ layout per PLAN 3.1, CI rule stubs (no logic) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+| 2026-11-18 07:56:22 CET | CTO via executor | PH0 RP-7 follow-up: SECURITY.md live-channel wording (local; remote pending separate go) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
