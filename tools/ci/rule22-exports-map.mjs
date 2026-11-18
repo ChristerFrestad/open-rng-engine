@@ -92,15 +92,46 @@ function posix(p) { return String(p).split(sep).join('/'); }
 export function nameSegments(id) {
   return String(id)
     .split(/_+/g)
-    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
+    .flatMap((part) => part.split(/[0-9]+/))
+    .flatMap((part) => part.split(/(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
     .map((s) => s.toLowerCase())
     .filter(Boolean);
 }
 
+function segmentMatchesTerm(seg, term) {
+  const s = String(seg).toLowerCase();
+  const t = String(term).toLowerCase();
+  return s === t || s === t + 's' || s === t + 'es';
+}
+
 export function qr33Hit(name) {
-  const segs = new Set(nameSegments(name));
-  for (const t of QR33_TERMS) if (segs.has(t)) return t;
+  const lower = String(name).toLowerCase();
+  const segs = nameSegments(name);
+  for (const t of QR33_TERMS) {
+    if (segs.some((s) => segmentMatchesTerm(s, t))) return t;
+    if (lower.includes(t)) return t;
+  }
   return null;
+}
+
+export const QR33_ALLOW_REL = 'tools/qr33-allow.json';
+export const QR33_ALLOW_SHA256 = 'db2d0ab03ee56d327244ee982b0712dae4acc22f251927ed5437863f641b35ba';
+
+export function loadQr33Allow(abs) {
+  const data = JSON.parse(readFileSync(abs, 'utf8'));
+  if (!data || !Array.isArray(data.entries)) {
+    throw new Error(`qr33-allow: ${abs} must be { schema, entries: [...] }`);
+  }
+  for (const e of data.entries) {
+    if (!e || typeof e.entry !== 'string' || typeof e.hoqRulingRef !== 'string' || typeof e.fixture !== 'string') {
+      throw new Error(`qr33-allow: entry must be {entry, hoqRulingRef, fixture}`);
+    }
+  }
+  return data.entries;
+}
+
+function allowSet(entries) {
+  return new Set((entries ?? []).map((e) => e.entry));
 }
 
 function isPinnedScalar(val) {
@@ -161,9 +192,42 @@ function exportedBindings(sf) {
     }
     if (ts.isVariableStatement(st)) {
       for (const d of st.declarationList.declarations) {
-        if (ts.isIdentifier(d.name)) out.push({ name: d.name.text, local: d.name.text, from: null, star: false });
+        for (const name of bindingNames(d.name)) out.push({ name, local: name, from: null, star: false });
       }
     }
+    if (ts.isClassDeclaration(st)) {
+      for (const name of classStaticNames(st)) out.push({ name, local: name, from: null, star: false, staticMember: true });
+    }
+  }
+  return out;
+}
+
+function bindingNames(name) {
+  if (!name) return [];
+  if (ts.isIdentifier(name)) return [name.text];
+  const out = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (ts.isIdentifier(n)) { out.push(n.text); return; }
+    if (ts.isObjectBindingPattern(n) || ts.isArrayBindingPattern(n)) {
+      for (const el of n.elements) {
+        if (ts.isOmittedExpression(el)) continue;
+        if (ts.isBindingElement(el)) walk(el.name);
+        else walk(el);
+      }
+    }
+  };
+  walk(name);
+  return out;
+}
+
+function classStaticNames(cls) {
+  const out = [];
+  for (const m of cls.members) {
+    const mods = m.modifiers ?? [];
+    if (!mods.some((x) => x.kind === ts.SyntaxKind.StaticKeyword)) continue;
+    const n = m.name;
+    if (n && ts.isIdentifier(n)) out.push(n.text);
   }
   return out;
 }
@@ -181,14 +245,15 @@ function specifiersOf(sf) {
   return out;
 }
 
-export function walkPublicExports(root, entries) {
+export function walkPublicExports(root, entries, { qr33Allow = [] } = {}) {
   const hits = [];
+  const allowed = allowSet(qr33Allow);
   const seen = new Set();
   const todo = entries.map((rel) => ({ rel: posix(rel), fromPublic: true }));
   const emit = (rel, name, originRel) => {
     if (RAW_BYTES_APIS.includes(name)) hits.push(`${rel}:1: rule22-exports raw-bytes API '${name}' is in the public core API`);
     const q = qr33Hit(name);
-    if (q) hits.push(`${rel}:1: rule22-exports core export '${name}' contains QR-33 term '${q}'`);
+    if (q && !allowed.has(name)) hits.push(`${rel}:1: rule22-exports core export '${name}' contains QR-33 term '${q}'`);
     if (originRel && posix(originRel).startsWith('src/entropy/')) {
       hits.push(`${rel}:1: rule22-exports public API re-exports '${name}' originating in ${originRel}`);
     }
@@ -312,14 +377,19 @@ export function publicEntryRels(pkg) {
   return [...new Set(rels)];
 }
 
-export function scanRoot(root) {
+export function scanRoot(root, opts = {}) {
   const file = join(root, 'package.json');
   if (!existsSync(file)) return [`package.json:1: rule22-exports missing package.json`];
   let pkg;
   try { pkg = JSON.parse(readFileSync(file, 'utf8')); }
   catch (e) { return [`package.json:1: rule22-exports unreadable package.json (${e.message})`]; }
   const hits = scanExports(pkg, { path: 'package.json' });
-  hits.push(...walkPublicExports(root, publicEntryRels(pkg)));
+  let qr33Allow = opts.qr33Allow;
+  if (qr33Allow === undefined) {
+    const allowPath = join(root, QR33_ALLOW_REL);
+    qr33Allow = existsSync(allowPath) ? loadQr33Allow(allowPath) : [];
+  }
+  hits.push(...walkPublicExports(root, publicEntryRels(pkg), { qr33Allow }));
   return hits;
 }
 
@@ -393,6 +463,26 @@ export function selfTest() {
         files: { 'src/index.ts': 'export const randomBytes = 1;\n', 'src/audited/index.ts': 'export {};\n' },
         reason: /raw-bytes API 'randomBytes'/,
       },
+      {
+        name: 'qr33-deal-plural',
+        files: { 'src/index.ts': `export const deal${cardName[0].toUpperCase()}${cardName.slice(1)}s = 1;\n`, 'src/audited/index.ts': 'export {};\n' },
+        reason: /QR-33 term/,
+      },
+      {
+        name: 'qr33-substring',
+        files: { 'src/index.ts': `export const ${cardName}${uUnescape(QR33_TERM_ESCAPES[0])} = 1;\n`, 'src/audited/index.ts': 'export {};\n' },
+        reason: /QR-33 term/,
+      },
+      {
+        name: 'qr33-destructured-export',
+        files: { 'src/index.ts': `const o = { deal${cardName[0].toUpperCase()}${cardName.slice(1)}s: 1 };\nexport const { deal${cardName[0].toUpperCase()}${cardName.slice(1)}s } = o;\n`, 'src/audited/index.ts': 'export {};\n' },
+        reason: /QR-33 term/,
+      },
+      {
+        name: 'qr33-class-static',
+        files: { 'src/index.ts': `export class C { static ${cardName}${uUnescape(QR33_TERM_ESCAPES[0])} = 1; }\n`, 'src/audited/index.ts': 'export {};\n' },
+        reason: /QR-33 term/,
+      },
     ];
     for (const [name, { pkg, reason }] of Object.entries(BAD_FIXTURES)) {
       // Materialise from a \u-escaped form; the escaped source is what we keep in-repo as the fixture text.
@@ -411,12 +501,23 @@ export function selfTest() {
       const hits = scanRoot(d);
       if (!hits.some((h) => c.reason.test(h))) fails.push(`${c.name} did not turn rule 22 red:\n${hits.join('\n')}`);
     }
+    // Allow-list mechanism uses a scratch config, never the production file.
+    const deal = `deal${cardName[0].toUpperCase()}${cardName.slice(1)}s`;
+    const scratch = join(base, 'qr33-allow-scratch');
+    writeJson(scratch, 'package.json', GOOD_PKG);
+    mkdirSync(join(scratch, 'src/audited'), { recursive: true });
+    writeFileSync(join(scratch, 'src/index.ts'), `export const ${deal} = 1;\n`);
+    writeFileSync(join(scratch, 'src/audited/index.ts'), 'export {};\n');
+    const redHits = scanRoot(scratch, { qr33Allow: [] });
+    if (!redHits.some((h) => /QR-33 term/.test(h))) fails.push(`scratch allow: empty list must leave ${deal} red:\n${redHits.join('\n')}`);
+    const greenHits = scanRoot(scratch, { qr33Allow: [{ entry: deal, hoqRulingRef: 'scratch', fixture: 'qr33-allow-scratch' }] });
+    if (greenHits.some((h) => /QR-33 term/.test(h))) fails.push(`scratch allow: listed entry must be green:\n${greenHits.join('\n')}`);
   } finally { rmSync(base, { recursive: true, force: true }); }
   if (fails.length) {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 5} known-bad fixtures red, control green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 9} known-bad fixtures red, control green`);
 }
 
 const here = fileURLToPath(import.meta.url);

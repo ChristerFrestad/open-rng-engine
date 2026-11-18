@@ -26,8 +26,15 @@ for (const id of ENTRY_POINT_IDS) {
 if (marker.entryPointIds.length !== ENTRY_POINT_IDS.length) {
   throw new Error(`entropy-backstop must wrap ${ENTRY_POINT_IDS.length} entry points, got ${marker.entryPointIds.join(',')}`);
 }
-if (ENTRY_POINT_IDS.length < 14) {
-  throw new Error(`G-29: expected the expanded entry-point list, got ${ENTRY_POINT_IDS.length}`);
+if (ENTRY_POINT_IDS.length < 24) {
+  throw new Error(`G-39: expected DH and optional randomUUIDv7 expansion, got ${ENTRY_POINT_IDS.length}`);
+}
+const markDesc = Object.getOwnPropertyDescriptor(globalThis, MARK);
+if (!markDesc || markDesc.writable || markDesc.configurable || markDesc.value !== marker) {
+  throw new Error('G-39: marker slot must be non-writable and non-configurable with a stable identity');
+}
+if (marker.nodeVersion !== process.version) {
+  throw new Error(`G-39: marker.nodeVersion ${marker.nodeVersion} != ${process.version}`);
 }
 
 test('M-162: preload marker lists every entry point and wrappers are live identities', () => {
@@ -191,7 +198,16 @@ else if (id === 'generateKeyPairSync') c.generateKeyPairSync('ed25519');
 else if (id === 'ECDH.prototype.generateKeys') {
   const e = c.createECDH('prime256v1');
   Object.getPrototypeOf(e).generateKeys.call(e);
-} else throw new Error('unknown id ' + id);
+} else if (id === 'getDiffieHellman') c.getDiffieHellman('modp14');
+else if (id === 'createDiffieHellman') c.createDiffieHellman(256);
+else if (id === 'createDiffieHellmanGroup') c.createDiffieHellmanGroup('modp14');
+else if (id === 'DiffieHellman.prototype.generateKeys') {
+  c.DiffieHellman.prototype.generateKeys.call({});
+} else if (id === 'DiffieHellmanGroup.prototype.generateKeys') {
+  const g = c.createDiffieHellmanGroup('modp14');
+  Object.getPrototypeOf(g).generateKeys.call(g);
+} else if (id === 'randomUUIDv7') c.randomUUIDv7();
+else throw new Error('unknown id ' + id);
 `;
 
 for (const id of ENTRY_POINT_IDS) {

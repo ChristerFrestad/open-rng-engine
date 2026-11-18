@@ -20,7 +20,10 @@ const { syncBuiltinESMExports } = require('node:module');
 export const MARK = Symbol.for('open-rng-engine/entropy-backstop/v1');
 
 // G-29: the original 8, plus prototype originals and HoQ's complete unwrapped list.
-export const ENTRY_POINT_IDS = Object.freeze([
+const _cryptoForDetect = require('node:crypto');
+export const RANDOMUUIDV7_PRESENT = typeof _cryptoForDetect.randomUUIDv7 === 'function';
+export const BACKSTOP_NODE_VERSION = process.version;
+const BASE_ENTRY_POINT_IDS = [
   'randomFillSync',
   'randomBytes',
   'randomInt',
@@ -40,7 +43,15 @@ export const ENTRY_POINT_IDS = Object.freeze([
   'generateKeyPair',
   'generateKeyPairSync',
   'ECDH.prototype.generateKeys',
-]);
+  'getDiffieHellman',
+  'createDiffieHellman',
+  'createDiffieHellmanGroup',
+  'DiffieHellman.prototype.generateKeys',
+  'DiffieHellmanGroup.prototype.generateKeys',
+];
+export const ENTRY_POINT_IDS = Object.freeze(
+  RANDOMUUIDV7_PRESENT ? [...BASE_ENTRY_POINT_IDS, 'randomUUIDv7'] : BASE_ENTRY_POINT_IDS,
+);
 
 const NativeError = Error;
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -182,6 +193,7 @@ function wrapFn(id, orig) {
   }
   const wrapped = function entropyBackstopWrapped(...args) {
     counters[id] += 1;
+    assertMarkerIdentity(`call:${id}`);
     assertIdentitiesAndStack(`call:${id}`);
     const err = new NativeError();
     checkCaller(id, err.stack);
@@ -289,7 +301,7 @@ function collectTargets(crypto) {
   const gt = globalThis.crypto;
   let ecdhProto = null;
   try { ecdhProto = Object.getPrototypeOf(crypto.createECDH('prime256v1')); } catch { /* missing curve */ }
-  return [
+  const targets = [
     { id: 'Crypto.prototype.getRandomValues', obj: typeof Crypto === 'function' ? Crypto.prototype : null, key: 'getRandomValues' },
     { id: 'SubtleCrypto.prototype.generateKey', obj: typeof SubtleCrypto === 'function' ? SubtleCrypto.prototype : null, key: 'generateKey' },
     { id: 'webcrypto.getRandomValues', obj: wc, key: 'getRandomValues' },
@@ -309,7 +321,14 @@ function collectTargets(crypto) {
     { id: 'generateKeyPair', obj: crypto, key: 'generateKeyPair' },
     { id: 'generateKeyPairSync', obj: crypto, key: 'generateKeyPairSync' },
     { id: 'ECDH.prototype.generateKeys', obj: ecdhProto, key: 'generateKeys' },
+    { id: 'getDiffieHellman', obj: crypto, key: 'getDiffieHellman' },
+    { id: 'createDiffieHellman', obj: crypto, key: 'createDiffieHellman' },
+    { id: 'createDiffieHellmanGroup', obj: crypto, key: 'createDiffieHellmanGroup' },
+    { id: 'DiffieHellman.prototype.generateKeys', obj: crypto.DiffieHellman ? crypto.DiffieHellman.prototype : null, key: 'generateKeys' },
+    { id: 'DiffieHellmanGroup.prototype.generateKeys', obj: crypto.DiffieHellmanGroup ? crypto.DiffieHellmanGroup.prototype : null, key: 'generateKeys' },
   ];
+  if (RANDOMUUIDV7_PRESENT) targets.push({ id: 'randomUUIDv7', obj: crypto, key: 'randomUUIDv7' });
+  return targets;
 }
 
 function installNodeOptions() {
@@ -357,6 +376,61 @@ function installWorkerHook() {
   try { syncBuiltinESMExports(); } catch { /* ESM bindings may already be live */ }
 }
 
+const IMPORT_HREF = pathToFileURL(SELF).href;
+
+function injectBackstopExecArgv(execArgv) {
+  const list = [...(execArgv ?? [])];
+  if (!hasBackstopImport(list)) list.unshift('--import', IMPORT_HREF);
+  return list;
+}
+
+function injectBackstopEnv(env) {
+  const flag = `--import ${IMPORT_HREF}`;
+  const next = { ...env };
+  const cur = typeof next.NODE_OPTIONS === 'string' ? next.NODE_OPTIONS : '';
+  if (!cur.includes('entropy-backstop.mjs') && !cur.includes(IMPORT_HREF)) {
+    next.NODE_OPTIONS = cur ? `${flag} ${cur}` : flag;
+  }
+  return next;
+}
+
+function normalizeChildOptions(options) {
+  const opts = { ...(options || {}) };
+  opts.execArgv = injectBackstopExecArgv(opts.execArgv);
+  if (Object.prototype.hasOwnProperty.call(opts, 'env')) opts.env = injectBackstopEnv(opts.env || {});
+  else opts.env = injectBackstopEnv({ ...process.env });
+  return opts;
+}
+
+function mapChildArgs(args) {
+  const out = args.slice();
+  let idx = -1;
+  for (let i = out.length - 1; i >= 0; i--) {
+    const a = out[i];
+    if (typeof a === 'function') continue;
+    if (a && typeof a === 'object' && !Array.isArray(a)) { idx = i; break; }
+  }
+  if (idx === -1) out.push(normalizeChildOptions({}));
+  else out[idx] = normalizeChildOptions(out[idx]);
+  return out;
+}
+
+function installChildProcessHook() {
+  const cp = require('node:child_process');
+  for (const name of ['spawn', 'spawnSync', 'fork', 'execFile', 'execFileSync', 'exec', 'execSync']) {
+    const orig = cp[name];
+    if (typeof orig !== 'function' || orig._backstopChild) continue;
+    const hooked = function (...args) { return orig.apply(this, mapChildArgs(args)); };
+    hooked._backstopChild = true;
+    try {
+      Object.defineProperty(cp, name, { configurable: false, writable: false, enumerable: true, value: hooked });
+    } catch {
+      cp[name] = hooked;
+    }
+  }
+  try { syncBuiltinESMExports(); } catch { /* already live */ }
+}
+
 export function install(opts = {}) {
   if (installed && !opts.force) return getMarker();
   if (opts.allowed) allowed = opts.allowed.map(normalizePath);
@@ -364,6 +438,7 @@ export function install(opts = {}) {
   savedLimit = Error.stackTraceLimit;
   installNodeOptions();
   installWorkerHook();
+  installChildProcessHook();
   const crypto = require('node:crypto');
   const targets = collectTargets(crypto);
   const seenFn = new WeakMap();
@@ -432,9 +507,32 @@ export function install(opts = {}) {
     self: SELF,
     savedPrepare,
     savedLimit,
+    nodeVersion: BACKSTOP_NODE_VERSION,
+    randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
   };
-  globalThis[MARK] = marker;
+  Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
+  Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });
+  Object.defineProperty(marker, 'entryPointIds', { value: ENTRY_POINT_IDS, writable: false, configurable: false, enumerable: true });
+  Object.preventExtensions(marker);
+  Object.defineProperty(globalThis, MARK, {
+    value: marker,
+    writable: false,
+    configurable: false,
+    enumerable: false,
+  });
+  installedMarker = marker;
   return marker;
+}
+
+let installedMarker = null;
+export function assertMarkerIdentity(label = 'call') {
+  const cur = globalThis[MARK];
+  const desc = Object.getOwnPropertyDescriptor(globalThis, MARK);
+  if (!installedMarker || cur !== installedMarker || !desc || desc.writable || desc.configurable || desc.value !== installedMarker) {
+    const msg = `entropy-backstop: marker identity changed (${label})`;
+    console.error(msg);
+    throw new NativeError(msg);
+  }
 }
 
 export function getMarker() {
@@ -443,6 +541,7 @@ export function getMarker() {
 
 function onTeardown() {
   try {
+    assertMarkerIdentity('beforeExit');
     assertIdentitiesAndStack('beforeExit');
     assertCountersHealthy('beforeExit');
   } catch (e) {

@@ -1,5 +1,8 @@
 // Replay mutant kills (quality v5.5.6 M-100..M-110, M-117 (b)-(d); CPO-R99 O-69 R0). node --test, zero dependencies.
 // Out of scope here (no producer exists before PH2): M-106 / M-107 / M-117 (a) producer halves, `labkit verify` (PH3).
+// M-110 (CSPRNG non-touch): requires the entropy backstop to be preloaded. Under npm test this is
+// `--import ./tools/ci/entropy-backstop.mjs`. If this file is run alone without that flag, the M-110
+// backstop assertion is skipped loudly rather than failing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -122,7 +125,10 @@ test('M-110: 1-entry n = 15 record [{30,30}], bytesFetched 30 -> R4', () => {
 });
 test('M-110: replay never touches a CSPRNG (entropy-backstop counters, no live re-wrap)', () => {
   const mark = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')];
-  assert.ok(mark && mark.installed, 'entropy-backstop must already be installed');
+  if (!mark || !mark.installed) {
+    console.error('M-110: entropy-backstop is not preloaded. This assertion will fail. Re-run as `node --import ./tools/ci/entropy-backstop.mjs --test test/replay-mutants.test.mjs` or via npm test. See the file header.');
+  }
+  assert.ok(mark && mark.installed, 'entropy-backstop must already be installed (see file header: preload via npm test or --import ./tools/ci/entropy-backstop.mjs)');
   const before = Object.fromEntries(Object.entries(mark.counters).map(([k, v]) => [k, v]));
   const mr = Math.random; let mathTouches = 0; Math.random = () => { mathTouches++; return mr(); };
   try {

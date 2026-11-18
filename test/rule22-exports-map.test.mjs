@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -23,10 +24,22 @@ test('rule 22: required keys are exactly ".", "./audited", "./package.json"', ()
   assert.deepEqual([...REQUIRED_EXPORT_KEYS], ['.', './audited', './package.json']);
 });
 
+test('G-42: tools/qr33-allow.json is empty and its sha256 is pinned as a literal', () => {
+  const rel = 'tools/qr33-allow.json';
+  const buf = readFileSync(join(ROOT, rel));
+  const sha = createHash('sha256').update(buf).digest('hex');
+  // Literal pin; do not import this digest from the tool under test.
+  const QR33_ALLOW_SHA256 = 'db2d0ab03ee56d327244ee982b0712dae4acc22f251927ed5437863f641b35ba';
+  assert.equal(sha, QR33_ALLOW_SHA256);
+  const data = JSON.parse(buf.toString('utf8'));
+  assert.ok(data.schema && data.schema.entry && data.schema.hoqRulingRef && data.schema.fixture);
+  assert.deepEqual(data.entries, []);
+});
+
 test('rule 22: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /18 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /22 known-bad fixtures red, control green/);
 });
 
 for (const name of Object.keys(BAD_FIXTURES)) {

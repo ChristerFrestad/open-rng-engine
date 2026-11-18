@@ -81,7 +81,16 @@ try {
   else if (id === 'ECDH.prototype.generateKeys') {
     const e = c.createECDH('prime256v1');
     Object.getPrototypeOf(e).generateKeys.call(e);
-  } else throw new Error('unknown id ' + id);
+  } else if (id === 'getDiffieHellman') c.getDiffieHellman('modp14');
+  else if (id === 'createDiffieHellman') c.createDiffieHellman(256);
+  else if (id === 'createDiffieHellmanGroup') c.createDiffieHellmanGroup('modp14');
+  else if (id === 'DiffieHellman.prototype.generateKeys') {
+    c.DiffieHellman.prototype.generateKeys.call({});
+  } else if (id === 'DiffieHellmanGroup.prototype.generateKeys') {
+    const g = c.createDiffieHellmanGroup('modp14');
+    Object.getPrototypeOf(g).generateKeys.call(g);
+  } else if (id === 'randomUUIDv7') c.randomUUIDv7();
+  else throw new Error('unknown id ' + id);
   console.error('planted call of ' + id + ' was not rejected');
   process.exit(0);
 } catch (e) {
@@ -268,6 +277,39 @@ w.on('exit', (code) => process.exit(code === 0 ? 0 : (code || 1)));
       failed += 1;
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+// G-39: env:{} and NODE_OPTIONS='' must not drop the preload for child_process.
+{
+  const childDir = mkdtempSync(join(tmpdir(), 'bs-child-'));
+  try {
+    const childPlant = join(childDir, 'src', 'health', 'child-env.mjs');
+    mkdirSync(dirname(childPlant), { recursive: true });
+    writeFileSync(childPlant, plantedScript('randomBytes'));
+    const launcherFor = (envExpr) => `import { spawnSync } from 'node:child_process';
+const r = spawnSync(process.execPath, [${JSON.stringify(childPlant)}], { encoding: 'utf8', timeout: 20000, env: ${envExpr} });
+process.stderr.write(String(r.stderr || ''));
+process.stdout.write(String(r.stdout || ''));
+process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr)+String(r.stdout)) ? 1 : 2));
+`;
+    for (const [label, envExpr] of [['env-empty', '{}'], ['node-options-empty', "{ ...process.env, NODE_OPTIONS: '' }"]]) {
+      const launcher = join(childDir, `launch-${label}.mjs`);
+      writeFileSync(launcher, launcherFor(envExpr));
+      const r = spawnSync(process.execPath, ['--import', BACKSTOP, launcher], {
+        cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+        env: { ...process.env },
+      });
+      if (r.status === 0) {
+        console.error(`entropy-backstop-check: child_process ${label} planted call was not rejected\n${r.stdout}\n${r.stderr}`);
+        failed += 1;
+      } else if (!/entropy-backstop:/.test(`${r.stderr}\n${r.stdout}`)) {
+        console.error(`entropy-backstop-check: child_process ${label} failed without a backstop message (status ${r.status})\n${r.stdout}\n${r.stderr}`);
+        failed += 1;
+      }
+    }
+  } finally {
+    rmSync(childDir, { recursive: true, force: true });
+  }
 }
 
 if (failed) process.exit(1);

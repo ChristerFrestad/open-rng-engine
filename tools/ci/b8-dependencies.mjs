@@ -69,31 +69,84 @@ export function gitShowSha256(root, rel) {
 }
 
 export function parseG4Verdicts(text) {
-  const raw = String(text).replace(/^\uFEFF/, '');
-  const lines = raw.split(/\r?\n/);
-  let inFence = false;
+  const raw = String(text);
+  const lines = raw.replace(/^\uFEFF/, '').split(/\r?\n/);
+  let fence = null;
+  let inComment = false;
+  let inPre = false;
+  let unclosedFence = false;
   const topPass = [];
   const topOther = [];
   const hidden = [];
+  const failConj = [];
+  const cf = /\p{Cf}/u.test(raw);
+  const divHidden = /<div\s+hidden/i.test(raw);
+  const linkRef = /\[\/\/\]:\s*#/.test(raw);
+
+  const applyHtml = (vis, startComment, startPre) => {
+    let inC = startComment, inP = startPre;
+    const hid = new Uint8Array(vis.length);
+    let i = 0;
+    const mark = (from, to) => { for (let k = from; k < to; k++) hid[k] = 1; };
+    while (i < vis.length) {
+      if (inC) {
+        const end = vis.indexOf('-->', i);
+        if (end === -1) { mark(i, vis.length); return { inComment: true, inPre: inP, hid }; }
+        mark(i, end + 3); i = end + 3; inC = false; continue;
+      }
+      if (inP) {
+        const low = vis.toLowerCase();
+        const end = low.indexOf('</pre>', i);
+        if (end === -1) { mark(i, vis.length); return { inComment: inC, inPre: true, hid }; }
+        mark(i, end + 6); i = end + 6; inP = false; continue;
+      }
+      const cmt = vis.indexOf('<!--', i);
+      const pre = vis.toLowerCase().indexOf('<pre', i);
+      let next = -1, kind = null;
+      if (cmt !== -1 && (pre === -1 || cmt < pre)) { next = cmt; kind = 'c'; }
+      else if (pre !== -1) { next = pre; kind = 'p'; }
+      if (next === -1) break;
+      if (kind === 'c') { inC = true; i = next; continue; }
+      inP = true; i = next; continue;
+    }
+    return { inComment: inC, inPre: inP, hid };
+  };
+
   for (const line of lines) {
     const vis = line.replace(/^\uFEFF/, '');
-    if (/^\s{0,3}```/.test(vis)) {
-      inFence = !inFence;
-      // A fence marker is not a verdict directive (the body is classified while inFence).
-      continue;
+    const fenceTry = /^(?:\s{0,3})(`{3,}|~{3,})(.*)$/.exec(vis);
+    let isFenceMarker = false;
+    if (!inComment && !inPre && fenceTry) {
+      const marker = fenceTry[1];
+      const rest = fenceTry[2];
+      if (!fence) {
+        fence = { ch: marker[0], len: marker.length };
+        isFenceMarker = true;
+      } else if (marker[0] === fence.ch && marker.length >= fence.len && /^\s*$/.test(rest)) {
+        fence = null;
+        isFenceMarker = true;
+      }
     }
-    const inIndented = /^(?:    |\t)/.test(vis);
-    const inQuote = /^\s{0,3}>/.test(vis);
-    const isHidden = inFence || inIndented || inQuote;
-    // A verdict *directive* is a line whose first token (after indent / blockquote) is `verdict:`.
-    // Prose such as the official title `# G4 dependency verdict: …` is not a directive and must stay green.
+    const html = applyHtml(vis, inComment, inPre);
+    inComment = html.inComment;
+    inPre = html.inPre;
+    const htmlHidden = html.hid.length > 0 && html.hid.every((x) => x === 1);
+    const htmlPartial = html.hid.length > 0 && html.hid.some((x) => x === 1);
+    const inIndented = !fence && !isFenceMarker && /^(?:    |\t)/.test(vis);
+    const inQuote = !fence && !isFenceMarker && /^\s{0,3}>/.test(vis);
+    const lineHidden = !!(fence || isFenceMarker || inIndented || inQuote || htmlHidden || (inComment || inPre || htmlPartial) && htmlPartial);
+
     const stripped = vis.replace(/^(?:    |\t)+/, '').replace(/^\s{0,3}>\s?/, '');
-    if (!/^\s*verdict\s*:/i.test(stripped)) continue;
-    if (!isHidden && /^VERDICT:\s+PASS\s*$/.test(stripped)) topPass.push(line);
-    else if (!isHidden) topOther.push(line);
-    else hidden.push(line);
+    const isDirective = /^\s*verdict\s*:/i.test(stripped);
+    if (!lineHidden && /\bFAIL\b/i.test(vis) && /verdict|result|status/i.test(vis)) failConj.push(line);
+    if (isDirective) {
+      if (!lineHidden && /^VERDICT:\s+PASS\s*$/.test(stripped)) topPass.push(line);
+      else if (!lineHidden) topOther.push(line);
+      else hidden.push(line);
+    }
   }
-  return { topPass, topOther, hidden };
+  if (fence) unclosedFence = true;
+  return { topPass, topOther, hidden, failConj, unclosedFence, cf, divHidden, linkRef };
 }
 
 export function parseG4File(text, path = 'g4.md') {
@@ -106,20 +159,32 @@ export function parseG4File(text, path = 'g4.md') {
   if (!pkgSha) issues.push(`${path}:1: b8-g4 G4 file does not name a package.json sha256`);
   if (!lockSha) issues.push(`${path}:1: b8-g4 G4 file does not name a package-lock.json sha256`);
   if (!prov) issues.push(`${path}:1: b8-g4 G4 file does not record provenance present/absent (condition c)`);
-  const { topPass, topOther, hidden } = parseG4Verdicts(text);
+  const { topPass, topOther, hidden, failConj, unclosedFence, cf, divHidden, linkRef } = parseG4Verdicts(text);
+  if (cf) issues.push(`${path}:1: b8-g4 G4 file contains a Unicode Cf character`);
+  if (divHidden) issues.push(`${path}:1: b8-g4 G4 file contains a hidden <div hidden`);
+  if (linkRef) issues.push(`${path}:1: b8-g4 G4 file contains a link-reference comment`);
+  if (unclosedFence) issues.push(`${path}:1: b8-g4 G4 file has an unclosed code fence`);
+  const loneFailVerdict = topPass.length === 0 && topOther.length === 1 && hidden.length === 0
+    && failConj.length >= 1 && /^VERDICT:\s+FAIL\s*$/i.test(topOther[0].trim());
+  if (failConj.length && !loneFailVerdict) {
+    issues.push(`${path}:1: b8-g4 G4 file has a contradicting FAIL/result/status line`);
+  }
   const other = [...topOther, ...hidden];
   let pass = false;
   let verdict = null;
-  if (topPass.length === 1 && other.length === 0) {
+  const clean = !cf && !divHidden && !linkRef && !unclosedFence && (failConj.length === 0 || loneFailVerdict);
+  if (topPass.length === 1 && other.length === 0 && !cf && !divHidden && !linkRef && !unclosedFence && failConj.length === 0) {
     pass = true;
     verdict = 'VERDICT: PASS';
-  } else if (topPass.length === 0 && other.length === 0) {
+  } else if (topPass.length === 0 && other.length === 0 && failConj.length === 0 && !unclosedFence && !cf && !divHidden && !linkRef) {
     issues.push(`${path}:1: b8-g4 G4 file is missing a VERDICT line`);
-  } else if (topPass.length === 0 && topOther.length === 1 && hidden.length === 0) {
+  } else if (topPass.length === 0 && topOther.length === 1 && hidden.length === 0 && !unclosedFence && !cf && !divHidden && !linkRef && (failConj.length === 0 || loneFailVerdict)) {
     issues.push(`${path}:1: b8-g4 G4 file VERDICT is not PASS (${topOther[0].trim()})`);
     verdict = topOther[0].trim();
-  } else {
-    issues.push(`${path}:1: b8-g4 G4 file verdict is not a single top-level VERDICT: PASS`);
+  } else if (!(topPass.length === 1 && other.length === 0 && !cf && !divHidden && !linkRef && !unclosedFence && failConj.length === 0)) {
+    if (!issues.some((x) => /Unicode Cf|hidden <div|link-reference|unclosed code fence|contradicting FAIL/.test(x))) {
+      issues.push(`${path}:1: b8-g4 G4 file verdict is not a single top-level VERDICT: PASS`);
+    }
   }
   return {
     path,
@@ -327,19 +392,23 @@ export function scanLockfile(root, rootPkg) {
   return hits;
 }
 
+export function checkG4PinsFileSha(root, hits = [], { force = false } = {}) {
+  if (!force && resolve(root) !== ENGINE_ROOT) return hits;
+  const pinsAbs = join(root, G4_PINS_REL);
+  if (!existsSync(pinsAbs)) {
+    hits.push(`${G4_PINS_REL}:1: b8-g4 G4-PINS.json is missing`);
+    return hits;
+  }
+  const psha = fileSha256(pinsAbs);
+  if (psha !== G4_PINS_JSON_SHA256) {
+    hits.push(`${G4_PINS_REL}:1: b8-g4 G4-PINS.json sha256 ${psha} does not match the pinned digest ${G4_PINS_JSON_SHA256}`);
+  }
+  return hits;
+}
+
 export function scanG4(root, rootPkg) {
   const hits = [];
-  if (resolve(root) === ENGINE_ROOT) {
-    const pinsAbs = join(root, G4_PINS_REL);
-    if (!existsSync(pinsAbs)) {
-      hits.push(`${G4_PINS_REL}:1: b8-g4 G4-PINS.json is missing`);
-    } else {
-      const psha = fileSha256(pinsAbs);
-      if (psha !== G4_PINS_JSON_SHA256) {
-        hits.push(`${G4_PINS_REL}:1: b8-g4 G4-PINS.json sha256 ${psha} does not match the pinned digest ${G4_PINS_JSON_SHA256}`);
-      }
-    }
-  }
+  checkG4PinsFileSha(root, hits);
   const pins = loadG4Pins(root);
   hits.push(...pins.issues);
   const g4s = loadG4Files(root);
@@ -583,7 +652,7 @@ export const BAD_FIXTURES = {
   },
   'verdict-fail-fenced-pass': {
     pkg: GOOD_PKG, lock: GOOD_LOCK,
-    reason: /not a single top-level VERDICT: PASS/,
+    reason: /not a single top-level VERDICT: PASS|contradicting FAIL/,
     g4Special: 'verdict-fail-fenced-pass',
   },
   'blockquoted-pass': {
@@ -595,6 +664,66 @@ export const BAD_FIXTURES = {
     pkg: GOOD_PKG, lock: GOOD_LOCK,
     reason: /not a single top-level VERDICT: PASS/,
     g4Special: 'indented-pass',
+  },
+  'tilde-fence-pass': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /not a single top-level VERDICT: PASS|unclosed code fence/,
+    g4Special: 'tilde-fence-pass',
+  },
+  'four-backtick-fence-pass': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /not a single top-level VERDICT: PASS/,
+    g4Special: 'four-backtick-fence-pass',
+  },
+  'html-comment-pass': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /not a single top-level VERDICT: PASS/,
+    g4Special: 'html-comment-pass',
+  },
+  'pre-pass': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /not a single top-level VERDICT: PASS/,
+    g4Special: 'pre-pass',
+  },
+  'unclosed-fence': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /unclosed code fence/,
+    g4Special: 'unclosed-fence',
+  },
+  'table-verdict-fail': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /contradicting FAIL\/result\/status line/,
+    g4Special: 'table-verdict-fail',
+  },
+  'bold-verdict-fail': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /contradicting FAIL\/result\/status line/,
+    g4Special: 'bold-verdict-fail',
+  },
+  'emdash-verdict-fail': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /contradicting FAIL\/result\/status line/,
+    g4Special: 'emdash-verdict-fail',
+  },
+  'result-fail': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /contradicting FAIL\/result\/status line/,
+    g4Special: 'result-fail',
+  },
+  'div-hidden': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /hidden <div hidden/,
+    g4Special: 'div-hidden',
+  },
+  'link-ref-comment': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /link-reference comment/,
+    g4Special: 'link-ref-comment',
+  },
+  'unicode-cf': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /Unicode Cf character/,
+    g4Special: 'unicode-cf',
   },
 };
 
@@ -664,6 +793,42 @@ export function writeSpecialG4(d, name, pkg, lock) {
   } else if (name === 'indented-pass') {
     writeFileSync(g4path, mdPass.replace('VERDICT: PASS', '    VERDICT: PASS'));
     writeG4PinsForTree(d);
+  } else if (name === 'tilde-fence-pass') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', '~~~\nVERDICT: PASS\n~~~'));
+    writeG4PinsForTree(d);
+  } else if (name === 'four-backtick-fence-pass') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', '````\n```\nVERDICT: PASS\n```\n````'));
+    writeG4PinsForTree(d);
+  } else if (name === 'html-comment-pass') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', '<!--\nVERDICT: PASS\n-->'));
+    writeG4PinsForTree(d);
+  } else if (name === 'pre-pass') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', '<pre>\nVERDICT: PASS\n</pre>'));
+    writeG4PinsForTree(d);
+  } else if (name === 'unclosed-fence') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', 'VERDICT: PASS\n```\nhidden'));
+    writeG4PinsForTree(d);
+  } else if (name === 'table-verdict-fail') {
+    writeFileSync(g4path, mdPass + '\n| VERDICT | FAIL |\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'bold-verdict-fail') {
+    writeFileSync(g4path, mdPass + '\n**VERDICT:** FAIL\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'emdash-verdict-fail') {
+    writeFileSync(g4path, mdPass + '\nVerdict \u2014 FAIL\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'result-fail') {
+    writeFileSync(g4path, mdPass + '\nResult: FAIL\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'div-hidden') {
+    writeFileSync(g4path, mdPass + '\n<div hidden>VERDICT: FAIL</div>\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'link-ref-comment') {
+    writeFileSync(g4path, mdPass + '\n[//]: # (VERDICT: FAIL)\n');
+    writeG4PinsForTree(d);
+  } else if (name === 'unicode-cf') {
+    writeFileSync(g4path, mdPass + '\nVER' + '\u200B' + 'DICT: FAIL\n');
+    writeG4PinsForTree(d);
   } else {
     writeFileSync(g4path, mdPass);
     writeG4PinsForTree(d);
@@ -678,6 +843,13 @@ export function selfTest() {
     writeCoveringG4(ctl, GOOD_PKG, GOOD_LOCK);
     const ch = scanRoot(ctl);
     if (ch.length) fails.push(`control not green:\n${ch.join('\n')}`);
+    const pinsNeedle = 'if (psha !== G4_PINS_JSON_SHA256)';
+    const toolSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    if (!toolSrc.includes(pinsNeedle)) fails.push('G-44a: pins-sha comparison needle missing from scanG4/checkG4PinsFileSha');
+    const pinsHits = checkG4PinsFileSha(ctl, [], { force: true });
+    if (!pinsHits.some((h) => /does not match the pinned digest/.test(h))) {
+      fails.push(`G-44a: pins-sha check must red a non-official G4-PINS.json (kills the pins-sha-check-disabled mutant):\n${pinsHits.join('\n')}`);
+    }
     const controlG4 = readFileSync(join(ctl, G4_DIR, 'g4-typescript-5.9.3.md'), 'utf8');
     for (const [name, fix] of Object.entries(BAD_FIXTURES)) {
       const d = join(base, name);
