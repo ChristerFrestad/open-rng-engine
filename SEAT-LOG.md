@@ -49,3 +49,13 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Tests: `node --test test/claims-lint.test.mjs` 133 pass / 0 fail; `--self-test` known-bad red + 127/127 near-miss; scratch removed.
 
 | 2026-11-18 08:04:15 CET | CTO via executor | G1 C-10 (CPO-R97): claims-lint byte-exact allow-list, align/FIPS unconditional, near-miss tests | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## C-11 R-93 replay invariant checker (CPO-R98; DECISIONS L77)
+
+- blockPlan check before coding: PLAN L164 (R-56: MAX_DATA 65,520, fetch data+16 while remaining > 0) gives Σ widths = n + 16·⌈n/65520⌉ for n ≥ 1, identical to the CPO-R98 formula and cto-g1-spec.md L268. PLAN L605 pins n ≥ 1; n = 0 is RANGE_INVALID (R1 fail in replay). No discrepancy.
+- src/entropy/blockPlan.ts (pure, SHARED-shaped) and src/verify/replayRandomBytes.ts (verification build only): R1 schema (§5.2 minus the hex pattern), R2 2n hex chars, R3 lowercase even-length hex, R4 reads.length + widths vs blockPlan(n), R5 count===width, R6 Σcount===bytesFetched, R7 bytesFetched===n+16·⌈n/65520⌉. First failure in spec order plus all failing invariants (R7 is implied by R4+R5+R6, so it is reported with R6).
+- .ts sources run under Node 24 type stripping; no tsc on the box (not installed, no network installs), so the strict type-check is pending. tsconfig gains allowImportingTsExtensions + rewriteRelativeImportExtensions (TS ≥ 5.7) and erasableSyntaxOnly (TS ≥ 5.8).
+- Corrects eb3d52a: its `npm test` script `node --test test/` does not run on Node 24; now `node --test "test/**/*.test.mjs"`.
+- Tests: `npm test` 183 pass / 0 fail (claims-lint 133, replay 50).
+
+| 2026-11-18 08:06:11 CET | CTO via executor | G1 C-11 (CPO-R98): R-93 randomBytes replay invariant checker (pure) + blockPlan(n), negative tests; fix npm test glob | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
