@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, strip, entropyTriggers, READ_NAME_ALLOW, BAD_REASON, SELF_TEST_EXTRA_CASES, GLOBALTHIS_MEMBERS_ALLOWED, PROCESS_MEMBERS_ALLOWED } from '../tools/ci/import-allowlist.mjs';
+import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, BAD_EXTRA, GUARD_OK, selfTest, strip, entropyTriggers, READ_NAME_ALLOW, BAD_REASON, SELF_TEST_EXTRA_CASES, GLOBALTHIS_MEMBERS_ALLOWED, PROCESS_MEMBERS_ALLOWED, COMPUTED_LITERAL_KEYS_ALLOWED, REFLECTIVE_BASES } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const EXPECT = {
@@ -31,7 +31,7 @@ for (const [name, src] of Object.entries(BAD)) {
     const d = mkdtempSync(join(tmpdir(), 'r27-'));
     try {
       const file = BAD_PATH[name] ?? 'src/mapping/bad.ts';
-      writeFixture(d, { [file]: src });
+      writeFixture(d, { [file]: src, ...(BAD_EXTRA[name] ?? {}) });
       const hits = scanTree(d).hits;
       if (BAD_REASON[name]) assert.ok(hits.some((h) => BAD_REASON[name].test(h)), hits.join('\n'));
       else assert.ok(hits.some((h) => h.startsWith(file) && h.includes(`rule27-${EXPECT[name]} `)), hits.join('\n'));
@@ -176,9 +176,9 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 80 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-20, G-21..G-25) plus 4 extra cases', () => {
-  assert.equal(Object.keys(BAD).length, 80);
-  for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path', 'unicode-ident-globalThis', 'unicode-key-constructor', 'import-node-vm-default', 'import-node-vm-named', 'import-node-inspector', 'import-node-worker_threads', 'import-node-child_process', 'dynamic-import-node-vm', 'export-from-node-vm', 'require-node-vm', 'import-bare-fs', 'constructor-element', 'reflect-construct', 'object-getPrototypeOf', 'reflect-getPrototypeOf', 'proto-member']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
+test('HoQ: --self-test carries 137 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-25, G-26/G-27, M-158..161) plus 4 extra cases', () => {
+  assert.equal(Object.keys(BAD).length, 137);
+  for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path', 'unicode-ident-globalThis', 'unicode-key-constructor', 'import-node-vm-default', 'import-node-vm-named', 'import-node-inspector', 'import-node-worker_threads', 'import-node-child_process', 'dynamic-import-node-vm', 'export-from-node-vm', 'require-node-vm', 'import-bare-fs', 'constructor-element', 'reflect-construct', 'object-getPrototypeOf', 'reflect-getPrototypeOf', 'proto-member', 'm158-concat-reflect-constructor', 'm158-template-key', 'm158-concat-crypto', 'extensionless-relative', 'parse-error', 'import-type-non-relative', 'm161-literal-typed-var', 'm161-string-typed', 'm161-concatenation-defineProperty', 'm161-fromCharCode-__proto__', 'm161-array-join-getPrototypeOf']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control']);
   for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
@@ -186,7 +186,7 @@ test('HoQ: --self-test carries 80 known-bad fixtures (allow-list, G-12/13/15/16,
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /80 known-bad fixtures red, good fixture green, 4 extra cases ok/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /137 known-bad fixtures red, good fixture green, 4 extra cases ok/);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -256,13 +256,11 @@ test('HoQ 06cb884b mutants: new checker kills each; old-checker verdict recorded
   const { pathToFileURL } = await import('node:url');
   const dir = mkdtempSync(join(tmpdir(), 'r27-old-'));
   try {
-    const src = execFileSync('git', ['show', `${OLD_RULE27_SHA}:tools/ci/import-allowlist.mjs`], { cwd: ROOT, encoding: 'utf8' });
-    const p = join(dir, 'import-allowlist.mjs'); writeFileSync(p, src);
-    const old = await import(pathToFileURL(p).href);
+    const old = await import(new URL('./fixtures/rule27-old-checker.mjs', import.meta.url));
     const rows = [];
     for (const m of MUTANTS) {
       const file = BAD_PATH[m.name] ?? 'src/mapping/bad.ts';
-      const d = join(dir, m.name); writeFixture(d, { [file]: BAD[m.name] });
+      const d = join(dir, m.name); writeFixture(d, { [file]: BAD[m.name], ...(BAD_EXTRA[m.name] ?? {}) });
       const oldHits = old.scanTree(d).hits;
       const newHits = scanTree(d).hits;
       const oldRed = oldHits.length > 0;
@@ -275,4 +273,97 @@ test('HoQ 06cb884b mutants: new checker kills each; old-checker verdict recorded
     const meaningful = rows.filter((r) => r.old === 'GREEN');
     assert.ok(meaningful.length >= 12, `need surviving-old mutants as proof; got ${JSON.stringify(rows, null, 2)}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('NIT: object-literal keys such as { binding: 1 } are green', () => {
+  assert.deepEqual(scanFile('src/mapping/x.ts', 'const o = { binding: 1 };\n').hits, []);
+});
+
+test('G-26: source-literal and number-typed keys are green; non-literal and string-typed keys are red', () => {
+  assert.equal(scanFile('src/mapping/x.ts', "const o: Record<string, unknown> = {};\no['kind'];\n").hits.filter((h) => /computed-access/.test(h)).length, 0);
+  assert.equal(scanFile('src/mapping/x.ts', 'const i: number = 0;\nconst a: string[] = [];\na[i];\n').hits.filter((h) => /computed-access/.test(h)).length, 0);
+  assert.ok(scanFile('src/mapping/x.ts', "const s: string = 'x';\no[s];\n").hits.some((h) => /computed-access/.test(h)));
+  assert.ok(scanFile('src/mapping/x.ts', "const k = 'foo' as const;\no[k];\n").hits.some((h) => /computed-access/.test(h)));
+});
+
+test('G-26: production computed-literal allow-list is empty; test injection greens only listed literals', () => {
+  assert.deepEqual([...COMPUTED_LITERAL_KEYS_ALLOWED], []);
+  const src = "const k = 'm161-ok' as const;\no[k];\n";
+  withTmp((d) => {
+    writeFixture(d, { 'src/mapping/x.ts': src });
+    assert.ok(scanTree(d).hits.some((h) => /computed-access/.test(h)));
+    assert.equal(scanTree(d, { computedLiteralAllow: ['m161-ok'] }).hits.filter((h) => /computed-access/.test(h)).length, 0);
+  });
+});
+
+test('G-27: relative specifier must have an explicit allowed extension and resolve to a parsed file', () => {
+  withTmp((d) => {
+    writeFixture(d, { 'src/health/a.ts': "// @ts-ignore\nimport { k } from './ev';\n", 'src/health/ev': 'export const k = 1;\n' });
+    const hits = scanTree(d).hits;
+    assert.ok(hits.some((h) => /rule27-relative-specifier /.test(h)), hits.join('\n'));
+  });
+});
+
+test('M-160: a parse error is red; treating parse errors as green is killed', () => {
+  const hits = scanFile('src/mapping/bad.ts', 'const x: = ;\n').hits;
+  assert.ok(hits.some((h) => /rule27-parse /.test(h)), hits.join('\n'));
+});
+
+test('NIT: import type is red unless the specifier is a relative core path', () => {
+  assert.ok(scanFile('src/mapping/x.ts', "import type { X } from 'fs';\n").hits.some((h) => /specifier-not-allowed/.test(h)));
+  assert.equal(scanFile('src/health/a.ts', "import type { k } from './cht.ts';\n").hits.filter((h) => /specifier-not-allowed|relative-specifier/.test(h)).length, 0);
+});
+
+const PREV_RULE27_SHA = '41d5ca7a55d97b0ee3e5a3b1a54eb50e50618e0c';
+const NEW_MUTANTS = [
+  { id: 'M-158', name: 'm158-concat-reflect-constructor' },
+  { id: 'M-158', name: 'm158-reflect-get-constructor-literal' },
+  { id: 'M-158', name: 'm158-template-key' },
+  { id: 'M-158', name: 'm158-concat-crypto' },
+  { id: 'M-159', name: 'extensionless-relative' },
+  { id: 'M-160', name: 'parse-error' },
+  { id: 'M-161', name: 'm161-literal-typed-var' },
+  { id: 'M-161', name: 'm161-string-typed' },
+  { id: 'M-161', name: 'm161-concatenation-Reflect' },
+  { id: 'M-161', name: 'm161-concatenation-getOwnPropertyDescriptor' },
+  { id: 'M-161', name: 'm161-concatenation-defineProperty' },
+  { id: 'M-161', name: 'm161-concatenation-getPrototypeOf' },
+  { id: 'M-161', name: 'm161-concatenation-constructor' },
+  { id: 'M-161', name: 'm161-concatenation-__proto__' },
+  { id: 'M-161', name: 'm161-template-sub-Reflect' },
+  { id: 'M-161', name: 'm161-variable-defineProperty' },
+  { id: 'M-161', name: 'm161-function-return-constructor' },
+  { id: 'M-161', name: 'm161-fromCharCode-__proto__' },
+  { id: 'M-161', name: 'm161-atob-getOwnPropertyDescriptor' },
+  { id: 'M-161', name: 'm161-buffer-toString-defineProperty' },
+  { id: 'M-161', name: 'm161-array-join-getPrototypeOf' },
+];
+
+test('HoQ 41d5ca7a mutants: new checker kills each; mid-checker (41d5ca7a) verdict recorded', async () => {
+  const mid = await import(new URL('./fixtures/rule27-checker-41d5ca7a.mjs', import.meta.url));
+  const old06 = await import(new URL('./fixtures/rule27-old-checker.mjs', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'r27-mid-'));
+  const rows = [];
+  try {
+    for (const m of NEW_MUTANTS) {
+      assert.ok(BAD[m.name], `missing BAD fixture ${m.name}`);
+      const file = BAD_PATH[m.name] ?? 'src/mapping/bad.ts';
+      const d = join(dir, m.name); writeFixture(d, { [file]: BAD[m.name], ...(BAD_EXTRA[m.name] ?? {}) });
+      const newHits = scanTree(d).hits;
+      const midHits = mid.scanTree(d).hits;
+      const oldHits = old06.scanTree(d).hits;
+      const row = { id: m.id, name: m.name, mid41: midHits.length ? 'RED' : 'GREEN', old06: oldHits.length ? 'RED' : 'GREEN', neu: newHits.length ? 'RED' : 'GREEN' };
+      rows.push({ ...row, newHits: newHits.join(' | '), midHits: midHits.join(' | ') });
+      assert.equal(row.neu, 'RED', `${m.id} ${m.name} must be red on the new checker:\n${newHits.join('\n')}`);
+      if (BAD_REASON[m.name]) assert.ok(newHits.some((h) => BAD_REASON[m.name].test(h)), `${m.id} ${m.name} wrong reason:\n${newHits.join('\n')}`);
+    }
+    // Record the table on stdout for the commit report (assert at least the parse-error mid verdict is a boolean we observed).
+    console.log('RULE27_MID_VERDICTS', JSON.stringify(rows.map((r) => ({ id: r.id, name: r.name, mid41: r.mid41, old06: r.old06, new: r.neu })), null, 2));
+    assert.ok(rows.every((r) => r.neu === 'RED'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('M-162 package.json test script installs the entropy backstop via --import', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.match(pkg.scripts.test, /--import\s+\.\/tools\/ci\/entropy-backstop\.mjs/);
 });

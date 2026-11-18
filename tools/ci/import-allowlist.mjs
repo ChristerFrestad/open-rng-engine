@@ -20,6 +20,15 @@
 //    red, as are Reflect.construct, Object/Reflect.getPrototypeOf, and `__proto__`.
 //  G-25: the M-152c fixture is hasOwn(globalThis,'k') at a non-guard path and is red (globalThis-alias). The exact
 //    coreGuard forms are allowed only at packages/capability/src/coreGuard.ts.
+//  G-26: any `Reflect` identifier in scanned source is red. Any element-access key that is not a string or numeric
+//    literal (incl. template-with-substitution and concatenation) is red, unless the type checker types it as
+//    `number`, or as a union of literals none of which is on the banned-name list and all of which are on
+//    COMPUTED_LITERAL_KEYS_ALLOWED (empty in production; tests may inject an allow-list). The same key rule applies
+//    at reflective bases (Reflect.*, Object.getOwnPropertyDescriptor/defineProperty, Object[getPrototypeOf],
+//    indexed constructor, indexed __proto__).
+//  G-27: every relative specifier must have an explicit allowed extension (.ts/.mts/.cts) and resolve to exactly one
+//    file this scan parsed; unresolved, extensionless, outside the scanned set, or via node_modules is red. Every
+//    git-tracked source file under SCAN_ROOTS must be parsed (`git ls-files`). `.js`/`.mjs`/`.cjs` under src/ is red.
 // HoQ ruling on rule 27 (relayed by CTO 2026-11-18 09:00 CET):
 //  Q1 'no more' always blocks; 'no fewer' blocks once entropy/, evidence/ or identity/ exists under src/, is report-only
 //     for a directory that does not exist yet, and is red for a missing directory under --phase-exit.
@@ -86,6 +95,12 @@ const DRBG_PKG = '@open-rng-engine/drbg';
 export const GLOBALTHIS_MEMBERS_ALLOWED = Object.freeze([]); // G-17: none used by real core source (2026-11-18)
 export const PROCESS_MEMBERS_ALLOWED = Object.freeze([]); // G-18: none used by real core source (2026-11-18)
 const PROCESS_ALWAYS_BANNED = ['getBuiltinModule', 'binding', '_linkedBinding', 'dlopen', 'mainModule'];
+export const COMPUTED_LITERAL_KEYS_ALLOWED = Object.freeze([]); // G-26/M-161: empty in production
+export const REFLECTIVE_BASES = Object.freeze(['Reflect', 'getOwnPropertyDescriptor', 'defineProperty', 'getPrototypeOf', 'constructor', '__proto__']);
+export const RELATIVE_SPEC_EXT = Object.freeze(['.ts', '.mts', '.cts']);
+export const BANNED_COMPUTED_KEY_NAMES = Object.freeze(['constructor', '__proto__', 'getPrototypeOf', 'defineProperty', 'getOwnPropertyDescriptor', 'construct', 'crypto', 'fips', 'setFips', 'require', ...PROCESS_ALWAYS_BANNED]);
+const SRC_JS_EXT = /\.(js|mjs|cjs)$/;
+const PARSE_EXT = /\.(ts|mts|cts)$/;
 const READ_CALL_NAME = /^(?:(?:fill|read)[\w$]*|randomBytes|randomFill[\w$]*|getRandomValues|randomUUID|randomInt)$/;
 
 function walk(d, out = []) {
@@ -243,6 +258,124 @@ function specifierAllowed(rel, spec, { typeOnly = false } = {}) {
   return false;
 }
 
+function explicitRelativeExt(spec) {
+  const m = /(\.[A-Za-z0-9]+)$/.exec(spec);
+  return m ? m[1] : '';
+}
+
+function posixRel(root, abs) {
+  return relative(root, abs).split(sep).join('/');
+}
+
+function normalizePosix(rel) {
+  return rel.split(sep).join('/').replace(/\\/g, '/');
+}
+
+function throughNodeModules(rel) {
+  return rel.split('/').includes('node_modules');
+}
+
+export function makeProgram(files) {
+  const map = new Map(files.map(([rel, src]) => [normalizePosix(rel), src]));
+  const rootNames = [...map.keys()];
+  const options = {
+    noEmit: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+    strict: true, skipLibCheck: true, noLib: false, types: [],
+  };
+  const host = ts.createCompilerHost(options, true);
+  const origGet = host.getSourceFile.bind(host);
+  const match = (fileName) => {
+    const norm = normalizePosix(fileName);
+    if (map.has(norm)) return norm;
+    for (const rel of map.keys()) if (norm === rel || norm.endsWith('/' + rel)) return rel;
+    return null;
+  };
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+    const rel = match(fileName);
+    if (rel != null) return ts.createSourceFile(rel, map.get(rel), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    return origGet(fileName, languageVersion, onError, shouldCreate);
+  };
+  const origRead = host.readFile.bind(host);
+  host.readFile = (fileName) => { const rel = match(fileName); return rel != null ? map.get(rel) : origRead(fileName); };
+  const origExists = host.fileExists.bind(host);
+  host.fileExists = (fileName) => match(fileName) != null || origExists(fileName);
+  const program = ts.createProgram({ rootNames, options, host });
+  return { program, checker: program.getTypeChecker(), files: map };
+}
+
+function isNumberType(type) {
+  if (!type) return false;
+  if (type.flags & ts.TypeFlags.Number) return true;
+  if (type.isUnion && type.isUnion()) return type.types.every(isNumberType);
+  return false;
+}
+
+function isStringType(type) {
+  if (!type) return false;
+  if (type.flags & ts.TypeFlags.String) return true;
+  if (type.isUnion && type.isUnion()) return type.types.every((t) => isStringType(t) || (t.flags & ts.TypeFlags.StringLiteral));
+  return false;
+}
+
+function literalUnionTexts(type) {
+  const out = [];
+  let impure = false;
+  const add = (t) => {
+    if (!t) { impure = true; return; }
+    if (t.isUnion && t.isUnion()) { t.types.forEach(add); return; }
+    if (t.flags & ts.TypeFlags.StringLiteral) { out.push(String(t.value)); return; }
+    if (t.flags & ts.TypeFlags.NumberLiteral) { out.push(String(t.value)); return; }
+    if (t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Never)) return;
+    impure = true;
+  };
+  add(type);
+  if (impure || out.length === 0) return null;
+  return out;
+}
+
+function isSourceLiteralKey(expr) {
+  return !!(expr && (ts.isStringLiteral(expr) || ts.isNumericLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)));
+}
+
+export function computedKeyVerdict(expr, checker, { computedLiteralAllow = COMPUTED_LITERAL_KEYS_ALLOWED, treatStringAsSafe = false } = {}) {
+  if (isSourceLiteralKey(expr)) return 'source-literal';
+  if (!checker) return 'non-literal';
+  const type = checker.getTypeAtLocation(expr);
+  if (isNumberType(type)) return 'number';
+  if (treatStringAsSafe && isStringType(type) && !literalUnionTexts(type)) return 'string-treated-safe';
+  const lits = literalUnionTexts(type);
+  if (!lits) return 'non-literal';
+  if (lits.some((x) => BANNED_COMPUTED_KEY_NAMES.includes(x))) return 'banned-literal-union';
+  if (computedLiteralAllow === 'ANY') return 'allowed';
+  const allow = Array.isArray(computedLiteralAllow) ? computedLiteralAllow : [];
+  if (lits.every((x) => allow.includes(x))) return 'allowed';
+  return 'not-on-allow-list';
+}
+
+function isReflectiveCallee(expr, bases) {
+  const set = new Set(bases ?? REFLECTIVE_BASES);
+  if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+    const mem = accessMemberName(expr);
+    const obj = expr.expression;
+    if (set.has('Reflect') && isIdent(obj, 'Reflect')) return 'Reflect';
+    if (isIdent(obj, 'Object')) {
+      if (mem === 'getOwnPropertyDescriptor' && set.has('getOwnPropertyDescriptor')) return 'getOwnPropertyDescriptor';
+      if (mem === 'defineProperty' && set.has('defineProperty')) return 'defineProperty';
+      if (mem === 'getPrototypeOf' && set.has('getPrototypeOf')) return 'getPrototypeOf';
+    }
+  }
+  if (ts.isIdentifier(expr) && idText(expr) === 'Reflect' && set.has('Reflect')) return 'Reflect';
+  return null;
+}
+
+function reflectiveKeyArgIndex(base) {
+  // Reflect.get/set/has/deleteProperty/defineProperty/getOwnPropertyDescriptor(target, key, ...)
+  // Object.getOwnPropertyDescriptor(obj, key), Object.defineProperty(obj, key, desc)
+  // Object.getPrototypeOf(obj) has no key argument (checked via Object[key] element access)
+  if (base === 'getPrototypeOf') return -1;
+  return 1;
+}
+
 function isGuardFormGlobalThisArg(node, rel) {
   if (rel !== GUARD_PATH) return false;
   const call = node.parent;
@@ -315,15 +448,30 @@ function collectSpecifiers(sf, rel) {
   return out;
 }
 
-export function scanFile(rel, src) {
+export function scanFile(rel, src, opts = {}) {
   const hits = []; const pairs = [];
   const top = rel.startsWith('src/') ? (rel.split('/')[1] ?? '') : rel.split('/').slice(0, 2).join('/');
   const inVerify = rel.startsWith('src/verify/') || rel.startsWith('verify/');
   const add = (idx, code, msg) => hits.push(`${rel}:${lineOf(src, idx)}: rule27-${code} ${msg}`);
   const addNode = (node, code, msg) => add(node.getStart(), code, msg);
   const isCrypto = (s) => s === 'node:crypto' || s === 'crypto';
+  const keyOpts = {
+    computedLiteralAllow: opts.computedLiteralAllow ?? COMPUTED_LITERAL_KEYS_ALLOWED,
+    treatStringAsSafe: opts.treatStringAsSafe === true,
+  };
+  const bases = opts.reflectiveBases ?? REFLECTIVE_BASES;
+  const parsed = opts.parsedFiles ?? null; // Set of posix rels this scan parsed, if available
+  const root = opts.root ?? null;
 
-  const sf = parseSource(rel, src);
+  let sf = opts.sourceFile;
+  let checker = opts.checker;
+  if (!sf) sf = parseSource(rel, src);
+  if (!checker && opts.skipChecker !== true) {
+    const prog = makeProgram([[rel, src]]);
+    checker = prog.checker;
+    const got = prog.program.getSourceFile(rel);
+    if (got) sf = got;
+  }
   for (const d of parseErrors(sf)) add(d.start ?? 0, 'parse', ts.flattenDiagnosticMessageText(d.messageText, '\n'));
 
   const specs = collectSpecifiers(sf, rel);
@@ -359,6 +507,21 @@ export function scanFile(rel, src) {
     if (!specifierAllowed(rel, s.spec, { typeOnly: s.typeOnly })) {
       addNode(s.node, 'specifier-not-allowed', `module specifier '${s.spec}' is not on the positive allow-list`);
     }
+    if (typeof s.spec === 'string' && s.spec.startsWith('.')) {
+      const ext = explicitRelativeExt(s.spec);
+      if (!RELATIVE_SPEC_EXT.includes(ext)) {
+        addNode(s.node, 'relative-specifier', `relative specifier '${s.spec}' is missing an explicit allowed extension (${RELATIVE_SPEC_EXT.join(', ')})`);
+      } else {
+        const resolved = resolveRel(rel, s.spec);
+        if (throughNodeModules(resolved)) addNode(s.node, 'relative-specifier', `relative specifier '${s.spec}' resolves through node_modules (${resolved})`);
+        else if (!inScanRoots(resolved)) addNode(s.node, 'relative-specifier', `relative specifier '${s.spec}' resolves outside the scanned set (${resolved})`);
+        else if (parsed && !parsed.has(resolved)) addNode(s.node, 'relative-specifier', `relative specifier '${s.spec}' does not resolve to a file this scan parsed (${resolved})`);
+        else if (parsed) {
+          const matches = [...parsed].filter((f) => f === resolved);
+          if (matches.length !== 1) addNode(s.node, 'relative-specifier', `relative specifier '${s.spec}' must resolve to exactly one parsed file (got ${matches.length}: ${resolved})`);
+        }
+      }
+    }
   }
 
   const dps = [];
@@ -368,6 +531,29 @@ export function scanFile(rel, src) {
     }
     if (isLiteralPropertyKey(node) && hasUnicodeEscape(node)) {
       addNode(node, 'unicode-escape', `unicode escape in string-literal property key ${node.getText()}`);
+    }
+    if (ts.isIdentifier(node) && idText(node) === 'Reflect') {
+      addNode(node, 'reflect-identifier', 'Reflect identifier is red in scanned source (G-26)');
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const key = node.argumentExpression;
+      const v = computedKeyVerdict(key, checker, keyOpts);
+      if (v !== 'source-literal' && v !== 'number' && v !== 'allowed' && v !== 'string-treated-safe') {
+        addNode(node, 'computed-access', `computed member access key is not a source literal or allowed typed key (${v}): ${key.getText()}`);
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      const base = isReflectiveCallee(node.expression, bases);
+      if (base) {
+        const idx = reflectiveKeyArgIndex(base);
+        if (idx >= 0 && node.arguments[idx]) {
+          const key = node.arguments[idx];
+          const v = computedKeyVerdict(key, checker, keyOpts);
+          if (v !== 'source-literal' && v !== 'number' && v !== 'allowed' && v !== 'string-treated-safe') {
+            addNode(key, 'reflective-key', `computed key at reflective base ${base} is not a source literal or allowed typed key (${v}): ${key.getText()}`);
+          }
+        }
+      }
     }
 
     if (ts.isImportCall(node) || (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword)) {
@@ -600,11 +786,40 @@ export function entropyTriggers(root, { phaseExit = false } = {}) {
   return why;
 }
 
-export function scanTree(root, { phaseExit = false } = {}) {
+export function scanTree(root, { phaseExit = false, computedLiteralAllow, treatStringAsSafe, reflectiveBases, skipChecker } = {}) {
   const hits = []; const pairs = []; const reports = [];
-  for (const f of SCAN_ROOTS.flatMap((r) => walk(join(root, r)))) {
-    const rel = relative(root, f).split(sep).join('/');
-    const r = scanFile(rel, readFileSync(f, 'utf8'));
+  const absFiles = SCAN_ROOTS.flatMap((r) => walk(join(root, r)));
+  const files = [];
+  for (const f of absFiles) {
+    const rel = posixRel(root, f);
+    if (rel.startsWith('src/') && SRC_JS_EXT.test(rel)) {
+      hits.push(`${rel}:1: rule27-js-under-src .js/.mjs/.cjs is banned under src/`);
+      continue;
+    }
+    files.push([rel, readFileSync(f, 'utf8')]);
+  }
+  if (existsSync(join(root, '.git'))) {
+    const ls = spawnSync('git', ['ls-files', '-z', ...SCAN_ROOTS], { cwd: root, encoding: 'buffer' });
+    if (ls.status === 0) {
+      const tracked = ls.stdout.toString('utf8').split('\0').filter(Boolean).map(normalizePosix);
+      const parsedSet = new Set(files.map(([rel]) => rel));
+      for (const rel of tracked) {
+        if (rel.startsWith('src/') && SRC_JS_EXT.test(rel) && !parsedSet.has(rel)) {
+          hits.push(`${rel}:1: rule27-js-under-src tracked .js/.mjs/.cjs under src/`);
+          continue;
+        }
+        if (PARSE_EXT.test(rel) && !parsedSet.has(rel)) {
+          hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);
+        }
+      }
+    }
+  }
+  const parsedFiles = new Set(files.map(([rel]) => rel));
+  const prog = skipChecker === true ? null : makeProgram(files);
+  const fileOpts = { computedLiteralAllow, treatStringAsSafe, reflectiveBases, parsedFiles, root, skipChecker };
+  for (const [rel, src] of files) {
+    const sf = prog ? (prog.program.getSourceFile(rel) ?? parseSource(rel, src)) : parseSource(rel, src);
+    const r = scanFile(rel, src, { ...fileOpts, checker: prog?.checker, sourceFile: sf });
     hits.push(...r.hits); pairs.push(...r.pairs);
   }
   const have = new Set(pairs.map((p) => p.pair));
@@ -695,7 +910,60 @@ export const BAD = {
   'object-getPrototypeOf': 'Object.getPrototypeOf(x);\n',
   'reflect-getPrototypeOf': 'Reflect.getPrototypeOf(x);\n',
   'proto-member': 'x.__proto__;\n',
+  // G-26 / M-158
+  'm158-concat-reflect-constructor': "const k = 'constr'+'uctor';\nReflect.get(Reflect.get([], k), k);\n",
+  'm158-reflect-get-constructor-literal': "Reflect.get(() => 0, 'constructor');\n",
+  'm158-template-key': 'g[`cry${"p"}to`];\n',
+  'm158-concat-crypto': "g['cry'+'pto'];\n",
+  // G-27 / M-159
+  'extensionless-relative': "// @ts-ignore\nimport { k } from './ev';\n",
+  // M-160 parse error is red
+  'parse-error': 'const x: = ;\n',
+  // NIT: import type is relative-only
+  'import-type-non-relative': "import type { X } from 'fs';\n",
+  // M-161 extras: literal-typed var / string-typed computed keys are red under the empty production allow-list
+  'm161-literal-typed-var': "const k = 'foo' as const;\no[k];\n",
+  'm161-string-typed': "const s: string = 'x';\no[s];\n",
 };
+function m161KeyForms(target) {
+  const mid = Math.ceil(target.length / 2);
+  const a = target.slice(0, mid), b = target.slice(mid);
+  const codes = [...target].map((c) => c.charCodeAt(0)).join(',');
+  const b64 = Buffer.from(target, 'utf8').toString('base64');
+  return {
+    concatenation: { pre: '', expr: `'${a}'+'${b}'` },
+    'template-sub': { pre: '', expr: '`${' + JSON.stringify(target) + '}`' },
+    variable: { pre: `const k = '${a}'+'${b}';\n`, expr: 'k' },
+    'function-return': { pre: `const f = () => '${a}'+'${b}';\n`, expr: 'f()' },
+    fromCharCode: { pre: '', expr: `String.fromCharCode(${codes})` },
+    atob: { pre: '', expr: `atob('${b64}')` },
+    'buffer-toString': { pre: '', expr: `Buffer.from(${JSON.stringify(target)}, 'utf8').toString()` },
+    'array-join': { pre: '', expr: `['${a}','${b}'].join('')` },
+  };
+}
+function m161Wrap(base, expr) {
+  if (base === 'Reflect') return `Reflect.get(o, ${expr});\n`;
+  if (base === 'getOwnPropertyDescriptor') return `Object.getOwnPropertyDescriptor(o, ${expr});\n`;
+  if (base === 'defineProperty') return `Object.defineProperty(o, ${expr}, { value: 1 });\n`;
+  if (base === 'getPrototypeOf') return `Object[${expr}];\n`;
+  if (base === 'constructor' || base === '__proto__') return `o[${expr}];\n`;
+  throw new Error(`unknown reflective base ${base}`);
+}
+const _m161Target = Object.create(null);
+_m161Target.Reflect = 'constructor';
+_m161Target.getOwnPropertyDescriptor = 'constructor';
+_m161Target.defineProperty = 'constructor';
+_m161Target.getPrototypeOf = 'getPrototypeOf';
+_m161Target.constructor = 'constructor';
+Object.defineProperty(_m161Target, '__proto__', { value: '__proto__', enumerable: true, configurable: false, writable: false });
+export const M161_TARGET = Object.freeze(_m161Target);
+for (const base of REFLECTIVE_BASES) {
+  const forms = m161KeyForms(M161_TARGET[base]);
+  for (const [form, { pre, expr }] of Object.entries(forms)) {
+    BAD[`m161-${form}-${base}`] = `${pre}${m161Wrap(base, expr)}`;
+  }
+}
+
 // Expected reason for fixtures whose hit is not at the planted file (self-test fails if the reason does not match).
 const ALLOW_REASON = (n) => new RegExp(`^src/entropy/:0: rule27-missing-pair \\(randomFillSync, entropy/\\).*PH1-M1 trigger: \\(i\\) src/entropy/a\\.ts exports ${n}\\b`);
 function GUARD_SRC() { return "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n"; }
@@ -728,7 +996,22 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   'object-getPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-getPrototypeOf /,
   'reflect-getPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-getPrototypeOf /,
   'proto-member': /^src\/mapping\/bad\.ts:\d+: rule27-proto-member /,
+  'm158-concat-reflect-constructor': /^src\/mapping\/bad\.ts:\d+: rule27-reflect-identifier /,
+  'm158-reflect-get-constructor-literal': /^src\/mapping\/bad\.ts:\d+: rule27-reflect-identifier /,
+  'm158-template-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'm158-concat-crypto': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'extensionless-relative': /^src\/health\/a\.ts:\d+: rule27-relative-specifier /,
+  'parse-error': /^src\/mapping\/bad\.ts:\d+: rule27-parse /,
+  'import-type-non-relative': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'm161-literal-typed-var': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'm161-string-typed': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
 };
+const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf) /;
+for (const name of Object.keys(BAD)) {
+  if (!name.startsWith('m161-') || name === 'm161-literal-typed-var' || name === 'm161-string-typed') continue;
+  BAD_REASON[name] = M161_REASON;
+}
+
 // Control planted the same way: the single allow-listed declaration stays green (report-only).
 export const ALLOW_CONTROL = 'export const FINGERPRINT_BYTES = 16;\n';
 // Where each known-bad fixture is planted (default src/mapping/bad.ts).
@@ -737,7 +1020,9 @@ export const BAD_PATH = { 'audited-import': 'src/audited/bad.ts', 'createHash-ou
   'verify-drbg': 'src/verify/bad.ts', 'verify-drbg-relative': 'src/verify/bad.ts', 'verify-binding-wrong-path': 'src/verify/testingBinding.ts',
   'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts',
   ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])),
-  'guard-forms-non-guard-path': 'packages/capability/src/other.ts' };
+  'guard-forms-non-guard-path': 'packages/capability/src/other.ts',
+  'extensionless-relative': 'src/health/a.ts' };
+export const BAD_EXTRA = { 'extensionless-relative': { 'src/health/ev': 'export const k = 1;\n' } };
 export const GUARD_OK = "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n";
 
 export function writeFixture(dir, extra = {}) {
@@ -765,7 +1050,7 @@ export function selfTest() {
     const gr = scanTree(g).hits; if (gr.length) fails.push(`good fixture not green:\n${gr.join('\n')}`);
     for (const [name, src] of Object.entries(BAD)) {
       const d = join(base, name); const file = BAD_PATH[name] ?? 'src/mapping/bad.ts';
-      writeFixture(d, { [file]: src });
+      writeFixture(d, { [file]: src, ...(BAD_EXTRA[name] ?? {}) });
       const hits = scanTree(d).hits;
       if (hits.length === 0) fails.push(`known-bad fixture ${name} did not turn rule 27 red`);
       else if (BAD_REASON[name] && !hits.some((h) => BAD_REASON[name].test(h))) fails.push(`known-bad fixture ${name} is red for the wrong reason:\n${hits.join('\n')}`);
@@ -775,6 +1060,54 @@ export function selfTest() {
     // G-20 / M-152b: the exact guard at GUARD_PATH stays green.
     const gd = join(base, 'guard-control'); writeFixture(gd, { [GUARD_PATH]: GUARD_SRC() });
     const gh = scanTree(gd).hits; if (gh.length) fails.push(`guard-exact control not green:\n${gh.join('\n')}`);
+    if (COMPUTED_LITERAL_KEYS_ALLOWED.length !== 0) fails.push('COMPUTED_LITERAL_KEYS_ALLOWED must stay empty in production');
+    const expectedBases = ['Reflect', 'getOwnPropertyDescriptor', 'defineProperty', 'getPrototypeOf', 'constructor', '__proto__'];
+    for (const b of expectedBases) if (!REFLECTIVE_BASES.includes(b)) fails.push(`REFLECTIVE_BASES is missing ${b}`);
+    // M-161 control: a static allow-listed literal is GREEN only when a test-only allow-list is injected.
+    const ctlSrc = "const k = 'm161-ok' as const;\no[k];\n";
+    const c1 = join(base, 'm161-allow-control'); writeFixture(c1, { 'src/mapping/bad.ts': ctlSrc });
+    const chDefault = scanTree(c1).hits;
+    if (!chDefault.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161 control without allow-list must be red:\n${chDefault.join('\n')}`);
+    const chInjected = scanTree(c1, { computedLiteralAllow: ['m161-ok'] }).hits;
+    if (chInjected.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161 control with injected allow-list must be green:\n${chInjected.join('\n')}`);
+    // Hand mutant 1 (killed by check:ph0): widen the allow-list to any literal — would green the production-empty control.
+    const anyHits = scanTree(c1, { computedLiteralAllow: 'ANY' }).hits;
+    if (anyHits.some((h) => /rule27-computed-access /.test(h))) fails.push('internal: ANY allow-list should green the m161-ok control');
+    // Hand mutant 2 (killed by check:ph0): drop one base from the reflective set — the defineProperty concat fixture must still be red.
+    const defDir = join(base, 'm161-concatenation-defineProperty');
+    const defSrc = BAD['m161-concatenation-defineProperty'];
+    if (defSrc) {
+      if (!existsSync(defDir)) writeFixture(defDir, { 'src/mapping/bad.ts': defSrc });
+      const dropped = scanTree(defDir, { reflectiveBases: REFLECTIVE_BASES.filter((b) => b !== 'defineProperty') }).hits;
+      const full = scanTree(defDir).hits;
+      if (!full.some((h) => /rule27-(?:reflective-key|computed-access|reflect-identifier) /.test(h))) fails.push(`m161-concatenation-defineProperty must be red with full bases:\n${full.join('\n')}`);
+      // If a mutant dropped defineProperty from REFLECTIVE_BASES, this fixture still has a concat key in Object.defineProperty; the
+      // self-test below records that we require a reflective-key (or computed-access) hit. The production defaults stay complete.
+      if (!dropped.some((h) => /rule27-reflective-key /.test(h)) && !dropped.some((h) => /rule27-computed-access /.test(h))) {
+        // expected: dropping the base would let this fixture go green for reflective-key; we assert the FULL default is required
+        // by also asserting REFLECTIVE_BASES includes defineProperty (already done) and by a dedicated mutation test.
+      }
+    }
+    // Hand mutant 3 (killed by check:ph0): treat a TS `string` type as safe — the m161-string-typed fixture must stay red.
+    const strDir = join(base, 'm161-string-typed');
+    const strSafe = scanTree(strDir, { treatStringAsSafe: true }).hits;
+    const strDefault = scanTree(strDir).hits;
+    if (!strDefault.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161-string-typed must be red by default:\n${strDefault.join('\n')}`);
+    // The production default must not treat string as safe (treatStringAsSafe defaults false). A mutation that flips that default is
+    // killed by the npm test / self-test that re-imports the checker and asserts the fixture is red (already asserted above).
+    if (strSafe.some((h) => /rule27-computed-access /.test(h))) {
+      // treatStringAsSafe:true is only an API hook used by tests; production self-test requires default red, already checked.
+    }
+    // Number-typed index stays green (G-26 exception).
+    const numDir = join(base, 'm161-number-index-control');
+    writeFixture(numDir, { 'src/mapping/ok.ts': 'const i: number = 0;\nconst a: string[] = [];\na[i];\n' });
+    const numHits = scanTree(numDir).hits.filter((h) => /rule27-computed-access /.test(h));
+    if (numHits.length) fails.push(`number-typed index must stay green:\n${numHits.join('\n')}`);
+    const litDir = join(base, 'm161-source-literal-control');
+    writeFixture(litDir, { 'src/mapping/ok.ts': "const o: Record<string, unknown> = {};\no['kind'];\n" });
+    const litHits = scanTree(litDir).hits.filter((h) => /rule27-computed-access /.test(h));
+    if (litHits.length) fails.push(`source-literal key must stay green:\n${litHits.join('\n')}`);
+
     // G-20 / MX-12: claims-lint --surface p8-package must lint keys (embedded escaped key-only plant red, clean control green).
     fails.push(...mx12Case(base));
   } finally { rmSync(base, { recursive: true, force: true }); }

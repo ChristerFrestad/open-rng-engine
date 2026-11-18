@@ -23,7 +23,7 @@
     "check:qiu05": "node tools/qiu05-check.mjs",
     "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
     "check:ph0": "npm run -s typecheck && node tools/ci/rule46-license-integrity.mjs && node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test && node tools/ci/rule40-protected-names.mjs && node tools/ci/rule40-protected-names.mjs --self-test && node tools/ci/import-allowlist.mjs && node tools/ci/import-allowlist.mjs --self-test",
-    "test": "node --test \"test/**/*.test.mjs\"",
+    "test": "node --import ./tools/ci/entropy-backstop.mjs --test \"test/**/*.test.mjs\"",
     "check:rule40": "node tools/ci/rule40-protected-names.mjs",
     "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test",
     "check:rule46": "node tools/ci/rule46-license-integrity.mjs",

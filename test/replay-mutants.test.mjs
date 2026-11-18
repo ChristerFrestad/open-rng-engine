@@ -2,7 +2,6 @@
 // Out of scope here (no producer exists before PH2): M-106 / M-107 / M-117 (a) producer halves, `labkit verify` (PH3).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { blockPlan, blockPlanTotal } from '../src/entropy/blockPlan.ts';
 import { checkRandomBytesReplay, validateReadsOutputSchema } from '../src/verify/index.ts';
@@ -121,20 +120,11 @@ test('M-109: reordered, last dropped, extra appended -> R4 (with R7 where bytesF
 test('M-110: 1-entry n = 15 record [{30,30}], bytesFetched 30 -> R4', () => {
   const e = gold(15); e.reads = [{ width: 30, count: 30 }]; e.bytesFetched = 30; fail(e, 'R4', 'n=15');
 });
-test('M-110: replay never touches a CSPRNG (trap on every node:crypto / Web Crypto entry point)', () => {
-  let touches = 0;
-  const trapped = [], skipped = [];
-  const trap = (obj, k, label) => { // own-property shadow; a non-configurable export is listed and covered by the static check below
-    const own = Object.getOwnPropertyDescriptor(obj, k);
-    const orig = obj[k];
-    try { Object.defineProperty(obj, k, { configurable: true, writable: true, value: (...a) => { touches++; return orig.apply(obj, a); } }); }
-    catch { skipped.push(label); return () => {}; }
-    trapped.push(label);
-    return () => { if (own) Object.defineProperty(obj, k, own); else delete obj[k]; };
-  };
-  const undo = [['randomFillSync'], ['randomBytes'], ['randomFill'], ['randomInt'], ['randomUUID'], ['getRandomValues']].map(([k]) => trap(crypto, k, `node:crypto.${k}`))
-    .concat([trap(globalThis.crypto, 'getRandomValues', 'globalThis.crypto.getRandomValues'), trap(globalThis.crypto, 'randomUUID', 'globalThis.crypto.randomUUID')]);
-  const mr = Math.random; Math.random = () => { touches++; return mr(); };
+test('M-110: replay never touches a CSPRNG (entropy-backstop counters, no live re-wrap)', () => {
+  const mark = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')];
+  assert.ok(mark && mark.installed, 'entropy-backstop must already be installed');
+  const before = Object.fromEntries(Object.entries(mark.counters).map(([k, v]) => [k, v]));
+  const mr = Math.random; let mathTouches = 0; Math.random = () => { mathTouches++; return mr(); };
   try {
     for (const n of [1, 17, 65521, 131041]) {
       checkRandomBytesReplay(gold(n));
@@ -142,15 +132,19 @@ test('M-110: replay never touches a CSPRNG (trap on every node:crypto / Web Cryp
       const e2 = gold(n); e2.bytesFetched += 1; checkRandomBytesReplay(e2);
     }
     checkRandomBytesReplay({ kind: 'randomBytes', params: { n: 0 }, reads: [], bytesFetched: 0, output: '' });
-  } finally { undo.forEach((u) => u()); Math.random = mr; }
-  assert.equal(touches, 0, `trapped ${trapped.join(', ')}; skipped ${skipped.join(', ')}`);
-  assert.ok(trapped.includes('node:crypto.randomFillSync') && trapped.includes('globalThis.crypto.getRandomValues'));
-  const r = trap(crypto, 'randomFillSync', 'self-check'); crypto.randomFillSync(new Uint8Array(1)); r(); assert.equal(touches, 1); // the trap counts
+  } finally { Math.random = mr; }
+  assert.equal(mathTouches, 0, 'replay must not touch Math.random');
+  for (const [id, n] of Object.entries(mark.counters)) {
+    assert.equal(n, before[id], `replay must not increment entropy-backstop counter ${id} (${before[id]} -> ${n})`);
+  }
+  for (const id of mark.entryPointIds) {
+    assert.equal(typeof mark.wrappers[id], 'function', id);
+  }
   // Static half: the verification module graph imports nothing that can fetch (only ../entropy/blockPlan.ts, which imports nothing).
   const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), 'utf8');
   for (const p of ['verify/replayRandomBytes.ts', 'verify/index.ts', 'entropy/blockPlan.ts']) {
-    const t = src(p);
-    assert.doesNotMatch(t, /from\s+['"]node:|require\(|\bcrypto\b\s*\.|getRandomValues|randomFill|randomBytes\(|Math\.random/, p);
+    const text = src(p);
+    assert.doesNotMatch(text, /from\s+['"]node:|require\(|\bcrypto\b\s*\.|getRandomValues|randomFill|randomBytes\(|Math\.random/, p);
   }
 });
 // E-5 (CPO-R104 G-3): minimum bytesFetched is 17 (n = 1: 1 + 16)
