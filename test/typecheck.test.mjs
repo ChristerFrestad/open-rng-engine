@@ -46,7 +46,7 @@ test('node_modules is gitignored and never scanned as a claims surface, package.
   assert.equal(spawnSync('git', ['check-ignore', '-q', 'node_modules/typescript/package.json'], { cwd: ROOT }).status, 0);
   assert.equal(execFileSync('git', ['ls-files', 'node_modules'], { cwd: ROOT, encoding: 'utf8' }), '');
   const plant = 'This library is \u0063ertified.';
-  const files = new Map([...['README.md', 'package.json', 'LICENSE', 'REMOTE-PENDING.md', 'npm-reserved/README.md'].map((p) => [p, readFileSync(join(ROOT, p))]),
+  const files = new Map([...['README.md', 'package.json', 'LICENSE', 'REMOTE-PENDING.md', 'npm-reserved/README.md', '.gitattributes'].map((p) => [p, readFileSync(join(ROOT, p))]),
     ['node_modules/x/README.md', Buffer.from(plant)], ['node_modules/x/package.json', Buffer.from(JSON.stringify({ description: plant }))],
     ['node_modules/x/index.d.ts', Buffer.from(`/** ${plant} */`)], ['packages/a/node_modules/y/package.json', Buffer.from(JSON.stringify({ description: plant }))]]);
   assert.deepEqual(lintTree(files).hits, []);
