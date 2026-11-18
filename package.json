@@ -1,20 +1,25 @@
 {
   "name": "open-rng-engine",
-  "version": "0.1.0",
-  "description": "General-purpose library for unbiased random outcomes (integers, shuffles, weighted picks) on top of the platform CSPRNG",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest",
-    "lint": "eslint src --ext .ts"
-  },
+  "version": "0.0.0",
+  "private": true,
+  "description": "General-purpose Node.js library for unbiased random integers, shuffles, samples and weighted picks on the platform CSPRNG. Pre-alpha.",
+  "keywords": [
+    "random",
+    "csprng",
+    "random-integer",
+    "shuffle",
+    "sampling",
+    "weighted-random",
+    "nodejs"
+  ],
   "license": "Apache-2.0",
-  "dependencies": {
-    "@noble/hashes": "^1.7.1"
+  "type": "module",
+  "scripts": {
+    "lint:claims": "node tools/claims-lint.mjs",
+    "lint:claims:fixture": "node tools/claims-lint.mjs --self-test",
+    "check:qiu05": "node tools/qiu05-check.mjs",
+    "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
+    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test"
   },
-  "devDependencies": {
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
-  }
+  "dependencies": {}
 }
