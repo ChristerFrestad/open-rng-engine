@@ -41,3 +41,14 @@ Two separate checks:
 
 1. Integrity (`checkDfTable`, part of `runChecks`, fails check:ph0): table digest, every table id is a df-null K entry, adjacency cells 2652 and df = cells − 1, binned `proposed_cells` 1000 and df = `proposed_df` = bins − 1, support r matches the K list, bins cover [0, r) with no empty bin, expected ≥ 5.
 2. Readiness (`dfReadiness` / `evidence-entry.mjs`): every df-null K entry has a df after the table is applied. check:ph0 prints `harness readiness: NOT-READY (...)` and does not fail. `assertEvidenceRunReady()` throws while anything is open; every evidence-run start must call it first. No evidence-run entry point exists in this repo yet.
+
+## Evidence-gate preconditions EG-1, EG-2, EG-3 (HoQ addendum 1 4195afbc; HoQ b15a2ff5 report)
+
+- **EG-1 (`collector.mjs`).** M-153 B4–B12 is enforced on what the collector counts. The harness wraps the public call in a witness before the collector sees it. A collection is accepted only if collector n = number of records = witness returns / w (w = 1, 2 for pair/successive tuples, or the K entry's `window`), every record is one public-call outcome of the primitive (one integer in [min,max), one index, one permutation, one distinct k-set), and n ≥ 10^9. Inner draws, tries, bytes and Lehmer digits go to a diagnostic byte log and never feed n. The self-check runs the collector over synthetic primitives (LCG, no entropy) that log Fisher–Yates steps, rejected tries, bytes and digits. Collector mutants that count any of these (B4–B12) are killed.
+- **EG-2 (`counts.mjs`).**
+  - BigCrush: the 160 test names in row order (from the pinned TestU01 1.2.3 `bbattery.c` BigCrush, digest `02ddf54c…`).
+  - Dieharder: the 114 `-a` rows in order with pinned ntup where the source fixes it (from the pinned 3.31.1 source, digest `9c5f7a5d…`; 110 counted).
+  - The BigCrush u32 input must have a sha256 different from raw, and u32 p-values identical to raw are red.
+  - No duplicated STS sequence.
+  - Both lists are derived from source, not from a run (ANTATT until the first harness run).
+- **EG-3 (`evidence-entry.mjs`).** No runner exists yet. check:ph0 enforces the contract: any source file outside `test/` that spawns dieharder, tu01-driver, STS assess or PractRand RNG_test, or imports the collector, must call `assertEvidenceRunReady(` (or use `startEvidenceRun(fn)`) before the first such use.

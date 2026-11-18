@@ -21,7 +21,7 @@ export function loadKTests(root = ROOT) {
 
 async function load(dir) {
   const imp = (f) => import(pathToFileURL(join(dir, f)).href + `?t=${Date.now()}${Math.random()}`);
-  return { pins: await imp('pins.mjs'), floor: await imp('n-floor.mjs'), counts: await imp('counts.mjs'), df: await imp('df-table.mjs') };
+  return { pins: await imp('pins.mjs'), floor: await imp('n-floor.mjs'), counts: await imp('counts.mjs'), df: await imp('df-table.mjs'), col: await imp('collector.mjs'), ev: await imp('evidence-entry.mjs') };
 }
 
 export async function runChecks(root = ROOT, mods) {
@@ -29,7 +29,7 @@ export async function runChecks(root = ROOT, mods) {
   const kTests = loadKTests(root);
   const kBytes = readFileSync(join(root, K_TESTS));
   const kSha = m.pins.sha256(kBytes);
-  const findings = [...m.pins.checkHarnessPins(root), ...m.pins.checkArchivePinsAgainstFrozen(root), ...m.df.checkDfTable(kTests, { kTestsSha256: kSha })];
+  const findings = [...m.pins.checkHarnessPins(root), ...m.pins.checkArchivePinsAgainstFrozen(root), ...m.df.checkDfTable(kTests, { kTestsSha256: kSha }), ...m.ev.runnerContractFindings(root)];
   if (kTests.length !== 157) findings.push(`K list has ${kTests.length} entries, expected 157 (rule 8 K′)`);
   const plans = kTests.map((t) => ({ id: t.id, n: m.floor.N_MIN, unit: m.floor.expectedUnit(t), counter: m.floor.COUNTER_PER_PUBLIC_CALL }));
   findings.push(...m.floor.checkRunPlans(plans, kTests));
@@ -48,20 +48,75 @@ function stsSeq(counts, over = {}) {
   return Object.assign(s, over);
 }
 function stsRun(counts, nseq = 1000, edit) {
-  const seqs = Array.from({ length: nseq }, () => stsSeq(counts));
+  // Distinct sequences (EG-2): each sequence's p-values are shifted by its index.
+  const seqs = Array.from({ length: nseq }, (_, j) => {
+    const s = stsSeq(counts);
+    s.Frequency = [(j + 0.5) / (nseq + 1)];
+    return s;
+  });
   if (edit) edit(seqs);
   return seqs;
 }
-function tu01Text(stream, n, { battery = 'BigCrush', head = n, badP } = {}) {
-  const rows = Array.from({ length: n }, (_, i) => `${battery}\t${stream}\t${i}\tsyn_${i}\t${i === badP ? -1 : (i + 0.5) / (n + 1)}`);
+let NAMES = [];
+function tu01Text(stream, n, { battery = 'BigCrush', head = n, badP, names = NAMES, off = stream === 'u32' ? 0.25 : 0 } = {}) {
+  const rows = Array.from({ length: n }, (_, i) => `${battery}\t${stream}\t${i}\t${names[i] ?? `syn_${i}`}\t${i === badP ? -1 : (i + 0.5 + off) / (n + 1)}`);
   return [`# tu01-driver v1\tbattery=${battery}\tstream=${stream}\tntests=${head}\twords=0`, ...rows].join('\n') + '\n';
 }
-function dhText({ counted = 110, excluded = ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums'], badP = false } = {}) {
-  const row = (name, p) => `${name.padStart(20)}|   0|       100|     100|${p.toFixed(8)}|  PASSED  `;
+let DH_ROWS = [];
+const DH_EXCLUDED = ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums'];
+// Default: the pinned 114-row list in order. Options rebuild the old count-only edits on top of it.
+function dhText({ counted = 110, excluded = DH_EXCLUDED, badP = false, rows } = {}) {
+  const row = (name, ntup, p) => `${name.padStart(20)}|${String(ntup).padStart(4)}|       100|     100|${p.toFixed(8)}|  PASSED  `;
   const lines = ['#=============================================================================#', '        test_name   |ntup| tsamples |psamples|  p-value |Assessment'];
-  for (const n of excluded) lines.push(row(n, 0.5));
-  for (let i = 0; i < counted; i++) lines.push(row(`syn_counted_${i}`, badP && i === 0 ? 1.5 : (i + 0.5) / (counted + 1)));
+  let list = rows ?? DH_ROWS.map((r) => [r[0], r[1] ?? 0]);
+  if (!rows) {
+    const cnt = list.filter((r) => !DH_EXCLUDED.includes(r[0]));
+    const ex = excluded.map((n) => [n, 0]);
+    const c2 = cnt.slice(0, counted);
+    for (let i = cnt.length; i < counted; i++) c2.push([`syn_counted_${i}`, 0]);
+    list = [...ex, ...c2];
+    if (counted === 110 && excluded === DH_EXCLUDED) list = DH_ROWS.map((r) => [r[0], r[1] ?? 0]);
+  }
+  list.forEach(([n, t], i) => lines.push(row(n, t, badP && i === 0 ? 1.5 : (i + 0.5) / (list.length + 1))));
   return lines.join('\n') + '\n';
+}
+const SHA_A = 'a'.repeat(64), SHA_B = 'b'.repeat(64);
+// Pinned-list digests held here on their own (EG-2), so a changed list in counts.mjs is red.
+const BIGCRUSH_NAMES_SHA256 = '02ddf54c9695d249c28eb2fa90ed04f0ace64494ebaf32ca7ea8cc22c60f448b';
+const DIEHARDER_ROWS_SHA256 = '9c5f7a5d80dad768d213dff1034950353a90dfa6a4b8e263f9991a15786a61b3';
+
+// EG-1: synthetic primitives over a deterministic LCG (no entropy), with an instrumented source that
+// counts inner draws, tries, bytes and Lehmer digits the way a real source's byte log would.
+function lcg(seed) { let x = seed >>> 0; return () => (x = (Math.imul(x, 1664525) + 1013904223) >>> 0); }
+function synth(kTest, source) {
+  const next = lcg(12345);
+  const draw = (bound) => { // A.5.1-style masked rejection over 32-bit words; counts tries and 4 bytes per try
+    let bits = 0; while ((1 << bits) < bound && bits < 31) bits++;
+    for (;;) { source.tries += 1; source.bytes += 4; const v = bits === 0 ? 0 : next() >>> (32 - bits); if (v < bound) { source.draws += 1; return v; } }
+  };
+  const p = kTest.parameters || {};
+  switch (kTest.primitive) {
+    case 'randomInt': return () => p.min + draw(p.max - p.min);
+    case 'weightedPick': { const len = p.length ?? p.weights.length; return () => draw(len); }
+    case 'shuffle': return () => {
+      const a = Array.from({ length: p.n ?? 52 }, (_, i) => i);
+      for (let i = a.length - 1; i > 0; i--) { const j = draw(i + 1); [a[i], a[j]] = [a[j], a[i]]; }
+      if (/Lehmer/.test(kTest.n_unit)) source.digits += a.length - 1;
+      return a;
+    };
+    case 'sample': return () => {
+      const a = Array.from({ length: p.n }, (_, i) => i); const out = [];
+      for (let i = 0; i < p.k; i++) { const j = i + draw(p.n - i); [a[i], a[j]] = [a[j], a[i]]; out.push(a[i]); }
+      return out;
+    };
+    default: throw new Error('no synthetic primitive');
+  }
+}
+function collectorRun(C, kTest, n = 200) {
+  const source = { draws: 0, tries: 0, bytes: 0, digits: 0 };
+  const wit = C.witness(synth(kTest, source));
+  const res = C.collect(kTest, wit.call, n, source);
+  return { res, returns: wit.count(), source };
 }
 
 const STS_OK = { Frequency: 1, BlockFrequency: 1, CumulativeSums: 2, Runs: 1, LongestRun: 1, Rank: 1, FFT: 1, NonOverlappingTemplate: 148, OverlappingTemplate: 1, Universal: 1, ApproximateEntropy: 1, RandomExcursions: 8, RandomExcursionsVariant: 18, Serial: 2, LinearComplexity: 1 };
@@ -76,11 +131,94 @@ export function fixtureCases(m, root = ROOT) {
   const one = (p) => { const r = F.checkPlan(p, kTests); return r.ok ? [] : [r.reason]; };
   const shuffle52 = id(/^shuffle\/.*n-52/);
   const sample805 = kTests.find((t) => t.primitive === 'sample').id;
-  const goodC = () => ({ sts: stsRun(STS_OK), bigcrush: { raw: tu01Text('raw', 160), u32: tu01Text('u32', 160) }, dieharder: dhText() });
+  const goodC = () => ({ sts: stsRun(STS_OK), bigcrush: { raw: tu01Text('raw', 160), u32: tu01Text('u32', 160) }, bigcrushInputs: { raw: SHA_A, u32: SHA_B }, dieharder: dhText() });
   const withC = (edit) => { const c = goodC(); edit(c); return m.counts.checkFirstRunCounts(c); };
   const D = m.df;
   const dfCases = dfFixtureCases(D, kTests);
+  NAMES = m.counts.BIGCRUSH_TEST_NAMES;
+  DH_ROWS = m.counts.DIEHARDER_ROWS;
+  const C = m.col;
+  const kt = (re) => kTests.find((t) => re.test(t.id));
+  const fam = {
+    'randomInt r=38 (A.5.1 tries)': kt(/^randomInt\/chi2\/min-0-max-38$/),
+    'shuffle 52 (Fisher-Yates steps)': kt(/^shuffle\/.*n-52/),
+    'shuffle Lehmer-52 (digits)': kTests.find((t) => /Lehmer/.test(t.n_unit)),
+    'sample 52/5 (index draws)': kTests.find((t) => t.primitive === 'sample' && t.parameters.k === 5),
+    'sample k=20 (index draws)': kTests.find((t) => t.primitive === 'sample' && t.parameters.k === 20) ?? kTests.find((t) => t.primitive === 'sample'),
+    'weightedPick W-A (tries, bytes)': kTests.find((t) => t.primitive === 'weightedPick' && !/tuple/.test(t.n_unit)),
+    'randomInt ordered pair (tuples of 2)': kt(/^randomInt\/ordered-pair-chi2\//),
+    'weightedPick five-call window (tuples of 5)': kt(/five-call-pair/),
+  };
+  const colCases = [];
+  for (const [label, k] of Object.entries(fam)) {
+    colCases.push([`EG-1 collector ${label}: n = records = witness returns / w, shapes ok`, true, () => {
+      const { res, returns, source } = collectorRun(C, k);
+      const f = C.checkCollected(res, k, returns, { floor: false });
+      if (res.n !== 200) f.push(`collector n ${res.n} != 200 calls requested`);
+      if (k.primitive === 'shuffle' && !(source.draws > res.n)) f.push('synthetic source did not log inner draws');
+      if (k.primitive === 'randomInt' && !(source.tries > source.draws)) f.push('synthetic source logged no rejected tries');
+      return f;
+    }]);
+  }
+  const kS = fam['shuffle 52 (Fisher-Yates steps)'], kR = fam['randomInt r=38 (A.5.1 tries)'], kP = fam['randomInt ordered pair (tuples of 2)'];
+  const kL = fam['shuffle Lehmer-52 (digits)'], kSa = fam['sample 52/5 (index draws)'], kW = fam['weightedPick W-A (tries, bytes)'];
+  const bad = (k, edit) => { const { res, returns, source } = collectorRun(C, k); edit(res, source); return C.checkCollected(res, k, returns, { floor: false }); };
+  colCases.push(
+    ['EG-1 B4/B5 n counted per Fisher-Yates step', false, () => bad(kS, (r, s) => { r.n = s.draws; })],
+    ['EG-1 B4 records are index draws', false, () => bad(kS, (r) => { r.records = r.records.flat(); r.n = r.records.length; })],
+    ['EG-1 B6/B7 n counted per sampled index', false, () => bad(kSa, (r) => { r.records = r.records.flat(); r.n = r.records.length; })],
+    ['EG-1 B8 n counted from tries', false, () => bad(kR, (r, s) => { r.n = s.tries; })],
+    ['EG-1 B9/B11 n counted from bytes', false, () => bad(kW, (r, s) => { r.n = s.bytes; })],
+    ['EG-1 B10 n counted as Lehmer digits', false, () => bad(kL, (r, s) => { r.n = s.digits; })],
+    ['EG-1 B12 n counted as window values', false, () => bad(kP, (r) => { r.records = r.records.flat(); r.n = r.records.length; })],
+    ['EG-1 n and records inflated together (witness disagrees)', false, () => bad(kR, (r) => { r.records = [...r.records, ...r.records]; r.n = r.records.length; })],
+    ['EG-1 records dropped while n is kept (n != records)', false, () => bad(kR, (r) => { r.records = r.records.slice(0, 100); })],
+    ['EG-1 a record that is not an outcome (out of range)', false, () => bad(kR, (r) => { r.records[3] = 999; })],
+    ['EG-1 B1 floor at collection: 200 outcomes', false, () => { const { res, returns } = collectorRun(C, kR); return C.checkCollected(res, kR, returns); }],
+    ['EG-1 window width from K: five-call windows are 5, pairs 2, plain 1', true, () => [
+      ...need(C.windowWidth(fam['weightedPick five-call window (tuples of 5)']) === 5, 'five-call'),
+      ...need(C.windowWidth(kP) === 2, 'pair'), ...need(C.windowWidth(kR) === 1, 'plain')]],
+  );
+  const egCases = [
+    ['EG-2 BigCrush names list digest', true, () => need(m.pins.sha256(Buffer.from(JSON.stringify(m.counts.BIGCRUSH_TEST_NAMES))) === BIGCRUSH_NAMES_SHA256 && m.counts.BIGCRUSH_TEST_NAMES.length === 160, 'BigCrush names list changed')],
+    ['EG-2 Dieharder rows list digest', true, () => need(m.pins.sha256(Buffer.from(JSON.stringify(m.counts.DIEHARDER_ROWS))) === DIEHARDER_ROWS_SHA256 && m.counts.DIEHARDER_ROWS.length === 114, 'Dieharder rows list changed')],
+    ['EG-2 Dieharder a counted row duplicated and another missing (110 rows, wrong set)', false, () => withC((c) => {
+      const l = DH_ROWS.map((r) => [r[0], r[1] ?? 0]); l[22] = l[21]; c.dieharder = dhText({ rows: l });
+    })],
+    ['EG-2 Dieharder rgb_bitdist ntup 3 twice, ntup 4 missing', false, () => withC((c) => {
+      const l = DH_ROWS.map((r) => [r[0], r[1] ?? 0]); const i = l.findIndex((r) => r[0] === 'rgb_bitdist' && r[1] === 4); l[i] = [l[i][0], 3]; c.dieharder = dhText({ rows: l });
+    })],
+    ['EG-2 Dieharder two rows swapped', false, () => withC((c) => {
+      const l = DH_ROWS.map((r) => [r[0], r[1] ?? 0]); [l[0], l[1]] = [l[1], l[0]]; c.dieharder = dhText({ rows: l });
+    })],
+    ['EG-2 Dieharder a renamed counted row', false, () => withC((c) => {
+      const l = DH_ROWS.map((r) => [r[0], r[1] ?? 0]); l[0] = ['diehard_birthdayz', l[0][1]]; c.dieharder = dhText({ rows: l });
+    })],
+    ['EG-2 BigCrush raw rows with synthetic names', false, () => withC((c) => { c.bigcrush.raw = tu01Text('raw', 160, { names: [] }); })],
+    ['EG-2 BigCrush raw two rows swapped', false, () => withC((c) => { const n = [...NAMES]; [n[0], n[2]] = [n[2], n[0]]; c.bigcrush.raw = tu01Text('raw', 160, { names: n }); })],
+    ['EG-2 BigCrush u32 is a relabelled copy of raw (same p-values)', false, () => withC((c) => { c.bigcrush.u32 = tu01Text('u32', 160, { off: 0 }); })],
+    ['EG-2 BigCrush u32 input sha = raw input sha', false, () => withC((c) => { c.bigcrushInputs = { raw: SHA_A, u32: SHA_A }; })],
+    ['EG-2 BigCrush input shas missing', false, () => withC((c) => { delete c.bigcrushInputs; })],
+    ['EG-2 STS one sequence duplicated', false, () => withC((c) => { c.sts[7] = JSON.parse(JSON.stringify(c.sts[6])); })],
+    ['EG-2 STS 1000 identical sequences', false, () => withC((c) => { c.sts = c.sts.map(() => JSON.parse(JSON.stringify(c.sts[0]))); })],
+  ];
+  const E = m.ev;
+  const rc = (t) => { const w = E.runnerContractText(t); return w ? [w] : []; };
+  // Tool names are assembled so this file's own text is not a runner under the EG-3 scan.
+  const [DH, TU, AS, PR, CO] = ['die' + 'harder', 'tu01' + '-driver', 'ass' + 'ess', 'RNG' + '_test', 'collector' + '.mjs'];
+  const egCases3 = [
+    ['EG-3 runner spawning dieharder without the guard is red', false, () => rc(`import { spawnSync } from 'node:child_process';\nspawnSync('${DH}', ['-a', '-Y', '0', '-g', '201']);\n`)],
+    ['EG-3 runner calling the guard after spawning tu01-driver is red', false, () => rc(`execFileSync('./${TU}', ['BigCrush', 'raw', 'o.tsv']);\nassertEvidenceRunReady();\n`)],
+    ['EG-3 runner importing the collector without the guard is red', false, () => rc(`import { collect } from './${CO}';\ncollect(k, f, 1e9);\n`)],
+    ['EG-3 runner with the guard first is green', true, () => rc(`import { assertEvidenceRunReady } from './evidence-entry.mjs';\nassertEvidenceRunReady();\nspawnSync('${AS}', ['1000000']);\n`)],
+    ['EG-3 runner through startEvidenceRun is green', true, () => rc(`startEvidenceRun(() => spawnSync('${PR}', ['stdin64']));\n`)],
+    ['EG-3 tracked tree has no unguarded runner', true, () => E.runnerContractFindings(root)],
+    ['EG-3 startEvidenceRun refuses while NOT-READY', false, () => { try { E.startEvidenceRun(() => 0, root); return []; } catch (e) { return [String(e.message)]; } }],
+  ];
   return [
+    ...egCases3,
+    ...colCases,
+    ...egCases,
     ...dfCases,
     // rule 15 / 17(ii) pins on the real tree
     ['pins: real tree green', true, () => [...m.pins.checkHarnessPins(root), ...m.pins.checkArchivePinsAgainstFrozen(root)]],
@@ -275,6 +413,30 @@ export const MUTANTS = [
   ['MU-34 expected >= 5 bound weakened', 'code', 'df-table.mjs', [['if (n * binWidth(k, r) < 5n * r) return false;', 'if (n * binWidth(k, r) < 4n * r) return false;']]],
   ['MU-35 df digest compare off', 'code', 'df-table.mjs', [['if (sha256(canon) !== DF_TABLE_SHA256)', 'if (false)']]],
   ['MU-36 fake df for an open entry (digest re-pinned)', 'code', 'df-table.mjs', [["  'shuffle/chi2/lehmer-52': BINNED_DF,\n});", "  'shuffle/chi2/lehmer-52': BINNED_DF,\n  'randomInt/runs/min-0-max-2': 1,\n});"], ["'1ed710bfb77b8e2a6736407386e60b70401398e88603b97b172d8df1d3817e63'", 'sha256(dfTableCanonical())']]],
+  ['MU-37 collector counts Fisher-Yates steps (B4/B5)', 'code', 'collector.mjs', [['      records.push(v);\n      count += 1;', "      records.push(v);\n      count = kTest.primitive === 'shuffle' ? source.draws : count + 1;"]]],
+  ['MU-38 collector counts sampled indices (B6/B7)', 'code', 'collector.mjs', [['      records.push(v);\n      count += 1;', '      if (Array.isArray(v) && kTest.primitive === \'sample\') { records.push(...v); count += v.length; } else { records.push(v); count += 1; }']]],
+  ['MU-39 collector counts tries (B8)', 'code', 'collector.mjs', [['      records.push(v);\n      count += 1;', "      records.push(v);\n      count = kTest.primitive === 'randomInt' ? source.tries : count + 1;"]]],
+  ['MU-40 collector counts bytes (B9/B11)', 'code', 'collector.mjs', [['      records.push(v);\n      count += 1;', "      records.push(v);\n      count = kTest.primitive === 'weightedPick' ? source.bytes : count + 1;"]]],
+  ['MU-41 collector counts Lehmer digits (B10)', 'code', 'collector.mjs', [['      records.push(v);\n      count += 1;', "      records.push(v);\n      count = /Lehmer/.test(kTest.n_unit) ? source.digits : count + 1;"]]],
+  ['MU-42 collector counts window values (B12)', 'code', 'collector.mjs', [['      records.push(t);\n      count += 1;', '      records.push(t);\n      count += w;']]],
+  ['MU-43 witness compare off', 'code', 'collector.mjs', [['if (!Number.isSafeInteger(witnessReturns) || witnessReturns !== n * w)', 'if (false)']]],
+  ['MU-44 records-length compare off', 'code', 'collector.mjs', [['if (n !== result.records.length)', 'if (false)']]],
+  ['MU-45 outcome shape check off', 'code', 'collector.mjs', [['  if (bad) f.push(', '  if (false) f.push(']]],
+  ['MU-46 collection floor off', 'code', 'collector.mjs', [['if (floor && !(n >= N_MIN))', 'if (false)']]],
+  ['MU-47 window width always 1', 'code', 'collector.mjs', [["  if (!/tuple/.test(String(kTest.n_unit))) return 1;", '  return 1;']]],
+  ['MU-48 Dieharder row-identity check off', 'code', 'counts.mjs', [['if (!got || !want || got.name !== want[0] || (want[1] !== null && got.ntup !== want[1])) {', 'if (!got || !want) {']]],
+  ['MU-49 Dieharder ntup not compared', 'code', 'counts.mjs', [['|| (want[1] !== null && got.ntup !== want[1])', '']]],
+  ['MU-50 BigCrush name check off', 'code', 'counts.mjs', [['if (row.name !== BIGCRUSH_TEST_NAMES[i])', 'if (false)']]],
+  ['MU-51 BigCrush u32 = raw p-values check off', 'code', 'counts.mjs', [["JSON.stringify(pr.rows.map((x) => x.p)) === JSON.stringify(pu.rows.map((x) => x.p))", 'false']]],
+  ['MU-52 BigCrush input sha distinct check off', 'code', 'counts.mjs', [['} else if (inputs.raw === inputs.u32) {', '} else if (false) {']]],
+  ['MU-53 BigCrush input shas not required', 'code', 'counts.mjs', [["if (!inputs || typeof inputs !== 'object' || !HEX64.test(String(inputs.raw)) || !HEX64.test(String(inputs.u32))) {", 'if (false) {']]],
+  ['MU-54 STS duplicate-sequence check off', 'code', 'counts.mjs', [['if (seen.has(key)) f.push(', 'if (false) f.push(']]],
+  ['MU-55 BigCrush names list edited', 'code', 'counts.mjs', [['"SerialOver, r = 22"', '"SerialOver, r = 21"']]],
+  ['MU-56 Dieharder rows list edited', 'code', 'counts.mjs', [['["dab_monobit2", null]', '["dab_monobit2", 12]']]],
+  ['MU-57 EG-3 missing guard not reported', 'code', 'evidence-entry.mjs', [["  if (!g) return 'starts an evidence run without the entry guard';", '']]],
+  ['MU-58 EG-3 guard order not checked', 'code', 'evidence-entry.mjs', [["  if (g.index > first) return 'calls the entry guard only after starting the run';", '']]],
+  ['MU-59 EG-3 collector import not a run start', 'code', 'evidence-entry.mjs', [['const uses = [START.exec(s), IMPORT_COLLECTOR.exec(s)]', 'const uses = [START.exec(s)]']]],
+  ['MU-60 startEvidenceRun skips the guard', 'code', 'evidence-entry.mjs', [['  assertEvidenceRunReady(root);\n  return fn();', '  return fn();']]],
   ['MU-23 p-value range check removed', 'code', 'counts.mjs', [['return typeof x === \'number\' && Number.isFinite(x) && x >= 0 && x <= 1;', 'return true;']]],
 ];
 

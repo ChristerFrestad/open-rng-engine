@@ -14,7 +14,8 @@ import * as floor from '../verification/harness/n-floor.mjs';
 import * as counts from '../verification/harness/counts.mjs';
 import { runChecks, selfTest, runMutants, loadKTests } from '../verification/harness/check.mjs';
 import * as df from '../verification/harness/df-table.mjs';
-import { harnessReadiness, assertEvidenceRunReady } from '../verification/harness/evidence-entry.mjs';
+import { harnessReadiness, assertEvidenceRunReady, runnerContractFindings, runnerContractText, startEvidenceRun } from '../verification/harness/evidence-entry.mjs';
+import * as col from '../verification/harness/collector.mjs';
 
 const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
 const ANSWERS_SHA = 'f71ec11d82f83311666af9dc05707227b736f69d1ab768a5448c0ffcfb666383';
@@ -75,10 +76,10 @@ test('rule 17(i): expected counts are the frozen numbers', () => {
   assert.deepEqual([...counts.DIEHARDER_EXCLUDED], ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums']);
 });
 
-test('self-test: every fixture as expected, all 36 mutants killed, none PATCH-FAILED', async () => {
+test('self-test: every fixture as expected, all 60 mutants killed, none PATCH-FAILED', async () => {
   const r = await selfTest();
   assert.deepEqual(r.fails, []);
-  assert.equal(r.mutants.length, 36);
+  assert.equal(r.mutants.length, 60);
   assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
 });
 
@@ -96,7 +97,7 @@ test('check:ph0 wiring: b8 step runs the harness checks on this tree', () => {
 
 test('no evidence data in the harness directory', () => {
   const files = execFileSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'verification/harness'], { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
-  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
+  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/collector.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
 });
 
 // Digest and df literals held here on their own (not imported from the table).
@@ -136,4 +137,33 @@ test('rule 8 bins: exact BigInt probabilities, unequal for non-divisible r, Lehm
   assert.equal(df.lehmerRank(id52), 0n);
   assert.equal(df.lehmerRank([...id52].reverse()), df.factorial(52) - 1n);
   assert.equal(df.binOf(df.lehmerRank([...id52].reverse()), df.LEHMER_52_SUPPORT), 999);
+});
+
+// EG-1 / EG-2 / EG-3 (HoQ addendum 1 4195afbc; HoQ b15a2ff5 report). Digests held here on their own.
+test('EG-2: pinned BigCrush names and Dieharder rows (digest literals, counts, exclusions)', () => {
+  const h = (x) => createHash('sha256').update(JSON.stringify(x)).digest('hex');
+  assert.equal(h(counts.BIGCRUSH_TEST_NAMES), '02ddf54c9695d249c28eb2fa90ed04f0ace64494ebaf32ca7ea8cc22c60f448b');
+  assert.equal(h(counts.DIEHARDER_ROWS), '9c5f7a5d80dad768d213dff1034950353a90dfa6a4b8e263f9991a15786a61b3');
+  assert.equal(counts.BIGCRUSH_TEST_NAMES.length, 160);
+  assert.equal(counts.DIEHARDER_ROWS.length, 114);
+  assert.equal(counts.DIEHARDER_ROWS.filter((r) => !counts.DIEHARDER_EXCLUDED.includes(r[0])).length, 110);
+  for (const x of counts.DIEHARDER_EXCLUDED) assert.equal(counts.DIEHARDER_ROWS.filter((r) => r[0] === x).length, 1);
+});
+
+test('EG-1: collector result is accepted only when n = records = witness returns / w', () => {
+  const k = loadKTests().find((t) => t.id === 'randomInt/chi2/min-0-max-38');
+  let x = 0;
+  const w = col.witness(() => (x = (x + 7) % 38));
+  const r = col.collect(k, w.call, 50);
+  assert.deepEqual(col.checkCollected(r, k, w.count(), { floor: false }), []);
+  assert.notDeepEqual(col.checkCollected({ ...r, n: 100 }, k, w.count(), { floor: false }), []);
+  assert.notDeepEqual(col.checkCollected(r, k, w.count() * 2, { floor: false }), []);
+  assert.notDeepEqual(col.checkCollected(r, k, w.count()), []);
+});
+
+test('EG-3: no unguarded evidence runner in the tree; the contract and startEvidenceRun refuse', () => {
+  assert.deepEqual(runnerContractFindings(), []);
+  assert.match(String(runnerContractText(`spawnSync('${'die' + 'harder'}', ['-a'])`)), /without the entry guard/);
+  assert.equal(runnerContractText(`assertEvidenceRunReady();\nspawnSync('${'die' + 'harder'}', ['-a'])`), null);
+  assert.throws(() => startEvidenceRun(() => 1), /harness NOT-READY/);
 });
