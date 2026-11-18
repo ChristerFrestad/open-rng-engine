@@ -93,19 +93,24 @@ test('Q2 all-import ban: no false red on current legit code (every scanned file,
 const run = (args) => spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), ROOT, ...args], { encoding: 'utf8' });
 test('rule 27 on this repo: 0 findings, exit 0 (check:ph0 green); evidence/ and identity/ placeholders removed', () => {
   const r = run([]); assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /0 finding\(s\)/);
-  assert.match(r.stdout, /\(randomFillSync, entropy\/\).*report-only: src\/entropy\/ has no entropy read path/);
+  // entropy/ now holds the exact L596 pair so rule 22 can ship a live exports map (trigger (ii) holds, no-fewer is satisfied).
+  assert.match(r.stdout, /\(createHash, evidence\/\).*report-only: src\/evidence\/ does not exist yet/);
   assert.ok(!existsSync(join(ROOT, 'src/evidence')) && !existsSync(join(ROOT, 'src/identity')));
+  assert.doesNotMatch(r.stdout, /missing-pair \(randomFillSync, entropy\//);
   assert.match(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts['check:ph0'], /node tools\/ci\/import-allowlist\.mjs && node tools\/ci\/import-allowlist\.mjs --self-test/);
 });
-test('(c) --phase-exit on the current tree is red for exactly the three missing pairs', () => {
+test('(c) --phase-exit on the current tree is red for the two still-missing pairs (evidence/, identity/)', () => {
   const r = run(['--phase-exit']); assert.equal(r.status, 1);
   const lines = r.stdout.trim().split('\n').slice(0, -1);
-  assert.deepEqual(lines.map((l) => l.split(' required')[0]), ['src/entropy/:0: rule27-missing-pair (randomFillSync, entropy/)',
+  assert.deepEqual(lines.map((l) => l.split(' required')[0]), [
     'src/evidence/:0: rule27-missing-pair (createHash, evidence/)', 'src/identity/:0: rule27-missing-pair (getFips, identity/)']);
-  assert.match(lines[0], /PH1-M1 trigger: \(iii\) --phase-exit/);
+  assert.equal(r.stdout.trim().split('\n').at(-1), 'rule27 import-allowlist: 2 finding(s) (dist/ grep half PENDING)');
 });
-test('trigger (ii) does not fire on the current tree (no package main/module/exports, core entries export nothing)', () => {
-  assert.deepEqual(entropyTriggers(ROOT), []);
+test('trigger (ii) fires on the current tree because package.json has exports; no-fewer is satisfied by the entropy pair', () => {
+  const why = entropyTriggers(ROOT);
+  assert.ok(why.some((w) => w.includes('(ii) package.json exports exports the package root')), why.join('\n'));
+  // randomFillSync@entropy is present, so the live scan stays at 0 findings.
+  const r = run([]); assert.equal(r.status, 0, r.stdout);
 });
 test('(d) control: blockPlan.ts alone in src/entropy/ is green (report-only)', () => withTmp((d) => {
   put(d, 'src/entropy/blockPlan.ts', readFileSync(join(ROOT, 'src/entropy/blockPlan.ts'), 'utf8'));
