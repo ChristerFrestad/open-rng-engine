@@ -42,11 +42,24 @@
 //          Function / eval (any use, incl. `new Function`, `Function('return this')()`) and `.constructor(` calls are red.
 //     G-13 require('node:module') / require('module') are red (createRequire and import from node:module already are).
 //     G-15 an `export const|let|var` statement with more than one declarator is an opaque export (trigger (i) red).
+//  HoQ coverage gaps on 83aa9529 (G-17..G-20), fail-closed:
+//     G-17 `globalThis.<member>` is red unless <member> is in GLOBALTHIS_MEMBERS_ALLOWED. The list holds exactly what real
+//          core source uses today: NONE (2026-11-18 scan of src/, packages/capability/src, packages/mapping: the only
+//          globalThis/process tokens are in comments). So globalThis.self/.window/.globalThis/.Function/.eval/.Reflect/
+//          .process/... are all red. A new entry needs a HoQ ruling plus its own fixture.
+//     G-18 `process` may appear only as `process.<member>` with <member> in PROCESS_MEMBERS_ALLOWED (NONE today, same
+//          scan); any other reference (alias, destructuring, argument, computed access) is red. The members getBuiltinModule,
+//          binding, _linkedBinding, dlopen and mainModule are red on ANY base (catches aliases such as p.getBuiltinModule).
+//     G-19 module.require, any `.require(` member call, and `require` not immediately called (alias, destructuring key,
+//          argument) are red; process.mainModule.require is red via the always-banned members.
+//     G-20 --self-test also runs the M-152b/c/d/g cases (guard-exact control, guard forms at a non-guard path, window,
+//          .constructor() and the MX-12 case: claims-lint --surface p8-package on an embedded key-only plant must be red.
 // PENDING: the dist/ grep half (no packed core yet).
 // Usage: node tools/ci/import-allowlist.mjs [root] [--phase-exit]   --self-test runs the known-bad fixtures.
 import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, relative, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 export const REQUIRED_PAIRS = ['randomFillSync@entropy', 'createHash@evidence', 'getFips@identity'];
 const EXT = /\.(ts|mts|cts|js|mjs|cjs)$/;
@@ -55,6 +68,9 @@ export const SCAN_ROOTS = ['src', 'packages/capability/src', 'packages/mapping',
 export const GUARD_PATH = 'packages/capability/src/coreGuard.ts'; // QR-25 L228, PLAN R-58(6) L166
 export const VERIFY_BINDING_PATH = 'verify/src/testingBinding.ts'; // PLAN L535 (QR-57 row h), R-58(1) L166
 const DRBG_PKG = '@open-rng-engine/drbg';
+export const GLOBALTHIS_MEMBERS_ALLOWED = Object.freeze([]); // G-17: none used by real core source (2026-11-18)
+export const PROCESS_MEMBERS_ALLOWED = Object.freeze([]); // G-18: none used by real core source (2026-11-18)
+const PROCESS_ALWAYS_BANNED = ['getBuiltinModule', 'binding', '_linkedBinding', 'dlopen', 'mainModule'];
 
 function walk(d, out = []) {
   let names; try { names = readdirSync(d); } catch { return out; }
@@ -139,6 +155,22 @@ export function scanFile(rel, src) {
     [a, /\[\s*(['"`])(setFips|fips)\1\s*\]/g, 'fips', 'computed setFips / fips member'],
   ];
   for (const [text, re, code, msg] of pat) for (const m of text.matchAll(re)) add(m.index + (m[1]?.length ?? 0), code, msg);
+  // G-17: globalThis.<member> only for allow-listed members.
+  for (const m of b.matchAll(/(^|[^\w$.])globalThis\s*(\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)) {
+    if (!GLOBALTHIS_MEMBERS_ALLOWED.includes(m[3])) add(m.index + m[1].length, 'globalThis-member', `globalThis.${m[3]} (not in GLOBALTHIS_MEMBERS_ALLOWED)`);
+  }
+  // G-18: process only as process.<allowed member>; always-banned members on any base.
+  for (const m of b.matchAll(/(^|[^\w$.])process\b/g)) {
+    const at = m.index + m[1].length; const mm = /^process\s*(\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(b.slice(at));
+    if (!mm || !PROCESS_MEMBERS_ALLOWED.includes(mm[2])) add(at, 'process-reach', mm ? `process.${mm[2]} (not in PROCESS_MEMBERS_ALLOWED)` : 'process referenced other than as process.<allowed member> (alias, destructuring, argument)');
+  }
+  for (const m of b.matchAll(new RegExp(`(\\?\\.|\\.)\\s*(${PROCESS_ALWAYS_BANNED.join('|')})\\b`, 'g'))) add(m.index, 'process-banned-member', `.${m[2]} (always red, any base)`);
+  for (const m of a.matchAll(new RegExp(`\\[\\s*(['"\`])(${PROCESS_ALWAYS_BANNED.join('|')})\\1\\s*\\]`, 'g'))) add(m.index, 'process-banned-member', `['${m[2]}'] (always red, any base)`);
+  for (const m of b.matchAll(new RegExp(`[{,]\\s*(${PROCESS_ALWAYS_BANNED.join('|')})\\b\\s*[:,}]`, 'g'))) add(m.index, 'process-banned-member', `destructured ${m[1]} (always red)`);
+  // G-19: module.require, .require( member calls, require not immediately called.
+  for (const m of b.matchAll(/(^|[^\w$.])module\s*(\?\.|\.)\s*require\b/g)) add(m.index + m[1].length, 'module-require', 'module.require');
+  for (const m of b.matchAll(/(\?\.|\.)\s*require\s*\(/g)) add(m.index, 'require-member-call', '.require( member call');
+  for (const m of b.matchAll(/(^|[^\w$.])require\b(?!\s*\()/g)) add(m.index + m[1].length, 'require-alias', 'require referenced other than as a direct call (alias, destructuring, argument)');
   // G-12: globalThis only as a member-access base; the two guard forms are allowed only at GUARD_PATH.
   for (const m of b.matchAll(/(^|[^\w$.])globalThis\b(?!\s*(\?\.|\.|\[))/g)) {
     const at = m.index + m[1].length; const pre = b.slice(Math.max(0, at - 40), at);
@@ -278,16 +310,38 @@ export const BAD = {
   'require-module': "const m = require('module');\n", // G-13
   'fips-identifier': 'const v = fips;\n', // G-16
   'fips-computed': "x['fips'];\n", // G-16
+  // HoQ coverage gaps on 83aa9529.
+  'gt-self-crypto': 'globalThis.self.crypto;\n', 'gt-window-crypto': 'globalThis.window.crypto;\n', // G-17
+  'gt-globalThis-crypto': 'globalThis.globalThis.crypto;\n', 'gt-Function': "globalThis.Function('return this')();\n", // G-17
+  'gt-eval': "globalThis.eval('crypto');\n", 'gt-Reflect-get': "globalThis.Reflect.get(globalThis.self,'crypto');\n", // G-17
+  'gt-process-getBuiltinModule': "globalThis.process.getBuiltinModule('crypto');\n", 'gt-process-binding': "globalThis.process.binding('crypto');\n", // G-17
+  'process-alias': "const p = globalThis.process;\np.getBuiltinModule('crypto');\n", // G-18
+  'process-destructure': "const {getBuiltinModule: g} = process;\ng('crypto');\n", // G-18
+  'process-linkedBinding': "process._linkedBinding('x');\n", 'process-dlopen': 'process.dlopen(m, f);\n', // G-18
+  'process-mainModule': 'process.mainModule;\n', 'process-plain-member': 'process.env;\n', // G-18
+  'module-require': "module.require('crypto');\n", 'mainModule-require': "process.mainModule.require('crypto');\n", // G-19
+  'require-alias': "const r = require;\nr('crypto');\n", 'require-destructure': 'const { require: r } = m;\n', // G-19
+  'require-member-call': "x.require('crypto');\n", // G-19
+  'window-alias': 'const w = window;\n', 'constructor-call': "(() => 1).constructor('return this')();\n", // G-20 (M-152d, M-152g)
+  'guard-forms-non-guard-path': null, // G-20 (M-152c): GUARD_OK planted at a non-guard path; source filled in below
 };
 // Expected reason for fixtures whose hit is not at the planted file (self-test fails if the reason does not match).
 const ALLOW_REASON = (n) => new RegExp(`^src/entropy/:0: rule27-missing-pair \\(randomFillSync, entropy/\\).*PH1-M1 trigger: \\(i\\) src/entropy/a\\.ts exports ${n}\\b`);
+function GUARD_SRC() { return "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n"; }
 export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 'allowlist-FINGERPRINT_BYTES-15': ALLOW_REASON('FINGERPRINT_BYTES'),
   'allowlist-FINGERPRINT_BYTES-string': ALLOW_REASON('FINGERPRINT_BYTES'), 'allowlist-FINGERPRINT_BYTES-let': ALLOW_REASON('FINGERPRINT_BYTES'),
   'allowlist-FINGERPRINT_BYTES-reexport': ALLOW_REASON('FINGERPRINT_BYTES'),
   'allowlist-FINGERPRINT_BYTES-multi': new RegExp(ALLOW_REASON('FINGERPRINT_BYTES').source.replace('exports FINGERPRINT_BYTES\\b', 'has an opaque export \\(const with several declarators\\)')),
   ...Object.fromEntries([['globalThis-destructure', 'globalThis-alias'], ['globalThis-alias', 'globalThis-alias'], ['globalThis-Reflect-get', 'globalThis-alias'],
     ['globalThis-getOwnPropertyDescriptor', 'globalThis-alias'], ['Function-return-this', 'function-eval'], ['require-node-module', 'node-module'],
-    ['require-module', 'node-module'], ['fips-identifier', 'fips'], ['fips-computed', 'fips']].map(([n, c]) => [n, new RegExp(`^src/mapping/bad\\.ts:\\d+: rule27-${c} `)])) };
+    ['require-module', 'node-module'], ['fips-identifier', 'fips'], ['fips-computed', 'fips'],
+    ...['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding'].map((n) => [n, 'globalThis-member']),
+    ['process-alias', 'process-banned-member'], ['process-destructure', 'process-reach'], ['process-linkedBinding', 'process-banned-member'],
+    ['process-dlopen', 'process-banned-member'], ['process-mainModule', 'process-banned-member'], ['process-plain-member', 'process-reach'],
+    ['module-require', 'module-require'], ['mainModule-require', 'process-banned-member'], ['require-alias', 'require-alias'],
+    ['require-destructure', 'require-alias'], ['require-member-call', 'require-member-call'], ['window-alias', 'global-self'], ['constructor-call', 'function-eval']].map(([n, c]) => [n, new RegExp(`^src/mapping/bad\\.ts:\\d+: rule27-${c} `)])),
+  'guard-forms-non-guard-path': /^packages\/capability\/src\/other\.ts:\d+: rule27-defineProperty-globalThis .*outside packages\/capability\/src\/coreGuard\.ts/ };
+BAD['guard-forms-non-guard-path'] = GUARD_SRC();
 // Control planted the same way: the single allow-listed declaration stays green (report-only).
 export const ALLOW_CONTROL = 'export const FINGERPRINT_BYTES = 16;\n';
 // Where each known-bad fixture is planted (default src/mapping/bad.ts).
@@ -295,11 +349,25 @@ export const BAD_PATH = { 'audited-import': 'src/audited/bad.ts', 'createHash-ou
   'capability-crypto': 'packages/capability/src/bad.ts', 'mapping-namespace': 'packages/mapping/src/bad.ts',
   'verify-drbg': 'src/verify/bad.ts', 'verify-drbg-relative': 'src/verify/bad.ts', 'verify-binding-wrong-path': 'src/verify/testingBinding.ts',
   'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts',
-  ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])) };
+  ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])),
+  'guard-forms-non-guard-path': 'packages/capability/src/other.ts' };
 export const GUARD_OK = "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n";
 
 export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
+}
+
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control'];
+function mx12Case(base) {
+  const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
+  const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
+  if (!sp1) return ['MX-12 case: S-P1 not found in tools/claims-allowlist.json'];
+  const run = (name, obj) => { const f = join(base, name); writeFileSync(f, JSON.stringify(obj)); return spawnSync(process.execPath, [lint, '--surface', 'p8-package', f], { encoding: 'utf8' }); };
+  const red = run('mx12-plant.json', { name: 'open-rng-engine', description: sp1, ['\u0063ertified-by']: 1 });
+  if (red.status !== 1 || !red.stdout.split('\n').some((l) => l.includes('(key)'))) out.push(`MX-12 case: p8-package key-only plant not red with a (key) hit (status ${red.status}):\n${red.stdout}`);
+  const clean = run('mx12-clean.json', { name: 'open-rng-engine', description: sp1 });
+  if (clean.status !== 0) out.push(`MX-12 control: clean p8-package not green (status ${clean.status}):\n${clean.stdout}`);
+  return out;
 }
 
 export function selfTest() {
@@ -317,13 +385,18 @@ export function selfTest() {
     }
     const c = join(base, 'allowlist-control'); writeFixture(c, { 'src/entropy/a.ts': ALLOW_CONTROL });
     const cr = scanTree(c).hits; if (cr.length) fails.push(`allow-list control (export const FINGERPRINT_BYTES = 16) not green:\n${cr.join('\n')}`);
+    // G-20 / M-152b: the exact guard at GUARD_PATH stays green.
+    const gd = join(base, 'guard-control'); writeFixture(gd, { [GUARD_PATH]: GUARD_SRC() });
+    const gh = scanTree(gd).hits; if (gh.length) fails.push(`guard-exact control not green:\n${gh.join('\n')}`);
+    // G-20 / MX-12: claims-lint --surface p8-package must lint keys (embedded escaped key-only plant red, clean control green).
+    fails.push(...mx12Case(base));
   } finally { rmSync(base, { recursive: true, force: true }); }
   return fails;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (process.argv[2] === '--self-test') {
-    const f = selfTest(); console.log(f.length ? f.join('\n') : `rule27 self-test: ${Object.keys(BAD).length} known-bad fixtures red, good fixture green`); process.exit(f.length ? 1 : 0);
+    const f = selfTest(); console.log(f.length ? f.join('\n') : `rule27 self-test: ${Object.keys(BAD).length} known-bad fixtures red, good fixture green, ${SELF_TEST_EXTRA_CASES.length} extra cases ok (${SELF_TEST_EXTRA_CASES.join(', ')})`); process.exit(f.length ? 1 : 0);
   }
   const args = process.argv.slice(2); const phaseExit = args.includes('--phase-exit');
   const root = args.find((x) => !x.startsWith('--')) ?? process.cwd();

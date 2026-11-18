@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, entropyTriggers, READ_NAME_ALLOW, BAD_REASON } from '../tools/ci/import-allowlist.mjs';
+import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, strip, entropyTriggers, READ_NAME_ALLOW, BAD_REASON, SELF_TEST_EXTRA_CASES, GLOBALTHIS_MEMBERS_ALLOWED, PROCESS_MEMBERS_ALLOWED } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const EXPECT = {
@@ -176,15 +176,17 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 42 known-bad fixtures incl. the five allow-list red cases and the ten G-12/13/15/16 cases', () => {
-  assert.equal(Object.keys(BAD).length, 42);
+test('HoQ: --self-test carries 64 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-20) plus 4 extra cases', () => {
+  assert.equal(Object.keys(BAD).length, 64);
+  for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
+  assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control']);
   for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
     'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n", 'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /42 known-bad fixtures red/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /64 known-bad fixtures red, good fixture green, 4 extra cases ok/);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -194,7 +196,16 @@ for (const [name, src, code] of [['window alias', 'const w = window;\nw.crypto;\
   ['hasOwn(globalThis) outside the guard', "Object.hasOwn(globalThis, 'k');\n", 'globalThis-alias']]) {
   test(`G-12: ${name} is red`, () => assert.ok(scanFile('src/mapping/x.ts', src).hits.some((h) => h.includes(`rule27-${code} `)), name));
 }
-test('G-12: globalThis.<other> member access stays green; the coreGuard.ts exact-path forms stay green', () => {
-  assert.deepEqual(scanFile('src/mapping/x.ts', 'export const t = globalThis.queueMicrotask;\n').hits, []);
+test('G-17: globalThis.<member> outside the (empty) allow-list is red; the coreGuard.ts exact-path forms stay green', () => {
+  assert.deepEqual(GLOBALTHIS_MEMBERS_ALLOWED, []); assert.deepEqual(PROCESS_MEMBERS_ALLOWED, []);
+  assert.ok(scanFile('src/mapping/x.ts', 'export const t = globalThis.queueMicrotask;\n').hits.some((h) => h.includes('rule27-globalThis-member ')));
   assert.deepEqual(scanFile('packages/capability/src/coreGuard.ts', GUARD_OK).hits, []);
+});
+
+test('G-17/G-18 allow-lists equal what real core source uses: no globalThis/process/module/require token in any scanned file', () => {
+  const r = scanTree(ROOT); assert.deepEqual(r.hits, []);
+  const roots = ['src', 'packages/capability/src', 'packages/mapping'];
+  const files = execFileSync('git', ['ls-files', ...roots], { cwd: ROOT, encoding: 'utf8' }).split('\n').filter((f) => /\.(ts|mts|cts|js|mjs|cjs)$/.test(f));
+  assert.ok(files.length >= 10);
+  for (const f of files) { const code = strip(readFileSync(join(ROOT, f), 'utf8'))[1]; assert.doesNotMatch(code, /\b(globalThis|process|require)\b/, f); }
 });
