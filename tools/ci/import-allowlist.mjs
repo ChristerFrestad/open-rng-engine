@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // CI rule 27, import allowlist for core src/ (quality.md v5.5.7 sha 0202a82b L596; QR-25 L228; PLAN R-44 L152, QR-25 L368, L671).
+// Parsed with the pinned TypeScript compiler (5.9.3) AST. Identifier comparison uses decoded text
+// (`ts.idText` / `escapedText`); raw `\u` escapes in identifiers or string-literal property keys are red (G-23).
 // Red (exit 1) if, in core src/:
 //  - node:crypto is reached other than as named ESM imports, or the (symbol, directory) set differs in any way from
 //    {(randomFillSync, entropy/), (createHash, evidence/), (getFips, identity/)} (missing or extra pairs are both red);
@@ -9,6 +11,15 @@
 //  - a setFips or fips identifier or member appears;
 //  - a file in audited/ imports anything other than core-internal modules (relative paths that stay inside src/);
 //  - Object.defineProperty(globalThis, ...) appears in core src/ (the single R-58(6) exception is outside src/).
+//  G-24: module specifiers are a POSITIVE allow-list. Allowed: relative paths that resolve inside SCAN_ROOTS, plus
+//    `node:crypto` for the required triple only. Everything else is red in every form (static import, export-from,
+//    import(), require, ImportEquals). That includes node:vm, inspector, worker_threads, child_process and any bare
+//    `crypto` / `fs`. `import type` is fine only for relative core paths. `@open-rng-engine/drbg` (and a relative path
+//    into packages/drbg) remains allowed only at VERIFY_BINDING_PATH.
+//  G-21/22: any member access named `constructor` (property access, element access with a literal, destructuring) is
+//    red, as are Reflect.construct, Object/Reflect.getPrototypeOf, and `__proto__`.
+//  G-25: the M-152c fixture is hasOwn(globalThis,'k') at a non-guard path and is red (globalThis-alias). The exact
+//    coreGuard forms are allowed only at packages/capability/src/coreGuard.ts.
 // HoQ ruling on rule 27 (relayed by CTO 2026-11-18 09:00 CET):
 //  Q1 'no more' always blocks; 'no fewer' blocks once entropy/, evidence/ or identity/ exists under src/, is report-only
 //     for a directory that does not exist yet, and is red for a missing directory under --phase-exit.
@@ -53,13 +64,17 @@
 //     G-19 module.require, any `.require(` member call, and `require` not immediately called (alias, destructuring key,
 //          argument) are red; process.mainModule.require is red via the always-banned members.
 //     G-20 --self-test also runs the M-152b/c/d/g cases (guard-exact control, guard forms at a non-guard path, window,
-//          .constructor() and the MX-12 case: claims-lint --surface p8-package on an embedded key-only plant must be red.
+//          .constructor() and the MX-12 case: claims-lint --surface p8-package on an embedded key-only plant must be red).
 // PENDING: the dist/ grep half (no packed core yet).
 // Usage: node tools/ci/import-allowlist.mjs [root] [--phase-exit]   --self-test runs the known-bad fixtures.
 import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, relative, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+
+const ts = createRequire(import.meta.url)('typescript');
+if (ts.version !== '5.9.3') throw new Error(`rule 27 requires typescript 5.9.3, got ${ts.version}`);
 
 export const REQUIRED_PAIRS = ['randomFillSync@entropy', 'createHash@evidence', 'getFips@identity'];
 const EXT = /\.(ts|mts|cts|js|mjs|cjs)$/;
@@ -71,6 +86,7 @@ const DRBG_PKG = '@open-rng-engine/drbg';
 export const GLOBALTHIS_MEMBERS_ALLOWED = Object.freeze([]); // G-17: none used by real core source (2026-11-18)
 export const PROCESS_MEMBERS_ALLOWED = Object.freeze([]); // G-18: none used by real core source (2026-11-18)
 const PROCESS_ALWAYS_BANNED = ['getBuiltinModule', 'binding', '_linkedBinding', 'dlopen', 'mainModule'];
+const READ_CALL_NAME = /^(?:(?:fill|read)[\w$]*|randomBytes|randomFill[\w$]*|getRandomValues|randomUUID|randomInt)$/;
 
 function walk(d, out = []) {
   let names; try { names = readdirSync(d); } catch { return out; }
@@ -99,142 +115,476 @@ export function strip(src) {
 
 const lineOf = (s, idx) => s.slice(0, idx).split('\n').length;
 
+function parseSource(rel, src) {
+  return ts.createSourceFile(rel || 'file.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+}
+
+function parseErrors(sf) {
+  const diags = typeof ts.getSourceFileParseDiagnostics === 'function'
+    ? ts.getSourceFileParseDiagnostics(sf)
+    : (sf.parseDiagnostics ?? []);
+  return diags.filter((d) => d.category === ts.DiagnosticCategory.Error);
+}
+
+function idText(node) {
+  if (!node) return '';
+  if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) return ts.idText(node);
+  return '';
+}
+
+function hasUnicodeEscape(node) {
+  return /\\u/i.test(node.getText());
+}
+
+function isStringLiteralLike(node) {
+  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
+}
+
+function literalText(node) {
+  if (!node) return undefined;
+  if (isStringLiteralLike(node) || ts.isNumericLiteral(node) || ts.isBigIntLiteral(node)) return node.text;
+  return undefined;
+}
+
+function visit(node, fn) {
+  fn(node);
+  ts.forEachChild(node, (c) => visit(c, fn));
+}
+
+function isPropertyAccessName(node) {
+  const p = node.parent;
+  return p && ts.isPropertyAccessExpression(p) && p.name === node;
+}
+
+function isDotOrColonPropertyName(node) {
+  const p = node.parent;
+  if (!p) return false;
+  if (ts.isPropertyAccessExpression(p) && p.name === node) return true;
+  if (ts.isQualifiedName(p) && p.right === node) return true;
+  if (ts.isMetaProperty(p) && p.name === node) return true;
+  if (ts.isPropertyAssignment(p) && p.name === node) return true;
+  if (ts.isBindingElement(p) && p.propertyName === node) return true;
+  if (ts.isLabeledStatement(p) && p.label === node) return true;
+  if ((ts.isBreakStatement(p) || ts.isContinueStatement(p)) && p.label === node) return true;
+  if ((ts.isPropertyDeclaration(p) || ts.isPropertySignature(p) || ts.isEnumMember(p)
+    || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isParameter(p)) && p.name === node) return true;
+  return false;
+}
+
+function isMemberAccessBase(node) {
+  const p = node.parent;
+  if (!p) return false;
+  return (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === node;
+}
+
+function accessMemberName(node) {
+  if (ts.isPropertyAccessExpression(node)) return idText(node.name);
+  if (ts.isElementAccessExpression(node)) return literalText(node.argumentExpression);
+  return undefined;
+}
+
+function isIdent(node, name) {
+  return node && ts.isIdentifier(node) && idText(node) === name;
+}
+
+function isObjectOrReflectGetPrototypeOf(expr) {
+  if (!ts.isPropertyAccessExpression(expr) && !ts.isElementAccessExpression(expr)) return false;
+  if (accessMemberName(expr) !== 'getPrototypeOf') return false;
+  const base = expr.expression;
+  if (isIdent(base, 'Object') || isIdent(base, 'Reflect')) return true;
+  if (ts.isPropertyAccessExpression(base) || ts.isElementAccessExpression(base)) {
+    const n = accessMemberName(base);
+    return n === 'Object' || n === 'Reflect';
+  }
+  return false;
+}
+
+function isReflectConstruct(expr) {
+  if (!ts.isPropertyAccessExpression(expr) && !ts.isElementAccessExpression(expr)) return false;
+  if (accessMemberName(expr) !== 'construct') return false;
+  const base = expr.expression;
+  if (isIdent(base, 'Reflect')) return true;
+  if (ts.isPropertyAccessExpression(base) || ts.isElementAccessExpression(base)) return accessMemberName(base) === 'Reflect';
+  return false;
+}
+
+function isLiteralPropertyKey(node) {
+  if (!isStringLiteralLike(node)) return false;
+  const p = node.parent;
+  if (!p) return false;
+  if (ts.isElementAccessExpression(p) && p.argumentExpression === node) return true;
+  if (ts.isComputedPropertyName(p) && p.expression === node) return true;
+  if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p) || ts.isPropertySignature(p) || ts.isMethodDeclaration(p)
+    || ts.isMethodSignature(p) || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isEnumMember(p)
+    || ts.isBindingElement(p)) && p.name === node) return true;
+  if (ts.isBindingElement(p) && p.propertyName === node) return true;
+  return false;
+}
+
+function resolveRel(fromRel, spec) {
+  return relative('/r', resolve('/r', dirname(fromRel), spec)).split(sep).join('/');
+}
+
+function inScanRoots(resolved) {
+  return SCAN_ROOTS.some((root) => resolved === root || resolved.startsWith(root + '/'));
+}
+
+function isDrbgSpec(rel, spec) {
+  if (spec === DRBG_PKG || spec.startsWith(DRBG_PKG + '/')) return true;
+  if (spec.startsWith('.') && (resolve('/r', dirname(rel), spec) + sep).startsWith(resolve('/r', 'packages/drbg') + sep)) return true;
+  return false;
+}
+
+function specifierAllowed(rel, spec, { typeOnly = false } = {}) {
+  if (typeof spec !== 'string') return false;
+  if (spec.startsWith('.')) return inScanRoots(resolveRel(rel, spec));
+  if (spec === 'node:crypto') return !typeOnly;
+  if (isDrbgSpec(rel, spec) && rel === VERIFY_BINDING_PATH) return !typeOnly;
+  return false;
+}
+
+function isGuardFormGlobalThisArg(node, rel) {
+  if (rel !== GUARD_PATH) return false;
+  const call = node.parent;
+  if (!call || !ts.isCallExpression(call)) return false;
+  if (call.arguments[0] !== node) return false;
+  const cal = call.expression;
+  if (!ts.isPropertyAccessExpression(cal)) return false;
+  if (!isIdent(cal.expression, 'Object')) return false;
+  const m = idText(cal.name);
+  return m === 'hasOwn' || m === 'defineProperty';
+}
+
+function isExactGuardDescriptor(obj) {
+  if (!obj || !ts.isObjectLiteralExpression(obj) || obj.properties.length !== 4) return false;
+  const names = obj.properties.map((p) => {
+    if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+      if (ts.isIdentifier(p.name)) return idText(p.name);
+      if (isStringLiteralLike(p.name)) return p.name.text;
+    }
+    return '';
+  });
+  if (names.join(',') !== 'value,writable,configurable,enumerable') return false;
+  const valueProp = obj.properties[0];
+  if (ts.isShorthandPropertyAssignment(valueProp)) { /* ok */ }
+  else if (ts.isPropertyAssignment(valueProp) && valueProp.initializer) {
+    const init = valueProp.initializer;
+    if (ts.isIdentifier(init)) { /* ok */ }
+    else if (ts.isPropertyAccessExpression(init) && /^[\w$.]+$/.test(init.getText())) { /* ok */ }
+    else return false;
+  } else return false;
+  for (const i of [1, 2, 3]) {
+    const p = obj.properties[i];
+    if (!ts.isPropertyAssignment(p) || !p.initializer || p.initializer.kind !== ts.SyntaxKind.FalseKeyword) return false;
+  }
+  return true;
+}
+
+function isDefinePropertyGlobalThis(call) {
+  if (!ts.isCallExpression(call)) return false;
+  const cal = call.expression;
+  if (!ts.isPropertyAccessExpression(cal) || !isIdent(cal.expression, 'Object') || idText(cal.name) !== 'defineProperty') return false;
+  return call.arguments[0] && isIdent(call.arguments[0], 'globalThis');
+}
+
+function isHasOwnGlobalThis(call) {
+  if (!ts.isCallExpression(call)) return false;
+  const cal = call.expression;
+  if (!ts.isPropertyAccessExpression(cal) || !isIdent(cal.expression, 'Object') || idText(cal.name) !== 'hasOwn') return false;
+  return call.arguments[0] && isIdent(call.arguments[0], 'globalThis');
+}
+
+function callName(node) {
+  if (ts.isIdentifier(node)) return idText(node);
+  if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return accessMemberName(node);
+  return undefined;
+}
+
+function collectSpecifiers(sf, rel) {
+  const out = [];
+  visit(sf, (node) => {
+    if (ts.isImportDeclaration(node) && node.moduleSpecifier && isStringLiteralLike(node.moduleSpecifier)) {
+      out.push({ spec: node.moduleSpecifier.text, node, kind: 'import', typeOnly: !!node.importClause?.isTypeOnly });
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && isStringLiteralLike(node.moduleSpecifier)) {
+      out.push({ spec: node.moduleSpecifier.text, node, kind: 'export', typeOnly: !!node.isTypeOnly });
+    } else if (ts.isImportEqualsDeclaration(node) && node.moduleReference && ts.isExternalModuleReference(node.moduleReference)
+      && node.moduleReference.expression && isStringLiteralLike(node.moduleReference.expression)) {
+      out.push({ spec: node.moduleReference.expression.text, node, kind: 'importEquals', typeOnly: !!node.isTypeOnly });
+    }
+  });
+  return out;
+}
+
 export function scanFile(rel, src) {
   const hits = []; const pairs = [];
-  const [a, b] = strip(src);
   const top = rel.startsWith('src/') ? (rel.split('/')[1] ?? '') : rel.split('/').slice(0, 2).join('/');
   const inVerify = rel.startsWith('src/verify/') || rel.startsWith('verify/');
   const add = (idx, code, msg) => hits.push(`${rel}:${lineOf(src, idx)}: rule27-${code} ${msg}`);
+  const addNode = (node, code, msg) => add(node.getStart(), code, msg);
   const isCrypto = (s) => s === 'node:crypto' || s === 'crypto';
-  const specs = [];
-  for (const m of a.matchAll(/(^|[^\w$.])import\s+(?!\()([^'";]*?)\s*from\s*(['"])([^'"]+)\3/g)) specs.push({ idx: m.index + m[1].length, kind: 'import', clause: m[2].trim(), spec: m[4] });
-  for (const m of a.matchAll(/(^|[^\w$.])import\s*(['"])([^'"]+)\2/g)) specs.push({ idx: m.index + m[1].length, kind: 'side', clause: '', spec: m[3] });
-  for (const m of a.matchAll(/(^|[^\w$.])export\s+([^'";]*?)\s*from\s*(['"])([^'"]+)\3/g)) specs.push({ idx: m.index + m[1].length, kind: 'export', clause: m[2].trim(), spec: m[4] });
+
+  const sf = parseSource(rel, src);
+  for (const d of parseErrors(sf)) add(d.start ?? 0, 'parse', ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+
+  const specs = collectSpecifiers(sf, rel);
   for (const s of specs) {
-    const clause = s.clause.replace(/^type\s+/, '');
-    if (s.kind === 'import' && /^\*\s*as\b/.test(clause)) add(s.idx, 'namespace-import', `namespace import of '${s.spec}'`);
-    else if (s.kind === 'import' && /^[A-Za-z_$][\w$]*\s*(,|$)/.test(clause)) add(s.idx, 'default-import', `default import of '${s.spec}'`);
-    if (s.spec === 'node:module' || s.spec === 'module') add(s.idx, 'node-module', `import of '${s.spec}'`);
+    const clause = s.node.importClause;
+    if (s.kind === 'import' && clause) {
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) addNode(s.node, 'namespace-import', `namespace import of '${s.spec}'`);
+      else if (clause.name) addNode(s.node, 'default-import', `default import of '${s.spec}'`);
+    }
+    if (s.spec === 'node:module' || s.spec === 'module') addNode(s.node, 'node-module', `import of '${s.spec}'`);
     if (isCrypto(s.spec)) {
-      const named = /^\{([^}]*)\}$/.exec(clause);
-      if (s.spec !== 'node:crypto') add(s.idx, 'bare-crypto-specifier', `'${s.spec}' (only 'node:crypto' named imports are allowed)`);
-      if (s.kind !== 'import' || !named) add(s.idx, 'crypto-not-named', `node:crypto reached other than as a named ESM import`);
-      else for (const part of named[1].split(',').map((x) => x.trim()).filter(Boolean)) {
-        const [sym0, alias] = part.replace(/^type\s+/, '').split(/\s+as\s+/).map((x) => x.trim());
-        const sym = sym0;
-        if (alias !== undefined && alias !== sym) add(s.idx, 'crypto-alias', `node:crypto symbol ${sym} imported under alias ${alias} (only the exact named import is allowed)`);
-        pairs.push({ pair: `${sym}@${top}`, at: `${rel}:${lineOf(src, s.idx)}` });
+      const named = s.kind === 'import' && clause && clause.namedBindings && ts.isNamedImports(clause.namedBindings);
+      if (s.spec !== 'node:crypto') addNode(s.node, 'bare-crypto-specifier', `'${s.spec}' (only 'node:crypto' named imports are allowed)`);
+      if (s.kind !== 'import' || !named || s.typeOnly) addNode(s.node, 'crypto-not-named', `node:crypto reached other than as a named ESM import`);
+      else {
+        for (const el of clause.namedBindings.elements) {
+          const sym = idText(el.propertyName ?? el.name);
+          const alias = idText(el.name);
+          if (el.propertyName && alias !== sym) addNode(s.node, 'crypto-alias', `node:crypto symbol ${sym} imported under alias ${alias} (only the exact named import is allowed)`);
+          if (!el.isTypeOnly && !s.typeOnly) pairs.push({ pair: `${sym}@${top}`, at: `${rel}:${lineOf(src, s.node.getStart())}` });
+        }
       }
     }
-    if (!isCrypto(s.spec) && /(^|[\s,{])randomFillSync([\s,}]|$)/.test(s.clause)) add(s.idx, 'randomFillSync-other-path', `randomFillSync reached through '${s.spec}' (only node:crypto in src/entropy/)`);
-    if (inVerify) {
-      const drbg = s.spec === DRBG_PKG || s.spec.startsWith(DRBG_PKG + '/') || (s.spec.startsWith('.') && (resolve('/r', dirname(rel), s.spec) + sep).startsWith(resolve('/r', 'packages/drbg') + sep));
-      if (drbg && rel !== VERIFY_BINDING_PATH) add(s.idx, 'verify-drbg-binding', `'${s.spec}' reached from ${rel}; only ${VERIFY_BINDING_PATH} (PLAN L535) may bind the deterministic source`);
+    const clauseText = s.kind === 'import' && clause ? clause.getText() : (s.kind === 'export' && s.node.exportClause ? s.node.exportClause.getText() : '');
+    if (!isCrypto(s.spec) && /(^|[\s,{])randomFillSync([\s,}]|$)/.test(clauseText)) addNode(s.node, 'randomFillSync-other-path', `randomFillSync reached through '${s.spec}' (only node:crypto in src/entropy/)`);
+    if (inVerify && isDrbgSpec(rel, s.spec) && rel !== VERIFY_BINDING_PATH) {
+      addNode(s.node, 'verify-drbg-binding', `'${s.spec}' reached from ${rel}; only ${VERIFY_BINDING_PATH} (PLAN L535) may bind the deterministic source`);
     }
     if (top === 'audited') {
       const internal = s.spec.startsWith('.') && (resolve('/r', dirname(rel), s.spec) + sep).startsWith(resolve('/r', 'src') + sep);
-      if (!internal) add(s.idx, 'audited-import', `audited/ imports '${s.spec}' (only core-internal modules and evidence/)`);
+      if (!internal) addNode(s.node, 'audited-import', `audited/ imports '${s.spec}' (only core-internal modules and evidence/)`);
+    }
+    if (!specifierAllowed(rel, s.spec, { typeOnly: s.typeOnly })) {
+      addNode(s.node, 'specifier-not-allowed', `module specifier '${s.spec}' is not on the positive allow-list`);
     }
   }
-  const pat = [
-    [b, /(^|[^\w$.])import\s*\(/g, 'dynamic-import', 'dynamic import()'],
-    [a, /(^|[^\w$.])require\s*\(\s*(['"`])(node:)?crypto\2\s*\)/g, 'require-crypto', "require('node:crypto'|'crypto')"],
-    [a, /(^|[^\w$.])process\s*(\?\.|\.)\s*(binding|getBuiltinModule)\b/g, 'process-binding', 'process.binding / process.getBuiltinModule'],
-    [a, /(^|[^\w$.])process\s*(\?\.)?\s*\[\s*(['"`])(binding|getBuiltinModule)\3/g, 'process-binding', 'computed process.binding / getBuiltinModule'],
-    [b, /(^|[^\w$.])globalThis\s*(\?\.|\.)\s*crypto\b/g, 'globalThis-crypto', 'globalThis.crypto'],
-    [b, /(^|[^\w$.])globalThis\s*(\?\.)?\s*\[/g, 'globalThis-computed', 'computed globalThis[...] access'],
-    [b, /(^|[^\w$.])crypto\b(?!\s*:)/g, 'bare-global-crypto', 'bare global crypto'],
-    [b, /(^|[^\w$.])(global|self)\b(?!\s*:)/g, 'global-self', 'global / self'],
-    [b, /(^|[^\w$])createRequire\b/g, 'createRequire', 'createRequire identifier'],
-    [a, /(^|[^\w$.])require\s*\(\s*(['"`])(node:)?module\2\s*\)/g, 'node-module', "require('node:module'|'module')"],
-    [b, /(^|[^\w$.])window\b(?!\s*:)/g, 'global-self', 'window'],
-    [b, /(^|[^\w$.])(Function|eval)\b(?!\s*:)/g, 'function-eval', 'Function / eval (code-from-string can reach the global object)'],
-    [b, /\.\s*constructor\s*\(/g, 'function-eval', '.constructor( call (Function-constructor reach)'],
-    ...(rel.startsWith('src/entropy/') ? [] : [[b, /(^|[^\w$])randomFillSync\b/g, 'randomFillSync-outside-entropy', 'randomFillSync outside src/entropy/']]),
-    [b, /(^|[^\w$])(setFips|fips)\b/g, 'fips', 'setFips / fips identifier or member'],
-    [a, /\[\s*(['"`])(setFips|fips)\1\s*\]/g, 'fips', 'computed setFips / fips member'],
-  ];
-  for (const [text, re, code, msg] of pat) for (const m of text.matchAll(re)) add(m.index + (m[1]?.length ?? 0), code, msg);
-  // G-17: globalThis.<member> only for allow-listed members.
-  for (const m of b.matchAll(/(^|[^\w$.])globalThis\s*(\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)) {
-    if (!GLOBALTHIS_MEMBERS_ALLOWED.includes(m[3])) add(m.index + m[1].length, 'globalThis-member', `globalThis.${m[3]} (not in GLOBALTHIS_MEMBERS_ALLOWED)`);
-  }
-  // G-18: process only as process.<allowed member>; always-banned members on any base.
-  for (const m of b.matchAll(/(^|[^\w$.])process\b/g)) {
-    const at = m.index + m[1].length; const mm = /^process\s*(\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(b.slice(at));
-    if (!mm || !PROCESS_MEMBERS_ALLOWED.includes(mm[2])) add(at, 'process-reach', mm ? `process.${mm[2]} (not in PROCESS_MEMBERS_ALLOWED)` : 'process referenced other than as process.<allowed member> (alias, destructuring, argument)');
-  }
-  for (const m of b.matchAll(new RegExp(`(\\?\\.|\\.)\\s*(${PROCESS_ALWAYS_BANNED.join('|')})\\b`, 'g'))) add(m.index, 'process-banned-member', `.${m[2]} (always red, any base)`);
-  for (const m of a.matchAll(new RegExp(`\\[\\s*(['"\`])(${PROCESS_ALWAYS_BANNED.join('|')})\\1\\s*\\]`, 'g'))) add(m.index, 'process-banned-member', `['${m[2]}'] (always red, any base)`);
-  for (const m of b.matchAll(new RegExp(`[{,]\\s*(${PROCESS_ALWAYS_BANNED.join('|')})\\b\\s*[:,}]`, 'g'))) add(m.index, 'process-banned-member', `destructured ${m[1]} (always red)`);
-  // G-19: module.require, .require( member calls, require not immediately called.
-  for (const m of b.matchAll(/(^|[^\w$.])module\s*(\?\.|\.)\s*require\b/g)) add(m.index + m[1].length, 'module-require', 'module.require');
-  for (const m of b.matchAll(/(\?\.|\.)\s*require\s*\(/g)) add(m.index, 'require-member-call', '.require( member call');
-  for (const m of b.matchAll(/(^|[^\w$.])require\b(?!\s*\()/g)) add(m.index + m[1].length, 'require-alias', 'require referenced other than as a direct call (alias, destructuring, argument)');
-  // G-12: globalThis only as a member-access base; the two guard forms are allowed only at GUARD_PATH.
-  for (const m of b.matchAll(/(^|[^\w$.])globalThis\b(?!\s*(\?\.|\.|\[))/g)) {
-    const at = m.index + m[1].length; const pre = b.slice(Math.max(0, at - 40), at);
-    if (rel === GUARD_PATH && /Object\s*\.\s*(hasOwn|defineProperty)\s*\(\s*$/.test(pre) && /^globalThis\s*,/.test(b.slice(at))) continue;
-    add(at, 'globalThis-alias', 'globalThis referenced other than as a member-access base (alias, destructuring or argument)');
-  }
-  // QR-25 L228 / R-58(6): exactly one Object.defineProperty(globalThis, "<literal>", { value, writable: false,
-  // configurable: false, enumerable: false }) in GUARD_PATH only, preceded by an Object.hasOwn(globalThis, KEY) check that throws.
-  const dps = [...b.matchAll(/(^|[^\w$.])Object\s*\.\s*defineProperty\s*\(\s*globalThis\b/g)];
-  if (rel !== GUARD_PATH) for (const m of dps) add(m.index + m[1].length, 'defineProperty-globalThis', `Object.defineProperty(globalThis, ...) outside ${GUARD_PATH}`);
-  else {
-    if (dps.length > 1) for (const m of dps.slice(1)) add(m.index + m[1].length, 'defineProperty-globalThis', 'second Object.defineProperty(globalThis, ...) in the guard');
+
+  const dps = [];
+  visit(sf, (node) => {
+    if ((ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) && hasUnicodeEscape(node)) {
+      addNode(node, 'unicode-escape', `unicode escape in identifier '${node.getText()}' (decoded '${idText(node)}')`);
+    }
+    if (isLiteralPropertyKey(node) && hasUnicodeEscape(node)) {
+      addNode(node, 'unicode-escape', `unicode escape in string-literal property key ${node.getText()}`);
+    }
+
+    if (ts.isImportCall(node) || (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword)) {
+      addNode(node, 'dynamic-import', 'dynamic import()');
+      const arg = node.arguments?.[0];
+      const spec = arg && isStringLiteralLike(arg) ? arg.text : undefined;
+      if (!specifierAllowed(rel, spec ?? '', { typeOnly: false })) {
+        addNode(node, 'specifier-not-allowed', `module specifier '${spec ?? '<non-literal>'}' is not on the positive allow-list`);
+      }
+    }
+
+    if (ts.isCallExpression(node) && isIdent(node.expression, 'require')) {
+      const arg = node.arguments[0];
+      const spec = arg && isStringLiteralLike(arg) ? arg.text : undefined;
+      if (spec === 'crypto' || spec === 'node:crypto') addNode(node, 'require-crypto', "require('node:crypto'|'crypto')");
+      else if (spec === 'module' || spec === 'node:module') addNode(node, 'node-module', "require('node:module'|'module')");
+      else addNode(node, 'require-not-allowed', `require(${spec !== undefined ? `'${spec}'` : '...'})`);
+      if (spec !== undefined && !specifierAllowed(rel, spec) && spec !== 'crypto' && spec !== 'node:crypto' && spec !== 'module' && spec !== 'node:module') {
+        addNode(node, 'specifier-not-allowed', `module specifier '${spec}' is not on the positive allow-list`);
+      } else if (spec === undefined) {
+        addNode(node, 'specifier-not-allowed', `module specifier '<non-literal>' is not on the positive allow-list`);
+      }
+    }
+
+    if (ts.isImportEqualsDeclaration(node) && node.moduleReference && ts.isExternalModuleReference(node.moduleReference)) {
+      const expr = node.moduleReference.expression;
+      const spec = expr && isStringLiteralLike(expr) ? expr.text : undefined;
+      if (spec === 'crypto' || spec === 'node:crypto') addNode(node, 'require-crypto', "require('node:crypto'|'crypto')");
+      else if (spec === 'module' || spec === 'node:module') addNode(node, 'node-module', "require('node:module'|'module')");
+      if (!specifierAllowed(rel, spec ?? '')) addNode(node, 'specifier-not-allowed', `module specifier '${spec ?? '<non-literal>'}' is not on the positive allow-list`);
+    }
+
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const mem = accessMemberName(node);
+      if (mem === 'constructor') addNode(node, 'constructor-reach', 'member access named constructor');
+      if (mem === '__proto__') addNode(node, 'proto-member', 'member access named __proto__');
+      if (PROCESS_ALWAYS_BANNED.includes(mem)) addNode(node, 'process-banned-member', mem === undefined ? 'banned member' : (ts.isElementAccessExpression(node) ? `['${mem}'] (always red, any base)` : `.${mem} (always red, any base)`));
+      if ((mem === 'binding' || mem === 'getBuiltinModule') && isIdent(node.expression, 'process')) {
+        addNode(node, 'process-binding', 'process.binding / process.getBuiltinModule');
+      }
+      if (mem === 'require' && isIdent(node.expression, 'module')) addNode(node, 'module-require', 'module.require');
+      if (isIdent(node.expression, 'globalThis')) {
+        if (ts.isElementAccessExpression(node)) addNode(node, 'globalThis-computed', 'computed globalThis[...] access');
+        else if (mem === 'crypto') addNode(node, 'globalThis-crypto', 'globalThis.crypto');
+        if (mem !== undefined && ts.isPropertyAccessExpression(node) && !GLOBALTHIS_MEMBERS_ALLOWED.includes(mem)) {
+          addNode(node, 'globalThis-member', `globalThis.${mem} (not in GLOBALTHIS_MEMBERS_ALLOWED)`);
+        }
+      }
+    }
+
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      const expr = node.expression;
+      const mem = accessMemberName(expr);
+      if (mem === 'constructor') addNode(node, 'function-eval', '.constructor( call (Function-constructor reach)');
+      if (isReflectConstruct(expr)) addNode(node, 'reflect-construct', 'Reflect.construct');
+      if (isObjectOrReflectGetPrototypeOf(expr)) addNode(node, 'getPrototypeOf', 'Object/Reflect.getPrototypeOf');
+      if ((ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) && accessMemberName(expr) === 'require') {
+        addNode(expr, 'require-member-call', '.require( member call');
+      }
+    }
+    // Reflect.construct / getPrototypeOf as a member even when not called (reach).
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
+      if (isReflectConstruct(node)) addNode(node, 'reflect-construct', 'Reflect.construct');
+      if (isObjectOrReflectGetPrototypeOf(node)) addNode(node, 'getPrototypeOf', 'Object/Reflect.getPrototypeOf');
+    }
+
+    if (ts.isBindingElement(node)) {
+      const keyNode = node.propertyName ?? node.name;
+      const key = ts.isIdentifier(keyNode) ? idText(keyNode) : literalText(keyNode);
+      if (key === 'constructor') addNode(node, 'constructor-reach', 'destructured constructor');
+      if (key === '__proto__') addNode(node, 'proto-member', 'destructured __proto__');
+      if (PROCESS_ALWAYS_BANNED.includes(key)) addNode(node, 'process-banned-member', `destructured ${key} (always red)`);
+    }
+
+    if (ts.isIdentifier(node)) {
+      const name = idText(node);
+      if (name === 'crypto' && !isDotOrColonPropertyName(node)) addNode(node, 'bare-global-crypto', 'bare global crypto');
+      if ((name === 'global' || name === 'self' || name === 'window') && !isDotOrColonPropertyName(node)) addNode(node, 'global-self', name === 'window' ? 'window' : 'global / self');
+      if ((name === 'Function' || name === 'eval') && !isDotOrColonPropertyName(node)) addNode(node, 'function-eval', 'Function / eval (code-from-string can reach the global object)');
+      if (name === 'createRequire') addNode(node, 'createRequire', 'createRequire identifier');
+      if ((name === 'setFips' || name === 'fips')) addNode(node, 'fips', 'setFips / fips identifier or member');
+      if (name === 'randomFillSync' && !rel.startsWith('src/entropy/')) addNode(node, 'randomFillSync-outside-entropy', 'randomFillSync outside src/entropy/');
+      if (name === 'require' && !isPropertyAccessName(node) && !(node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node)) {
+        addNode(node, 'require-alias', 'require referenced other than as a direct call (alias, destructuring, argument)');
+      }
+      if (name === 'process' && !isPropertyAccessName(node)) {
+        if (isMemberAccessBase(node)) {
+          const acc = node.parent;
+          const mem = accessMemberName(acc);
+          if (mem === undefined || !PROCESS_MEMBERS_ALLOWED.includes(mem)) {
+            addNode(node, 'process-reach', mem !== undefined && ts.isPropertyAccessExpression(acc) ? `process.${mem} (not in PROCESS_MEMBERS_ALLOWED)` : 'process referenced other than as process.<allowed member> (alias, destructuring, argument)');
+          }
+        } else {
+          addNode(node, 'process-reach', 'process referenced other than as process.<allowed member> (alias, destructuring, argument)');
+        }
+      }
+      if (name === 'globalThis' && !isPropertyAccessName(node)) {
+        if (!isMemberAccessBase(node) && !isGuardFormGlobalThisArg(node, rel)) {
+          addNode(node, 'globalThis-alias', 'globalThis referenced other than as a member-access base (alias, destructuring or argument)');
+        }
+      }
+    }
+
+    if (ts.isElementAccessExpression(node)) {
+      const lit = literalText(node.argumentExpression);
+      if (lit === 'fips' || lit === 'setFips') addNode(node, 'fips', 'computed setFips / fips member');
+    }
+
+    if (ts.isCallExpression(node) && isDefinePropertyGlobalThis(node)) dps.push(node);
+
+    if (ts.isPropertyAccessExpression(node) && isIdent(node.expression, 'Symbol') && idText(node.name) === 'for' && rel === GUARD_PATH) {
+      addNode(node, 'defineProperty-globalThis', 'Symbol.for in the guard');
+    }
+  });
+
+  if (rel !== GUARD_PATH) {
+    for (const m of dps) addNode(m, 'defineProperty-globalThis', `Object.defineProperty(globalThis, ...) outside ${GUARD_PATH}`);
+  } else {
+    if (dps.length > 1) for (const m of dps.slice(1)) addNode(m, 'defineProperty-globalThis', 'second Object.defineProperty(globalThis, ...) in the guard');
     if (dps.length >= 1) {
-      const at = dps[0].index + dps[0][1].length;
-      const call = /^Object\s*\.\s*defineProperty\s*\(\s*globalThis\s*,\s*(['"])[^'"`\\]+\1\s*,\s*\{\s*value\s*(:\s*[\w$.]+\s*)?,\s*writable\s*:\s*false\s*,\s*configurable\s*:\s*false\s*,\s*enumerable\s*:\s*false\s*,?\s*\}\s*\)/.exec(a.slice(at));
-      if (!call) add(at, 'defineProperty-globalThis', 'guard defineProperty is not the exact R-58(6) form (fixed string literal key, value, writable/configurable/enumerable false)');
-      const before = b.slice(0, at);
-      if (!/Object\s*\.\s*hasOwn\s*\(\s*globalThis\s*,/.test(before) || !/\bthrow\b/.test(before)) add(at, 'defineProperty-globalThis', 'guard defineProperty is not preceded by an Object.hasOwn(globalThis, KEY) check that throws');
+      const call = dps[0];
+      const key = call.arguments[1];
+      const desc = call.arguments[2];
+      const keyOk = key && ts.isStringLiteral(key) && !/\\/.test(key.getText());
+      if (!keyOk || !isExactGuardDescriptor(desc)) {
+        addNode(call, 'defineProperty-globalThis', 'guard defineProperty is not the exact R-58(6) form (fixed string literal key, value, writable/configurable/enumerable false)');
+      }
+      let hasOwnBefore = false, throwBefore = false;
+      visit(sf, (n) => {
+        if (n.getStart() >= call.getStart()) return;
+        if (ts.isCallExpression(n) && isHasOwnGlobalThis(n)) hasOwnBefore = true;
+        if (ts.isThrowStatement(n)) throwBefore = true;
+      });
+      if (!hasOwnBefore || !throwBefore) addNode(call, 'defineProperty-globalThis', 'guard defineProperty is not preceded by an Object.hasOwn(globalThis, KEY) check that throws');
     }
-    if (/Symbol\s*\.\s*for\b/.test(b)) add(b.search(/Symbol\s*\.\s*for\b/), 'defineProperty-globalThis', 'Symbol.for in the guard');
   }
+
   return { hits, pairs };
 }
 
 const READ_NAME = /read|fetch|bytes|entropy|fill|draw/i;
-const READ_CALL = /(^|[^\w$])((fill|read)[\w$]*|randomBytes|randomFill[\w$]*|getRandomValues|randomUUID|randomInt)\s*\(/gi;
 const ENTRY_NAME = /^(createRng|createAuditedRng|randomInt|shuffle|sample|weightedPick|randomBytes|create[\w$]*Rng|random[\w$]*)$/;
 
 // Exported names of one module: [{ name, allowed }], plus opaque=true for export * / default / destructuring.
 // allowed = true only for an exact READ_NAME_ALLOW declaration (HoQ tighten ruling; each entry needs a HoQ ruling + fixture).
 export const READ_NAME_ALLOW = Object.freeze({ FINGERPRINT_BYTES: '16' });
 export function exportsOf(src) {
-  const [a, b] = strip(src); const out = []; let opaque = [];
-  for (const m of b.matchAll(/(^|[^\w$.])export\s+(declare\s+)?(async\s+)?(function\s*\*?|class|const|let|var|type|interface|enum)\s*([A-Za-z_$][\w$]*)/g)) {
-    const want = Object.hasOwn(READ_NAME_ALLOW, m[5]) ? READ_NAME_ALLOW[m[5]] : undefined;
-    const allowed = want !== undefined && m[4] === 'const' && !m[2] && new RegExp(`^export\\s+const\\s+${m[5]}\\s*=\\s*${want}\\s*;`).test(a.slice(m.index + m[1].length));
-    out.push({ name: m[5], allowed });
-  }
-  for (const m of a.matchAll(/(^|[^\w$.])export\s+(type\s+)?\{([^}]*)\}/g)) for (const part of m[3].split(',').map((x) => x.trim()).filter(Boolean)) {
-    const ps = part.replace(/^type\s+/, '').split(/\s+as\s+/).map((x) => x.trim()); out.push({ name: ps[1] ?? ps[0], allowed: false });
-  }
-  for (const m of b.matchAll(/(^|[^\w$.])export\s*(\*|default\b|(const|let|var)\s*[\[{])/g)) opaque.push(m[2]);
-  // G-15: more than one declarator in one exported declaration is opaque.
-  for (const m of b.matchAll(/(^|[^\w$.])export\s+(const|let|var)\s+[A-Za-z_$]/g)) {
-    let depth = 0; let multi = false;
-    for (let i = m.index + m[0].length; i < b.length; i++) { const ch = b[i];
-      if ('([{'.includes(ch)) depth++; else if (')]}'.includes(ch)) depth--; else if (depth === 0 && (ch === ';' || ch === '\n')) break; else if (depth === 0 && ch === ',') { multi = true; break; } }
-    if (multi) opaque.push(`${m[2]} with several declarators`);
-  }
+  const sf = parseSource('exports.ts', src);
+  const out = []; const opaque = [];
+  const [a] = strip(src);
+  visit(sf, (node) => {
+    if (ts.isExportDeclaration(node)) {
+      if (node.exportClause && ts.isNamedExports(node.exportClause)) {
+        for (const el of node.exportClause.elements) out.push({ name: idText(el.name), allowed: false });
+      } else if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) {
+        opaque.push('*');
+      }
+    } else if (ts.isExportAssignment(node)) {
+      opaque.push('default');
+    } else if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)
+      || ts.isTypeAliasDeclaration(node) || ts.isEnumDeclaration(node)) {
+      const mods = ts.getModifiers(node) ?? node.modifiers ?? [];
+      const isExport = mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      const isDefault = mods.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
+      if (isExport && isDefault) opaque.push('default');
+      else if (isExport && node.name) out.push({ name: idText(node.name), allowed: false });
+    } else if (ts.isVariableStatement(node)) {
+      const mods = ts.getModifiers(node) ?? node.modifiers ?? [];
+      if (!mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return;
+      const declKind = node.declarationList.flags & ts.NodeFlags.Const ? 'const'
+        : node.declarationList.flags & ts.NodeFlags.Let ? 'let' : 'var';
+      const isDeclare = mods.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword);
+      if (node.declarationList.declarations.length > 1) opaque.push(`${declKind} with several declarators`);
+      for (const d of node.declarationList.declarations) {
+        if (ts.isArrayBindingPattern(d.name) || ts.isObjectBindingPattern(d.name)) {
+          opaque.push(`${declKind} ` + (ts.isArrayBindingPattern(d.name) ? '[' : '{'));
+          continue;
+        }
+        if (!ts.isIdentifier(d.name)) continue;
+        const name = idText(d.name);
+        const want = Object.hasOwn(READ_NAME_ALLOW, name) ? READ_NAME_ALLOW[name] : undefined;
+        const start = node.getStart();
+        const allowed = want !== undefined && declKind === 'const' && !isDeclare && !d.type
+          && new RegExp(`^export\\s+const\\s+${name}\\s*=\\s*${want}\\s*;`).test(a.slice(start));
+        out.push({ name, allowed });
+      }
+    }
+  });
   return { names: out, opaque };
 }
 
-const SPECS = (a) => [...a.matchAll(/(^|[^\w$.])(?:import|export)\s+[^'";]*?\s*from\s*(['"])([^'"]+)\2/g), ...a.matchAll(/(^|[^\w$.])import\s*(['"])([^'"]+)\2/g)].map((m) => m[3]);
+function specifiersOf(src, rel = 'file.ts') {
+  const sf = parseSource(rel, src);
+  return collectSpecifiers(sf, rel).map((s) => s.spec);
+}
+
+function readCallsOf(src, rel = 'file.ts') {
+  const sf = parseSource(rel, src);
+  const out = [];
+  visit(sf, (node) => {
+    if (!ts.isCallExpression(node)) return;
+    const name = callName(node.expression);
+    if (name && READ_CALL_NAME.test(name)) out.push({ name, pos: node.expression.getStart() });
+  });
+  return out;
+}
 
 export function entropyTriggers(root, { phaseExit = false } = {}) {
   const why = [];
   if (phaseExit) why.push('(iii) --phase-exit');
   for (const f of walk(join(root, 'src', 'entropy'))) {
-    const rel = relative(root, f).split(sep).join('/'); const src = readFileSync(f, 'utf8'); const [a, b] = strip(src);
-    if (SPECS(a).some((x) => x === 'node:crypto' || x === 'crypto')) why.push(`(i) ${rel} imports or re-exports from node:crypto`);
+    const rel = relative(root, f).split(sep).join('/'); const src = readFileSync(f, 'utf8');
+    if (specifiersOf(src, rel).some((x) => x === 'node:crypto' || x === 'crypto')) why.push(`(i) ${rel} imports or re-exports from node:crypto`);
     const ex = exportsOf(src);
     for (const o of ex.opaque) why.push(`(i) ${rel} has an opaque export (${o.trim()}), treated as a read API`);
     for (const e of ex.names) if (READ_NAME.test(e.name) && !e.allowed) why.push(`(i) ${rel} exports ${e.name}`);
-    for (const m of b.matchAll(READ_CALL)) why.push(`(i) ${rel}:${lineOf(src, m.index + m[1].length)} calls ${m[2]}(`);
+    for (const m of readCallsOf(src, rel)) why.push(`(i) ${rel}:${lineOf(src, m.pos)} calls ${m.name}(`);
   }
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -245,7 +595,7 @@ export function entropyTriggers(root, { phaseExit = false } = {}) {
     const rel = todo.pop(); if (seen.has(rel) || !existsSync(join(root, rel))) continue; seen.add(rel);
     const src = readFileSync(join(root, rel), 'utf8'); const ex = exportsOf(src);
     for (const e of ex.names) if (ENTRY_NAME.test(e.name)) why.push(`(ii) ${rel} exports ${e.name}, reachable from the core entry`);
-    for (const sp of SPECS(strip(src)[0])) if (sp.startsWith('.')) todo.push(relative('/r', resolve('/r', dirname(rel), sp)).split(sep).join('/'));
+    for (const sp of specifiersOf(src, rel)) if (sp.startsWith('.')) todo.push(resolveRel(rel, sp));
   }
   return why;
 }
@@ -277,6 +627,7 @@ const GOOD = { 'src/entropy/a.ts': "import { randomFillSync } from 'node:crypto'
   'src/evidence/a.ts': "import { createHash } from 'node:crypto';\nexport const h = () => createHash('sha256');\n",
   'src/identity/a.ts': "import { getFips } from 'node:crypto';\nexport const g = () => getFips();\n",
   'src/audited/a.ts': "import { h } from '../evidence/a.ts';\nexport const x = h;\n" };
+
 export const BAD = {
   'namespace-import': "import * as c from 'node:crypto';\n", 'default-import': "import c from 'node:crypto';\n",
   'require-crypto': "const c = require('crypto');\n", 'dynamic-import': "const c = await import('node:crypto');\n",
@@ -323,7 +674,27 @@ export const BAD = {
   'require-alias': "const r = require;\nr('crypto');\n", 'require-destructure': 'const { require: r } = m;\n', // G-19
   'require-member-call': "x.require('crypto');\n", // G-19
   'window-alias': 'const w = window;\n', 'constructor-call': "(() => 1).constructor('return this')();\n", // G-20 (M-152d, M-152g)
-  'guard-forms-non-guard-path': null, // G-20 (M-152c): GUARD_OK planted at a non-guard path; source filled in below
+  // G-25 / M-152c: hasOwn(globalThis,'k') at a NON-guard path; exact coreGuard forms only at GUARD_PATH.
+  'guard-forms-non-guard-path': "Object.hasOwn(globalThis, 'k');\n",
+  // G-23 / M-155: unicode-escape identifiers and string-literal property keys.
+  'unicode-ident-globalThis': 'glob\\u0061lThis.crypto;\n',
+  'unicode-key-constructor': "x['\\u0063onstructor'];\n",
+  // G-24 / M-156: positive allow-list (node:vm and cousins, plus dynamic import / export-from / require / bare fs).
+  'import-node-vm-default': "import vm from 'node:vm';\n",
+  'import-node-vm-named': "import { runInNewContext } from 'node:vm';\n",
+  'import-node-inspector': "import { Session } from 'node:inspector';\n",
+  'import-node-worker_threads': "import { Worker } from 'node:worker_threads';\n",
+  'import-node-child_process': "import { spawn } from 'node:child_process';\n",
+  'dynamic-import-node-vm': "const c = await import('node:vm');\n",
+  'export-from-node-vm': "export { runInNewContext } from 'node:vm';\n",
+  'require-node-vm': "const vm = require('node:vm');\n",
+  'import-bare-fs': "import { readFileSync } from 'fs';\n",
+  // G-21/22 / M-157: constructor reach via element access, Reflect.construct, getPrototypeOf, __proto__.
+  'constructor-element': "x['constructor'];\n",
+  'reflect-construct': 'Reflect.construct(X, []);\n',
+  'object-getPrototypeOf': 'Object.getPrototypeOf(x);\n',
+  'reflect-getPrototypeOf': 'Reflect.getPrototypeOf(x);\n',
+  'proto-member': 'x.__proto__;\n',
 };
 // Expected reason for fixtures whose hit is not at the planted file (self-test fails if the reason does not match).
 const ALLOW_REASON = (n) => new RegExp(`^src/entropy/:0: rule27-missing-pair \\(randomFillSync, entropy/\\).*PH1-M1 trigger: \\(i\\) src/entropy/a\\.ts exports ${n}\\b`);
@@ -340,8 +711,24 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
     ['process-dlopen', 'process-banned-member'], ['process-mainModule', 'process-banned-member'], ['process-plain-member', 'process-reach'],
     ['module-require', 'module-require'], ['mainModule-require', 'process-banned-member'], ['require-alias', 'require-alias'],
     ['require-destructure', 'require-alias'], ['require-member-call', 'require-member-call'], ['window-alias', 'global-self'], ['constructor-call', 'function-eval']].map(([n, c]) => [n, new RegExp(`^src/mapping/bad\\.ts:\\d+: rule27-${c} `)])),
-  'guard-forms-non-guard-path': /^packages\/capability\/src\/other\.ts:\d+: rule27-defineProperty-globalThis .*outside packages\/capability\/src\/coreGuard\.ts/ };
-BAD['guard-forms-non-guard-path'] = GUARD_SRC();
+  'guard-forms-non-guard-path': /^packages\/capability\/src\/other\.ts:\d+: rule27-globalThis-alias /,
+  'unicode-ident-globalThis': /^src\/mapping\/bad\.ts:\d+: rule27-unicode-escape /,
+  'unicode-key-constructor': /^src\/mapping\/bad\.ts:\d+: rule27-unicode-escape /,
+  'import-node-vm-default': /^src\/mapping\/bad\.ts:\d+: rule27-default-import /,
+  'import-node-vm-named': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-node-inspector': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-node-worker_threads': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-node-child_process': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'dynamic-import-node-vm': /^src\/mapping\/bad\.ts:\d+: rule27-dynamic-import /,
+  'export-from-node-vm': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'require-node-vm': /^src\/mapping\/bad\.ts:\d+: rule27-require-not-allowed /,
+  'import-bare-fs': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'constructor-element': /^src\/mapping\/bad\.ts:\d+: rule27-constructor-reach /,
+  'reflect-construct': /^src\/mapping\/bad\.ts:\d+: rule27-reflect-construct /,
+  'object-getPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-getPrototypeOf /,
+  'reflect-getPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-getPrototypeOf /,
+  'proto-member': /^src\/mapping\/bad\.ts:\d+: rule27-proto-member /,
+};
 // Control planted the same way: the single allow-listed declaration stays green (report-only).
 export const ALLOW_CONTROL = 'export const FINGERPRINT_BYTES = 16;\n';
 // Where each known-bad fixture is planted (default src/mapping/bad.ts).

@@ -176,9 +176,9 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 64 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-20) plus 4 extra cases', () => {
-  assert.equal(Object.keys(BAD).length, 64);
-  for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
+test('HoQ: --self-test carries 80 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-20, G-21..G-25) plus 4 extra cases', () => {
+  assert.equal(Object.keys(BAD).length, 80);
+  for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path', 'unicode-ident-globalThis', 'unicode-key-constructor', 'import-node-vm-default', 'import-node-vm-named', 'import-node-inspector', 'import-node-worker_threads', 'import-node-child_process', 'dynamic-import-node-vm', 'export-from-node-vm', 'require-node-vm', 'import-bare-fs', 'constructor-element', 'reflect-construct', 'object-getPrototypeOf', 'reflect-getPrototypeOf', 'proto-member']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control']);
   for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
@@ -186,7 +186,7 @@ test('HoQ: --self-test carries 64 known-bad fixtures (allow-list, G-12/13/15/16,
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /64 known-bad fixtures red, good fixture green, 4 extra cases ok/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /80 known-bad fixtures red, good fixture green, 4 extra cases ok/);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -208,4 +208,71 @@ test('G-17/G-18 allow-lists equal what real core source uses: no globalThis/proc
   const files = execFileSync('git', ['ls-files', ...roots], { cwd: ROOT, encoding: 'utf8' }).split('\n').filter((f) => /\.(ts|mts|cts|js|mjs|cjs)$/.test(f));
   assert.ok(files.length >= 10);
   for (const f of files) { const code = strip(readFileSync(join(ROOT, f), 'utf8'))[1]; assert.doesNotMatch(code, /\b(globalThis|process|require)\b/, f); }
+});
+
+test('G-25: M-152c fixture is hasOwn(globalThis, k) at a non-guard path, not the exact guard forms', () => {
+  assert.equal(BAD['guard-forms-non-guard-path'], "Object.hasOwn(globalThis, 'k');\n");
+  assert.equal(BAD_PATH['guard-forms-non-guard-path'], 'packages/capability/src/other.ts');
+  assert.match(String(BAD_REASON['guard-forms-non-guard-path']), /globalThis-alias/);
+  assert.ok(!BAD['guard-forms-non-guard-path'].includes('defineProperty'));
+});
+
+test('G-23: unicode escapes in comments or non-key strings are not red; identifiers and string-literal keys are', () => {
+  assert.deepEqual(scanFile('src/mapping/x.ts', "const s = 'glob\\u0061lThis'; // glob\\u0061lThis\n").hits, []);
+  assert.ok(scanFile('src/mapping/x.ts', 'glob\\u0061lThis.crypto;\n').hits.some((h) => h.includes('rule27-unicode-escape ')));
+  assert.ok(scanFile('src/mapping/x.ts', "x['\\u0063onstructor'];\n").hits.some((h) => h.includes('rule27-unicode-escape ')));
+});
+
+test('G-21/22: constructor member access, Reflect.construct, getPrototypeOf and __proto__ are red', () => {
+  for (const [src, code] of [["x['constructor'];\n", 'constructor-reach'], ['Reflect.construct(X, []);\n', 'reflect-construct'],
+    ['Object.getPrototypeOf(x);\n', 'getPrototypeOf'], ['Reflect.getPrototypeOf(x);\n', 'getPrototypeOf'],
+    ['x.__proto__;\n', 'proto-member'], ['const { constructor: c } = x;\n', 'constructor-reach']]) {
+    assert.ok(scanFile('src/mapping/x.ts', src).hits.some((h) => h.includes(`rule27-${code} `)), src);
+  }
+});
+
+// HoQ 06cb884b mutants: each is red on the new checker. Run the same source against the OLD
+// regex checker at 06cb884b (file-identical at 43671116) and record whether it survived there.
+const OLD_RULE27_SHA = '06cb884b43222793cb271647bc182347bbe8fe1c';
+const MUTANTS = [
+  { id: 'M-155', name: 'unicode-ident-globalThis', expectOldRed: false },
+  { id: 'M-155', name: 'unicode-key-constructor', expectOldRed: false },
+  { id: 'M-156', name: 'import-node-vm-default', expectOldRed: true, oldWhy: 'default-import' },
+  { id: 'M-156', name: 'import-node-vm-named', expectOldRed: false },
+  { id: 'M-156', name: 'import-node-inspector', expectOldRed: false },
+  { id: 'M-156', name: 'import-node-worker_threads', expectOldRed: false },
+  { id: 'M-156', name: 'import-node-child_process', expectOldRed: false },
+  { id: 'M-156', name: 'dynamic-import-node-vm', expectOldRed: true, oldWhy: 'dynamic-import' },
+  { id: 'M-156', name: 'export-from-node-vm', expectOldRed: false },
+  { id: 'M-156', name: 'require-node-vm', expectOldRed: false },
+  { id: 'M-156', name: 'import-bare-fs', expectOldRed: false },
+  { id: 'M-157', name: 'constructor-element', expectOldRed: false },
+  { id: 'M-157', name: 'reflect-construct', expectOldRed: false },
+  { id: 'M-157', name: 'object-getPrototypeOf', expectOldRed: false },
+  { id: 'M-157', name: 'reflect-getPrototypeOf', expectOldRed: false },
+  { id: 'M-157', name: 'proto-member', expectOldRed: false },
+];
+test('HoQ 06cb884b mutants: new checker kills each; old-checker verdict recorded', async () => {
+  const { pathToFileURL } = await import('node:url');
+  const dir = mkdtempSync(join(tmpdir(), 'r27-old-'));
+  try {
+    const src = execFileSync('git', ['show', `${OLD_RULE27_SHA}:tools/ci/import-allowlist.mjs`], { cwd: ROOT, encoding: 'utf8' });
+    const p = join(dir, 'import-allowlist.mjs'); writeFileSync(p, src);
+    const old = await import(pathToFileURL(p).href);
+    const rows = [];
+    for (const m of MUTANTS) {
+      const file = BAD_PATH[m.name] ?? 'src/mapping/bad.ts';
+      const d = join(dir, m.name); writeFixture(d, { [file]: BAD[m.name] });
+      const oldHits = old.scanTree(d).hits;
+      const newHits = scanTree(d).hits;
+      const oldRed = oldHits.length > 0;
+      const newRed = newHits.length > 0;
+      rows.push({ id: m.id, name: m.name, old: oldRed ? 'RED' : 'GREEN', new: newRed ? 'RED' : 'GREEN', oldHits: oldHits.join(' | '), newHits: newHits.join(' | ') });
+      assert.equal(newRed, true, `${m.id} ${m.name} must be red on the new checker:\n${newHits.join('\n')}`);
+      if (BAD_REASON[m.name]) assert.ok(newHits.some((h) => BAD_REASON[m.name].test(h)), `${m.id} ${m.name} wrong new reason:\n${newHits.join('\n')}`);
+      assert.equal(oldRed, m.expectOldRed, `${m.id} ${m.name} old-checker expected ${m.expectOldRed ? 'RED' : 'GREEN'} (survives-old proof), got ${oldRed ? 'RED' : 'GREEN'}:\n${oldHits.join('\n')}`);
+    }
+    const meaningful = rows.filter((r) => r.old === 'GREEN');
+    assert.ok(meaningful.length >= 12, `need surviving-old mutants as proof; got ${JSON.stringify(rows, null, 2)}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
