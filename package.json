@@ -19,8 +19,10 @@
     "lint:claims:fixture": "node tools/claims-lint.mjs --self-test",
     "check:qiu05": "node tools/qiu05-check.mjs",
     "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
-    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test",
-    "test": "node --test \"test/**/*.test.mjs\""
+    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test && node tools/ci/rule40-protected-names.mjs && node tools/ci/rule40-protected-names.mjs --self-test",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "check:rule40": "node tools/ci/rule40-protected-names.mjs",
+    "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test"
   },
   "dependencies": {}
 }

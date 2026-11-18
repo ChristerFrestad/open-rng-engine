@@ -84,3 +84,11 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Scans on this commit: interim wrapper 0 hits (list excluded by exact path+sha after pn-validate), product scanner 0 hits / 0 config errors.
 
 | 2026-11-18 08:15:06 CET | CTO via executor | Rule 40 product scanner (R-79/R-81, quality 7.5, C-9): list parser, approval pin, exact-path self-scan, product positions, references allowlist, M-60/M-61/M-71 tests | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## Rule 40 integration + LICENSE guard
+
+- package.json: check:rule40, check:rule40:fixture; check:ph0 now also runs rule40 (staged index) and its self-test. tools/ci/README marks rule40 LIVE. Interim O-55 wrapper gate stays recorded per commit until CTO retires it.
+- tools/license-guard.mjs: LICENSE skipped only at exact path 'LICENSE' with sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30; altered/missing = red; same bytes at any other path not exempt. QIU-05 uses it (previously unconditional exclusion). Rule 40 does not exempt LICENSE at all.
+- Tests: test/license-guard.test.mjs 12 pass / 0 fail (incl. scratch-clone end-to-end: altered LICENSE turns QIU-05 red). npm test 435 pass / 0 fail. check:ph0 exit 0.
+
+| 2026-11-18 08:16:04 CET | CTO via executor | Integrate rule 40 scanner (npm check:rule40, check:ph0) and LICENSE exact-path+sha guard in QIU-05 | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
