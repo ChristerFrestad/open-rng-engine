@@ -1,0 +1,44 @@
+# open-rng-engine closed authority co-term list v1 (CPO-R102 LF-10, DECISIONS 30b368bf L97). Additions need CPO review.
+# Regulators, standards bodies and the plain word lab/labs, extracted by the CTO seat on 2026-11-18 from
+# /home/box/company/rng/PLAN.md and /home/box/company/rng/research/** (incl. research/raw/). Any entry on a line blocks an
+# allowed validat phrase on that line, exactly as tools/lab-names.txt does. Format: <name>|<first source file:line>.
+# Matching: case-insensitive, whole word (no [A-Za-z0-9_] on either side; hyphen-digit suffixes still match), any
+# whitespace run between words. Jurisdiction names and lottery operators are not listed (not regulators or standards bodies);
+# the excluded names are in the CTO report. Source file names that contain a protected name (rule 40) are abbreviated with
+# '~' (research/super-h~.md); the CTO report carries the full path.
+NIST|PLAN.md:9
+UKGC|PLAN.md:107
+Gambling Commission|research/super-h~.md:15
+Washington State Gambling Commission|research/super-h~.md:15
+MGA|PLAN.md:73
+Malta Gaming Authority|research/evaluative-labs-failures.md:170
+RTS|PLAN.md:107
+lab|PLAN.md:3
+labs|PLAN.md:4
+AGCO|PLAN.md:30
+iAGCO|research/raw/quant-stacks-notes.md:66
+Registrar|PLAN.md:193
+NJ DGE|PLAN.md:193
+DGE|PLAN.md:193
+DGE Technical Services Bureau|research/regulatory-r4.9-agco-nj-openssl.md:48
+IAGR|PLAN.md:4
+MJTF|PLAN.md:4
+Lottstift|research/evaluative-labs-failures.md:49
+Spelinspektionen|PLAN.md:320
+KSA|research/evaluative-labs-failures.md:191
+Kansspelautoriteit|research/evaluative-labs-failures.md:191
+Nevada Gaming Control Board|research/evaluative-labs-failures.md:217
+NGCB|research/evaluative-labs-failures.md:217
+GCB|research/evaluative-labs-failures.md:241
+Kahnawake Gaming Commission|research/evaluative-labs-failures.md:224
+KGC|research/evaluative-labs-failures.md:224
+Multi-State Lottery Association|research/evaluative-labs-failures.md:221
+MUSL|PLAN.md:78
+ISO|PLAN.md:81
+IEC|PLAN.md:81
+ISO/IEC|PLAN.md:81
+NAB-Malta|research/evaluative-labs-failures.md:175
+RvA|research/raw/quant-stacks-notes.md:251
+ILAC|research/evaluative-labs-failures.md:165
+EA|research/evaluative-labs-failures.md:165
+CAVP|PLAN.md:141

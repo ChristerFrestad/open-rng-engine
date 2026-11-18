@@ -92,3 +92,6 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Tests: test/license-guard.test.mjs 12 pass / 0 fail (incl. scratch-clone end-to-end: altered LICENSE turns QIU-05 red). npm test 435 pass / 0 fail. check:ph0 exit 0.
 
 | 2026-11-18 08:16:04 CET | CTO via executor | Integrate rule 40 scanner (npm check:rule40, check:ph0) and LICENSE exact-path+sha guard in QIU-05 | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+| 2026-11-18 08:31:59 CET | CTO via executor | Claims lint for CPO-R99/R100/R101/R102: pinned allowlist/terms/lab (45)/authority (36) configs; claims-surface scope incl. CHANGELOG/CONTRIBUTING/release notes, all package.json string values, .d.ts/JSDoc/shipped string literals (built half PENDING); validat/crypto-module/CMVP; strict phrase boundaries; S-P1 presence on README, P8 README, package.json and repo description; LICENSE not scanned by exact path+sha; CI rule 46; .gitattributes LF; README/package.json/REMOTE-PENDING S-P1 | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+- Tests: npm test 860 pass / 0 fail (claims-lint near-miss 574/574). check:ph0 exit 0. Remotes 0.

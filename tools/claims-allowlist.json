@@ -1,0 +1,36 @@
+{
+  "format": "open-rng-engine/claims-allowlist/v1",
+  "cpoVerdict": "CPO-R97 (DECISIONS L75), CPO-R97b (L89), CPO-R99 (L91), CPO-R100 (L93)",
+  "entries": [
+    {
+      "id": "S-P1",
+      "sha256": "7efa5b3e0197f88a2431c0b789e452be169fc0e2710915f387fb5c515d87bf37",
+      "text": "Open-source TypeScript RNG and mapping library for Node.js, intended to be submitted as part of a licensee's system for independent lab evaluation. Not certified. Not a validated module."
+    },
+    {
+      "id": "S-P1-short",
+      "sha256": "3df21d8f1e9af56b213950311b61830029c7e7c2cb80c34fc56d13606f4f2d92",
+      "text": "Not certified. Not a validated module."
+    },
+    {
+      "id": "S-R39",
+      "sha256": "21df984dabb4744ffbb8f45ff1c3b818f6b129a676e10d654c1a79fbc852c04a",
+      "text": "non-normative, not certified, not for real money"
+    },
+    {
+      "id": "S-FIPS-1.0",
+      "sha256": "c605f8209f4c87758e66b79bee4b4bfcbe77cfde7474da7301a44511a93cc3df",
+      "text": "Uses the host platform's CSPRNG (Node.js `crypto.randomFillSync` → OpenSSL). Not a validated module. The library performs no SP 800-90B entropy-source validation."
+    },
+    {
+      "id": "S-FIPS-1.0-typographic",
+      "sha256": "5791250b5981c58eec3df5664905d992124576f0ae208cb1b3b941ba5e0ed8b6",
+      "text": "Uses the host platform's CSPRNG (Node.js `crypto.randomFillSync` → OpenSSL). **Not a validated module.** The library performs no SP 800-90B entropy-source validation."
+    },
+    {
+      "id": "S-PACK",
+      "sha256": "e9baf096f5c743271fb41c7fbe697beafc56e55d5f585ac7ea3fafc0d6e10552",
+      "text": "The library is not certified and cannot be."
+    }
+  ]
+}

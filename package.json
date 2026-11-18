@@ -2,7 +2,7 @@
   "name": "open-rng-engine",
   "version": "0.0.0",
   "private": true,
-  "description": "General-purpose Node.js library for unbiased random integers, shuffles, samples and weighted picks on the platform CSPRNG. Pre-alpha.",
+  "description": "Open-source TypeScript RNG and mapping library for Node.js, intended to be submitted as part of a licensee's system for independent lab evaluation. Not certified. Not a validated module.",
   "keywords": [
     "random",
     "csprng",
@@ -10,7 +10,10 @@
     "shuffle",
     "sampling",
     "weighted-random",
-    "nodejs"
+    "nodejs",
+    "unbiased-random",
+    "general-purpose",
+    "pre-alpha"
   ],
   "license": "Apache-2.0",
   "type": "module",
@@ -19,10 +22,11 @@
     "lint:claims:fixture": "node tools/claims-lint.mjs --self-test",
     "check:qiu05": "node tools/qiu05-check.mjs",
     "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
-    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test && node tools/ci/rule40-protected-names.mjs && node tools/ci/rule40-protected-names.mjs --self-test",
+    "check:ph0": "node tools/ci/rule46-license-integrity.mjs && node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test && node tools/ci/rule40-protected-names.mjs && node tools/ci/rule40-protected-names.mjs --self-test",
     "test": "node --test \"test/**/*.test.mjs\"",
     "check:rule40": "node tools/ci/rule40-protected-names.mjs",
-    "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test"
+    "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test",
+    "check:rule46": "node tools/ci/rule46-license-integrity.mjs"
   },
   "dependencies": {}
 }

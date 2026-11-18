@@ -1,0 +1,51 @@
+# open-rng-engine closed lab-name list v1 (CPO-R101 F-24, DECISIONS f8548860 L95; CPO-R102 F-26/F-27 + SIQ, DECISIONS 30b368bf L97). Additions need CPO review plus a known-bad fixture.
+# Extracted by the CTO seat on 2026-11-18 from /home/box/company/rng/PLAN.md and /home/box/company/rng/research/** (incl. research/raw/);
+# SIQ has no PLAN/research mention and is sourced to the CPO-R102 ruling row.
+# Format: <name>|<first source file:line>. Matching in tools/claims-lint.mjs: case-insensitive, whole word (no [A-Za-z0-9_] on
+# either side; a following hyphen + digits such as GLI-19 still matches, F-27), any whitespace run between words. Used as a co-term for the validat phrase
+# rule (CPO-R100 F-16) and as an anchor for the comparative rule (R-16).
+GLI|PLAN.md:4
+Gaming Laboratories International|research/evaluative-labs-failures.md:38
+Gaming Laboratories|research/evaluative-labs-failures.md:38
+GLI Europe|research/evaluative-labs-failures.md:169
+GLI Africa|research/evaluative-labs-failures.md:169
+GLI India|research/evaluative-labs-failures.md:169
+GLI UK Gaming|research/evaluative-labs-failures.md:169
+BMM|PLAN.md:4
+BMM Testlabs|PLAN.md:838
+BMM Spain Testlabs|research/evaluative-labs-failures.md:170
+BMM Australia|research/evaluative-labs-failures.md:170
+Testlabs|PLAN.md:838
+eCOGRA|PLAN.md:4
+eCOGRA Limited|research/evaluative-labs-failures.md:171
+Trisigma|PLAN.md:4
+Trisigma B.V.|research/raw/quant-stacks-notes.md:404
+NMi|PLAN.md:4
+NMi Metrology & Gaming|research/evaluative-labs-failures.md:43
+Quinel|research/evaluative-labs-failures.md:44
+Quinel Ltd|research/evaluative-labs-failures.md:44
+iTech Labs|PLAN.md:838
+iTech|PLAN.md:4
+ITL|PLAN.md:77
+Gaming Associates|PLAN.md:838
+Gaming Associates Europe|research/evaluative-labs-failures.md:176
+RiskCherry|research/evaluative-labs-failures.md:46
+Global Lab|research/evaluative-labs-failures.md:47
+Nick Farley & Associates|research/evaluative-labs-failures.md:179
+Eclipse|research/evaluative-labs-failures.md:179
+SIQ|DECISIONS.md:97
+Lean Lab Company Ltd|research/evaluative-labs-failures.md:46
+Global Lab Ltd|research/evaluative-labs-failures.md:47
+ITL-21|PLAN.md:77
+itechlabs|research/foundational-jtbd-pressure-test.md:55
+NMi Metrology & Gaming Ltd|research/evaluative-labs-failures.md:43
+BMM Spain|research/evaluative-labs-failures.md:170
+BMM Spain Testlabs SL|research/evaluative-labs-failures.md:170
+GA|research/evaluative-labs-failures.md:78
+GA Europe|research/evaluative-labs-failures.md:176
+GA Europe Ltd|research/evaluative-labs-failures.md:176
+Gaming Associates Europe Limited|research/evaluative-labs-failures.md:176
+eCOGRA Ltd|research/evaluative-labs-failures.md:171
+GLI LLC|research/evaluative-labs-failures.md:169
+GLI Europe BV|research/evaluative-labs-failures.md:169
+GLI Gaming Laboratories Ltd|research/evaluative-labs-failures.md:169
