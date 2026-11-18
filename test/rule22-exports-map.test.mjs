@@ -26,7 +26,7 @@ test('rule 22: required keys are exactly ".", "./audited", "./package.json"', ()
 test('rule 22: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /17 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /18 known-bad fixtures red, control green/);
 });
 
 for (const name of Object.keys(BAD_FIXTURES)) {

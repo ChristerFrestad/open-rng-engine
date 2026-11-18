@@ -388,6 +388,11 @@ export function selfTest() {
         files: { 'src/index.ts': "import x from '../docs/examples/demo.ts';\nexport const n = 1;\n", 'src/audited/index.ts': 'export {};\n' },
         reason: /import edge to docs\/examples/,
       },
+      {
+        name: 'raw-bytes-api-name',
+        files: { 'src/index.ts': 'export const randomBytes = 1;\n', 'src/audited/index.ts': 'export {};\n' },
+        reason: /raw-bytes API 'randomBytes'/,
+      },
     ];
     for (const [name, { pkg, reason }] of Object.entries(BAD_FIXTURES)) {
       // Materialise from a \u-escaped form; the escaped source is what we keep in-repo as the fixture text.
@@ -411,7 +416,7 @@ export function selfTest() {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 4} known-bad fixtures red, control green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 5} known-bad fixtures red, control green`);
 }
 
 const here = fileURLToPath(import.meta.url);

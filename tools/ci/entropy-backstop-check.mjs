@@ -2,17 +2,19 @@
 // check:ph0 hook for the M-162 / G-29 entropy backstop. Must be started with
 // `node --import ./tools/ci/entropy-backstop.mjs tools/ci/entropy-backstop-check.mjs`.
 // Asserts install, frozen hooks, NODE_OPTIONS inheritance, identity, and
-// counters. Planted-call coverage for every entry point lives in
+// counters. G-40: identity, per-call and stack checks, counters at exit,
+// teardown, fail-closed on no frames, worker hook, entropy-folder, and frozen
+// hooks are asserted here so those mutants cannot survive check:ph0 alone. Planted-call coverage for every entry point lives in
 // test/entropy-backstop.test.mjs and is also invoked here so a dropped
 // caller-check cannot survive check:ph0 alone.
 
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { MARK, ENTRY_POINT_IDS, getMarker, assertWrappersIntact, assertCountersHealthy } from './entropy-backstop.mjs';
+import { MARK, ENTRY_POINT_IDS, getMarker, assertWrappersIntact, assertCountersHealthy, isUnderEntropy } from './entropy-backstop.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -127,6 +129,147 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
+// G-40: these checks run in the check:ph0 backstop step itself, so a mutant
+// that no-ops identity / per-call / stack / counters / teardown / fail-closed,
+// or that drops the worker hook, widens src/entropy, or leaves hooks writable,
+// cannot survive check:ph0 alone.
+
+if (isUnderEntropy(join(ROOT, 'src/mapping/index.ts')) || isUnderEntropy(join(ROOT, 'src/verify/replayRandomBytes.ts'))
+  || isUnderEntropy(join(ROOT, 'src/health/cht.ts'))) {
+  console.error('entropy-backstop-check: isUnderEntropy accepted a non-entropy src/ path');
+  failed += 1;
+}
+
+{
+  const require = createRequire(import.meta.url);
+  const crypto = require('node:crypto');
+  const sites = [
+    [Crypto.prototype, 'getRandomValues'],
+    [crypto, 'randomBytes'],
+    [crypto, 'randomFillSync'],
+    [crypto, 'randomUUID'],
+  ];
+  for (const [obj, key] of sites) {
+    const pd = Object.getOwnPropertyDescriptor(obj, key);
+    if (pd && (pd.writable !== false || pd.configurable !== false)) {
+      console.error(`entropy-backstop-check: hook on ${key} is not frozen (writable=${pd.writable}, configurable=${pd.configurable})`);
+      failed += 1;
+    }
+  }
+}
+
+{
+  const id = 'randomBytes';
+  const saved = marker.wrappers[id];
+  marker.wrappers[id] = function g40Decoy() {};
+  let threw = false;
+  try { assertWrappersIntact('g40-identity'); } catch { threw = true; }
+  marker.wrappers[id] = saved;
+  if (!threw) {
+    console.error('entropy-backstop-check: assertWrappersIntact did not throw after a wrapper-identity tamper');
+    failed += 1;
+  }
+}
+
+{
+  const saved = marker.counters.randomBytes;
+  marker.counters.randomBytes = -1;
+  let threw = false;
+  try { assertCountersHealthy('g40-counters'); } catch { threw = true; }
+  marker.counters.randomBytes = saved;
+  if (!threw) {
+    console.error('entropy-backstop-check: assertCountersHealthy did not throw after a counter tamper');
+    failed += 1;
+  }
+}
+
+{
+  const r = spawnSync(process.execPath, ['--import', BACKSTOP, '-e', "require('node:crypto').randomBytes(1); console.log('G40-NOFRAME-BYTES')"], {
+    cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env },
+  });
+  const out = `${r.stdout}\n${r.stderr}`;
+  if (r.status === 0 || /G40-NOFRAME-BYTES/.test(out) || !/entropy-backstop:/.test(out)) {
+    console.error(`entropy-backstop-check: a call with no user caller frame was not fail-closed (status ${r.status})\n${out}`);
+    failed += 1;
+  }
+}
+
+{
+  const plant = join(ROOT, 'src/entropy/_g40_stack_check.mjs');
+  writeFileSync(plant, `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+// Change the saved stack-trace settings without wiping frames, so checkCaller
+// still sees the src/entropy path. Per-call identity/stack checks must reject this.
+Error.stackTraceLimit = (Error.stackTraceLimit ?? 10) + 1;
+try {
+  require('node:crypto').randomBytes(1);
+  console.error('G40-STACK-CALL-OK');
+  process.exit(0);
+} catch (e) {
+  const msg = String(e && e.message);
+  if (/entropy-backstop:/.test(msg)) process.exit(1);
+  console.error(msg);
+  process.exit(2);
+}
+`);
+  try {
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, plant], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env },
+    });
+    const out = `${r.stdout}\n${r.stderr}`;
+    if (r.status === 0 || /G40-STACK-CALL-OK/.test(out) || !/entropy-backstop:/.test(out)) {
+      console.error(`entropy-backstop-check: per-call identity/stack checks did not reject a stack-trace-setting tamper from src/entropy (status ${r.status})\n${out}`);
+      failed += 1;
+    }
+  } finally {
+    try { unlinkSync(plant); } catch { /* ignore */ }
+  }
+}
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'bs-g40-teardown-'));
+  const script = join(dir, 'tamper-counters.mjs');
+  writeFileSync(script, `const MARK = Symbol.for('open-rng-engine/entropy-backstop/v1');
+const m = globalThis[MARK];
+if (!m || !m.counters) { console.error('no marker'); process.exit(2); }
+m.counters.randomBytes = -1;
+`);
+  try {
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, script], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env },
+    });
+    if (r.status === 0) {
+      console.error(`entropy-backstop-check: teardown did not fail after a counter tamper (status 0)\n${r.stdout}\n${r.stderr}`);
+      failed += 1;
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'bs-g40-worker-'));
+  const host = join(dir, 'worker-host.mjs');
+  writeFileSync(host, `import { Worker } from 'node:worker_threads';
+const w = new Worker("require('node:crypto').randomBytes(1); console.log('G40-WORKER-BYTES');", { eval: true, execArgv: [], env: {} });
+w.on('error', (e) => { console.error(String(e)); process.exit(2); });
+w.on('message', (m) => { console.error('message', m); });
+w.on('exit', (code) => process.exit(code === 0 ? 0 : (code || 1)));
+`);
+  try {
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, host], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env },
+    });
+    const out = `${r.stdout}\n${r.stderr}`;
+    if (r.status === 0 || /G40-WORKER-BYTES/.test(out) || !/entropy-backstop:/.test(out)) {
+      console.error(`entropy-backstop-check: worker hook did not reject an eval worker planted call (status ${r.status})\n${out}`);
+      failed += 1;
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
 if (failed) process.exit(1);
-console.log(`entropy-backstop-check: ${ENTRY_POINT_IDS.length} entry points hooked, planted calls rejected, NODE_OPTIONS set`);
+console.log(`entropy-backstop-check: ${ENTRY_POINT_IDS.length} entry points hooked, planted calls rejected, NODE_OPTIONS set, G-40 invariants held`);
 process.exit(0);

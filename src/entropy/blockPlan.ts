@@ -11,40 +11,41 @@ export const MAX_WIDTH = MAX_DATA + FINGERPRINT_BYTES; // 65,536
 // Incoming values are a closed union (no `unknown` / `any`; G-28). JS tests may pass a non-number.
 export type IncomingN = number | string | boolean | null | undefined | object;
 
-export function isValidBlockPlanN(n: IncomingN): n is number {
+export function isValidBlockPlanN(n: IncomingN): boolean {
   return typeof n === 'number' && Number.isSafeInteger(n) && n >= 1;
 }
 
-function assertN(n: IncomingN): asserts n is number {
-  if (!isValidBlockPlanN(n)) throw new RangeError('RANGE_INVALID: blockPlan(n) requires a safe integer n >= 1');
+function assertN(n: IncomingN): number {
+  if (!isValidBlockPlanN(n) || typeof n !== 'number') throw new RangeError('RANGE_INVALID: blockPlan(n) requires a safe integer n >= 1');
+  return n;
 }
 
 /** Number of blocks, ⌈n / 65520⌉, without materialising the plan. */
 export function blockCount(n: IncomingN): number {
-  assertN(n);
-  return Math.ceil(n / MAX_DATA);
+  const v = assertN(n);
+  return Math.ceil(v / MAX_DATA);
 }
 
 /** Width of block i (0-based), without materialising the plan. */
 export function blockWidthAt(n: IncomingN, i: number): number {
-  assertN(n);
-  const count = Math.ceil(n / MAX_DATA);
+  const v = assertN(n);
+  const count = Math.ceil(v / MAX_DATA);
   if (!Number.isSafeInteger(i) || i < 0 || i >= count) throw new RangeError('RANGE_INVALID: block index out of range');
-  const data = i < count - 1 ? MAX_DATA : n - MAX_DATA * (count - 1);
+  const data = i < count - 1 ? MAX_DATA : v - MAX_DATA * (count - 1);
   return data + FINGERPRINT_BYTES;
 }
 
 /** Σ blockPlan(n) = n + 16·⌈n / 65520⌉. */
 export function blockPlanTotal(n: IncomingN): number {
-  assertN(n);
-  return n + FINGERPRINT_BYTES * Math.ceil(n / MAX_DATA);
+  const v = assertN(n);
+  return v + FINGERPRINT_BYTES * Math.ceil(v / MAX_DATA);
 }
 
 /** The ordered list of fetch widths, by the literal R-56 loop. */
 export function blockPlan(n: IncomingN): number[] {
-  assertN(n);
+  const v = assertN(n);
   const widths: number[] = [];
-  let remaining = n;
+  let remaining = v;
   while (remaining > 0) {
     const data = Math.min(remaining, MAX_DATA);
     widths.push(data + FINGERPRINT_BYTES);

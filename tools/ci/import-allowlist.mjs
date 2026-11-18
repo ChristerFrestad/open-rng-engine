@@ -622,21 +622,77 @@ function isPartOfPatternAssignment(start) {
   return false;
 }
 
-function isForInOfDirectHead(ident) {
-  const p = ident && ident.parent;
-  return !!(p && (ts.isForInStatement(p) || ts.isForOfStatement(p)) && p.initializer === ident);
+function isForInOfDirectHead(node) {
+  const p = node && node.parent;
+  return !!(p && (ts.isForInStatement(p) || ts.isForOfStatement(p)) && p.initializer === node);
+}
+
+// Walk up through transparent wrappers so `(k) = v` and `(0, k) = v` are classified as writes.
+function skipTransparentUp(node) {
+  let n = node;
+  for (let i = 0; i < 64; i++) {
+    const p = n.parent;
+    if (!p) return n;
+    if (ts.isParenthesizedExpression(p) && p.expression === n) { n = p; continue; }
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.CommaToken && p.right === n) { n = p; continue; }
+    // Banned in core src anyway; still unwrap so a wrapped write is classified as a write.
+    if (ts.isNonNullExpression(p) && p.expression === n) { n = p; continue; }
+    if (ts.isAsExpression(p) && p.expression === n) { n = p; continue; }
+    if (ts.isTypeAssertionExpression(p) && p.expression === n) { n = p; continue; }
+    if (ts.isSatisfiesExpression(p) && p.expression === n) { n = p; continue; }
+    return n;
+  }
+  return n;
+}
+
+// Positive allow-list of parent positions that are a read of `node`. Every other position is UNKNOWN.
+function isAllowedReadPosition(node, p) {
+  if (!p) return false;
+  if (ts.isElementAccessExpression(p) && p.argumentExpression === node) return true;
+  if (ts.isComputedPropertyName(p) && p.expression === node) return true;
+  if (ts.isBinaryExpression(p) && !ts.isAssignmentOperator(p.operatorToken.kind)
+    && (p.left === node || p.right === node)) return true;
+  if (ts.isPrefixUnaryExpression(p) && p.operand === node
+    && p.operator !== ts.SyntaxKind.PlusPlusToken && p.operator !== ts.SyntaxKind.MinusMinusToken) return true;
+  if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.arguments && p.arguments.some((a) => a === node)) return true;
+  if ((ts.isReturnStatement(p) || ts.isThrowStatement(p)) && p.expression === node) return true;
+  if (ts.isYieldExpression(p) && p.expression === node) return true;
+  if (ts.isAwaitExpression(p) && p.expression === node) return true;
+  if (ts.isVariableDeclaration(p) && p.initializer === node) return true;
+  if (ts.isParameter(p) && p.initializer === node) return true;
+  if ((ts.isPropertyDeclaration(p) || ts.isPropertyAssignment(p) || ts.isBindingElement(p)
+    || ts.isEnumMember(p)) && p.initializer === node) return true;
+  if (ts.isBinaryExpression(p) && ts.isAssignmentOperator(p.operatorToken.kind) && p.right === node) return true;
+  if (ts.isIfStatement(p) && p.expression === node) return true;
+  if (ts.isWhileStatement(p) && p.expression === node) return true;
+  if (ts.isDoStatement(p) && p.expression === node) return true;
+  if (ts.isSwitchStatement(p) && p.expression === node) return true;
+  if (ts.isForStatement(p) && (p.condition === node || p.incrementor === node || p.initializer === node)) return true;
+  if ((ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.expression === node) return true;
+  if (ts.isConditionalExpression(p) && (p.condition === node || p.whenTrue === node || p.whenFalse === node)) return true;
+  if (ts.isArrayLiteralExpression(p)) return true;
+  if ((ts.isSpreadElement(p) || ts.isSpreadAssignment(p)) && p.expression === node) return true;
+  if (ts.isTemplateSpan(p) && p.expression === node) return true;
+  if (ts.isShorthandPropertyAssignment(p) && p.name === node) return true;
+  if (ts.isCaseClause(p) && p.expression === node) return true;
+  if ((ts.isArrowFunction(p) || ts.isFunctionExpression(p)) && p.body === node) return true;
+  if (ts.isExportAssignment(p) && p.expression === node) return true;
+  return false;
 }
 
 // Classify one identifier reference bound to a candidate let/const: READ, NUMERIC_WRITE, or UNKNOWN.
+// G-43: unwrap transparent wrappers, then classify writes; READ is a positive allow-list with no default.
 function classifyReference(ident, checker, seen) {
-  if (isForInOfDirectHead(ident) || isPartOfPatternAssignment(ident)) return 'UNKNOWN';
-  const p = ident.parent;
+  const target = skipTransparentUp(ident);
+  if (isForInOfDirectHead(target) || isForInOfDirectHead(ident)
+    || isPartOfPatternAssignment(ident)) return 'UNKNOWN';
+  const p = target.parent;
   if (!p) return 'UNKNOWN';
-  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) && p.operand === ident
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) && p.operand === target
     && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) {
     return 'NUMERIC_WRITE';
   }
-  if (ts.isBinaryExpression(p) && p.left === ident && ts.isAssignmentOperator(p.operatorToken.kind)) {
+  if (ts.isBinaryExpression(p) && p.left === target && ts.isAssignmentOperator(p.operatorToken.kind)) {
     const op = p.operatorToken.kind;
     if (op === ts.SyntaxKind.EqualsToken) {
       return isNumericKeyExpr(p.right, seen, checker) ? 'NUMERIC_WRITE' : 'UNKNOWN';
@@ -645,7 +701,8 @@ function classifyReference(ident, checker, seen) {
     if (NUMERIC_COMPOUND.has(op)) return 'NUMERIC_WRITE';
     return 'UNKNOWN';
   }
-  return 'READ';
+  if (isAllowedReadPosition(target, p)) return 'READ';
+  return 'UNKNOWN'; // G-43 no default READ
 }
 
 function isNumericLocalIdentifier(ident, seen, checker) {
@@ -910,6 +967,12 @@ export function scanFile(rel, src, opts = {}) {
     if (node.kind === ts.SyntaxKind.AnyKeyword) addNode(node, 'banned-type', 'any in a type position is red (G-28)');
     if (node.kind === ts.SyntaxKind.UnknownKeyword) addNode(node, 'banned-type', 'unknown in a type position is red (G-28)');
     if (ts.isNonNullExpression(node)) addNode(node, 'non-null-assertion', 'non-null assertion is red in core src (G-28)');
+    if (ts.isTypePredicateNode(node)) {
+      const asserts = !!node.assertsModifier;
+      addNode(node, 'type-predicate', asserts
+        ? 'assertion signature is red in core src (G-43)'
+        : 'user-defined type predicate is red in core src (G-43)');
+    }
     if (ts.isElementAccessExpression(node)) {
       const key = node.argumentExpression;
       if (!isGreenElementKey(key, checker)) {
@@ -1499,6 +1562,115 @@ export function reach(): Uint8Array | undefined {
   return cr[m]?.call(cr, new Uint8Array(4));
 }
 `,
+  's1-g43-paren-assign': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+function f(o: Record<string, number>) {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (k) = a; }
+  return o[k];
+}
+`,
+  's1-g43-dbl-paren-assign': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+function f(o: Record<string, number>) {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { ((k)) = a; }
+  return o[k];
+}
+`,
+  's1-g43-paren-plus-eq': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+function f(o: Record<string, number>) {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (k) += a; }
+  return o[k];
+}
+`,
+  's1-g43-for-of-paren': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+export function f(o: Record<string, number>): number | undefined {
+  let k = 0;
+  for ((k) of [pick('con', 'structor')].filter(isNum)) { return o[k]; }
+  return undefined;
+}
+`,
+  's1-g43-comma-last': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+function f(o: Record<string, number>) {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (0, k) = a; }
+  return o[k];
+}
+`,
+  's1-g43-paren-assign-entropy': `function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+function f(o: Record<string, number>) {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (k) = a; }
+  return o[k];
+}
+`,
+  's1-g43-predicate-ban': `function isNum(x: string | number): x is number { return x !== undefined; }
+export const n = 1;
+`,
+  's1-g43-asserts-is-ban': `function ok(x: string | number): asserts x is number { if (typeof x !== 'number') throw new Error('e'); }
+export const n = 1;
+`,
+  's1-g43-asserts-ban': `function present(x: string | number | undefined): asserts x { if (x === undefined) throw new Error('e'); }
+export const n = 1;
+`,
+  's1-g43-paren-assign-verbatim': `type C = { call(t: object, u: Uint8Array): Uint8Array };
+type Cr = Record<string, C>; type Gl = Record<string, Cr>;
+type F = Record<string, (s: string) => () => Gl>;
+function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+export function reach(): Uint8Array | undefined {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (k) = a; }
+  const fb: F = Object(() => 0);
+  const g = fb[k]?.(String(pick('return glob', 'alThis')))();
+  if (!g) return undefined;
+  let c = 0;
+  const b = pick('cry', 'pto');
+  if (isNum(b)) { (c) = b; }
+  const cr = g[c];
+  if (!cr) return undefined;
+  let m = 0;
+  const d = pick('getRandom', 'Values');
+  if (isNum(d)) { (m) = d; }
+  return cr[m]?.call(cr, new Uint8Array(4));
+}
+`,
+  's1-g43-paren2-verbatim': `type Rb = { randomBytes(n: number): Uint8Array };
+type P = Record<string, (s: string) => Rb>;
+type F = Record<string, (s: string) => () => P>;
+function pick(p: string, q: string): string | number { return p.concat(q); }
+function isNum(x: string | number): x is number { return x !== undefined; }
+export function reach(): Uint8Array | undefined {
+  let k = 0;
+  const a = pick('con', 'structor');
+  if (isNum(a)) { (k) = a; }
+  const fb: F = Object(() => 0);
+  const p = fb[k]?.(String(pick('return pro', 'cess')))();
+  if (!p) return undefined;
+  let m = 0;
+  const d = pick('getBuiltin', 'Module');
+  if (isNum(d)) { (m) = d; }
+  return p[m]?.(String(pick('node:', 'crypto')))?.randomBytes(4);
+}
+`,
+  's1-g43-paren-assign-noguard': `function f(o: Record<string, number>, v: string) {
+  let k = 0;
+  (k) = v;
+  return o[k];
+}
+`,
 };
 
 
@@ -1651,6 +1823,18 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   's1-g37-chain': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
   's1-g37-chain2': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
   's1-g37-chain-entropy': /^src\/entropy\/g37-chain\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren-assign': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-dbl-paren-assign': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren-plus-eq': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-for-of-paren': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-comma-last': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren-assign-verbatim': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren2-verbatim': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren-assign-noguard': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g43-paren-assign-entropy': /^src\/entropy\/g43-paren\.ts:\d+: rule27-computed-access /,
+  's1-g43-predicate-ban': /^src\/mapping\/bad\.ts:\d+: rule27-type-predicate /,
+  's1-g43-asserts-is-ban': /^src\/mapping\/bad\.ts:\d+: rule27-type-predicate /,
+  's1-g43-asserts-ban': /^src\/mapping\/bad\.ts:\d+: rule27-type-predicate /,
 };
 const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf|object-api|banned-string-literal|type-assertion|computed-key) /;
 for (const name of Object.keys(BAD)) {
@@ -1667,7 +1851,7 @@ export const BAD_PATH = { 'audited-import': 'src/audited/bad.ts', 'createHash-ou
   'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts',
   ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])),
   'guard-forms-non-guard-path': 'packages/capability/src/other.ts',
-  'extensionless-relative': 'src/health/a.ts', 's1-g37-chain-entropy': 'src/entropy/g37-chain.ts' };
+  'extensionless-relative': 'src/health/a.ts', 's1-g37-chain-entropy': 'src/entropy/g37-chain.ts', 's1-g43-paren-assign-entropy': 'src/entropy/g43-paren.ts' };
 export const BAD_EXTRA = { 'extensionless-relative': { 'src/health/ev': 'export const k = 1;\n' } };
 export const GUARD_OK = "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n";
 
@@ -1675,7 +1859,7 @@ export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
 }
 
-export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink', 's1-g37-numeric-assign-control', 's1-g37-numeric-compound-minus-control'];
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink', 's1-g37-numeric-assign-control', 's1-g37-numeric-compound-minus-control', 's1-g43-read-default-mutant'];
 function mx12Case(base) {
   const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
   const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
@@ -1819,6 +2003,29 @@ export function selfTest() {
     spawnSync('ln', ['-s', 'target.ts', link], { cwd: sl });
     const slHits = scanTree(sl).hits;
     if (!slHits.some((h) => /rule27-untracked-symlink /.test(h))) fails.push(`untracked-symlink fixture was not red:\n${slHits.join('\n')}`);
+
+    // G-43: restoring the default READ classification is killed by check:ph0 --self-test alone.
+    const mutCase = join(base, 's1-g43-read-default-mutant');
+    mkdirSync(mutCase, { recursive: true });
+    const checkerSrc = readFileSync(new URL(import.meta.url), 'utf8');
+    const needle = "return 'UNKNOWN'; // G-43 no default READ";
+    if (!checkerSrc.includes(needle)) fails.push('G-43 fail-closed default needle missing from classifyReference');
+    else {
+      const mutFile = join(mutCase, 'import-allowlist-mut.mjs');
+      const mutated = checkerSrc.replace(needle, "return 'READ'; // G-43 no default READ")
+        .replace("const ts = createRequire(import.meta.url)('typescript');",
+          `const ts = createRequire(${JSON.stringify(new URL(import.meta.url).pathname)})('typescript');`);
+      writeFileSync(mutFile, mutated);
+      const tree = join(mutCase, 'tree');
+      const plant = 'function f(o: Record<string, number>) {\n  let k = 0;\n  k;\n  return o[k];\n}\n';
+      writeFixture(tree, { 'src/mapping/bad.ts': plant });
+      const liveHits = scanTree(tree).hits.filter((h) => /rule27-computed-access /.test(h));
+      if (!liveHits.length) fails.push('G-43 live checker must red a numeric local read in an unlisted position (bare expression statement)');
+      const driver = join(mutCase, 'driver.mjs');
+      writeFileSync(driver, "import { scanTree } from './import-allowlist-mut.mjs';\nconst hits = scanTree(process.argv[1]).hits.filter((h) => /rule27-computed-access /.test(h));\nif (hits.length) { console.error(hits.join('\\n')); process.exit(1); }\n");
+      const r = spawnSync(process.execPath, [driver, tree], { encoding: 'utf8' });
+      if (r.status !== 0) fails.push(`G-43 READ-default-restored mutant must leave the unlisted-position fixture green (so the mutant is demonstrated); status ${r.status}:\n${r.stdout}\n${r.stderr}`);
+    }
 
     // G-20 / MX-12: claims-lint --surface p8-package must lint keys (embedded escaped key-only plant red, clean control green).
     fails.push(...mx12Case(base));

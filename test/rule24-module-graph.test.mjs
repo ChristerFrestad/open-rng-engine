@@ -25,7 +25,7 @@ test('rule 24: this repo is green (production entries do not reach verify/ or re
 test('rule 24: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /7 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /8 known-bad fixtures red, control green/);
 });
 
 test('rule 24: a planted verify/ import, src/verify/ import, resetCht, or cycling-adapter import is red', () => withTmp((d) => {

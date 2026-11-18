@@ -156,13 +156,16 @@ function isCyclingSpec(spec) {
 function walkFrom(root, startEntries, { checkVerify, checkBinding, checkCycling, failUnresolved, bindingSymbols }) {
   const hits = [];
   const seen = new Set();
+  const startSet = new Set(startEntries.map((e) => posix(e)));
   const todo = [...startEntries];
   while (todo.length) {
     const rel = posix(todo.pop());
     if (seen.has(rel)) continue;
     const abs = join(root, rel);
     if (!existsSync(abs)) {
-      if (failUnresolved) hits.push(`${rel}:1: rule24-graph unresolved import or export target '${rel}'`);
+      // Missing start/export targets only. Import dests are reported at the
+      // specifier site so a dest-exists mutant cannot hide behind this branch.
+      if (failUnresolved && startSet.has(rel)) hits.push(`${rel}:1: rule24-graph unresolved import or export target '${rel}'`);
       continue;
     }
     seen.add(rel);
@@ -293,6 +296,15 @@ export const BAD_FIXTURES = {
       'src/audited/index.ts': 'export {};\n',
     },
     reason: /verification-binding symbol 'replaySource'/,
+  },
+  'derived-verify-export': {
+    files: {
+      'src/index.ts': "export { uniqueVerifyExport } from './h.ts';\n",
+      'src/h.ts': 'export function uniqueVerifyExport() {}\n',
+      'src/verify/api.ts': 'export function uniqueVerifyExport() {}\n',
+      'src/audited/index.ts': 'export {};\n',
+    },
+    reason: /verification-binding symbol 'uniqueVerifyExport'/,
   },
 };
 

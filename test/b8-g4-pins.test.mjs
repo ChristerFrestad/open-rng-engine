@@ -4,12 +4,11 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { G4_DIR, G4_TYPESCRIPT_5_9_3_SHA256, fileSha256 } from '../tools/ci/b8-dependencies.mjs';
+import { G4_DIR, G4_TYPESCRIPT_5_9_3_SHA256, G4_PINS_JSON_SHA256, fileSha256 } from '../tools/ci/b8-dependencies.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PINS_REL = `${G4_DIR}/G4-PINS.json`;
-// Sha256 of verification/g4/G4-PINS.json. Any pin-list change is a visible test diff for the Code Reviewer.
-export const G4_PINS_JSON_SHA256 = '5f5922b280a7b2aec4fccb44d0bbf4d01a403f11c7dad2175a62b2f07895d2d0';
+// Sha256 of verification/g4/G4-PINS.json lives in b8-dependencies.mjs so check:ph0 enforces it (G-44).
 
 test('G-38: G4-PINS.json sha256 is pinned', () => {
   const buf = readFileSync(join(ROOT, PINS_REL));

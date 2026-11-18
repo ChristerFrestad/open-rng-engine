@@ -29,7 +29,7 @@ const MAPPING_KINDS: ReadonlySet<string> = new Set(['randomInt', 'shuffle', 'sam
 const MAPPING_READ = /^(?:[0-9a-f]{8}|[0-9a-f]{14})$/;
 const LOWER_HEX = /^[0-9a-f]*$/;
 
-function isPlainObject(v: Incoming): v is IncomingDict {
+function isPlainObject(v: Incoming): boolean {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
@@ -37,7 +37,7 @@ function hasOwn(o: IncomingDict, k: string): boolean {
   return Object.prototype.hasOwnProperty.call(o, k);
 }
 
-function isIntIn(v: Incoming, lo: number, hi: number): v is number {
+function isIntIn(v: Incoming, lo: number, hi: number): boolean {
   return typeof v === 'number' && Number.isSafeInteger(v) && v >= lo && v <= hi;
 }
 
@@ -68,13 +68,15 @@ function parseReadsOutput(e: Incoming):
   | { ok: true; mapping: false; ev: ParsedRandomBytes }
   | { ok: false; detail: string } {
   if (!isPlainObject(e)) return { ok: false, detail: 'evidence is not an object' };
+  if (typeof e !== 'object' || e === null || Array.isArray(e)) return { ok: false, detail: 'evidence is not an object' };
   for (const k of ['kind', 'params', 'reads', 'bytesFetched']) if (!hasOwn(e, k)) return { ok: false, detail: `missing ${k}` };
   const kind = field(e, 'kind');
   if (kind !== 'randomBytes' && !(typeof kind === 'string' && MAPPING_KINDS.has(kind))) return { ok: false, detail: 'unknown kind' };
   const params = field(e, 'params');
   if (!isPlainObject(params)) return { ok: false, detail: 'params is not an object' };
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) return { ok: false, detail: 'params is not an object' };
   const bytesFetched = field(e, 'bytesFetched');
-  if (!isIntIn(bytesFetched, 0, MAX_SAFE)) return { ok: false, detail: 'bytesFetched is not a safe non-negative integer' };
+  if (!isIntIn(bytesFetched, 0, MAX_SAFE) || typeof bytesFetched !== 'number') return { ok: false, detail: 'bytesFetched is not a safe non-negative integer' };
   const readsVal = field(e, 'reads');
   if (!Array.isArray(readsVal)) return { ok: false, detail: 'reads is not an array' };
   if (kind !== 'randomBytes') {
@@ -84,7 +86,7 @@ function parseReadsOutput(e: Incoming):
   }
   if (!hasOwn(params, 'n') || !isIntIn(field(params, 'n'), 0, MAX_SAFE)) return { ok: false, detail: 'params.n is not a safe non-negative integer' };
   const n = field(params, 'n');
-  if (!isValidBlockPlanN(n)) return { ok: false, detail: 'params.n must be >= 1 (PLAN L605: n = 0 throws RANGE_INVALID, no evidence)' };
+  if (!isValidBlockPlanN(n) || typeof n !== 'number') return { ok: false, detail: 'params.n must be >= 1 (PLAN L605: n = 0 throws RANGE_INVALID, no evidence)' };
   if (!hasOwn(e, 'output')) return { ok: false, detail: 'missing output' };
   const output = field(e, 'output');
   if (typeof output !== 'string') return { ok: false, detail: 'output is not a string' };
@@ -92,12 +94,13 @@ function parseReadsOutput(e: Incoming):
   for (let i = 0; i < readsVal.length; i++) {
     const r = readsVal[i];
     if (!isPlainObject(r)) return { ok: false, detail: `reads[${i}] is not an object` };
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) return { ok: false, detail: `reads[${i}] is not an object` };
     const keys = Object.keys(r);
     if (keys.length !== 2 || !hasOwn(r, 'width') || !hasOwn(r, 'count')) return { ok: false, detail: `reads[${i}] must be exactly {width, count}` };
     const width = field(r, 'width');
     const count = field(r, 'count');
-    if (!isIntIn(width, 17, 65536)) return { ok: false, detail: `reads[${i}].width not an integer in 17..65536` };
-    if (!isIntIn(count, 17, 65536)) return { ok: false, detail: `reads[${i}].count not an integer in 17..65536` };
+    if (!isIntIn(width, 17, 65536) || typeof width !== 'number') return { ok: false, detail: `reads[${i}].width not an integer in 17..65536` };
+    if (!isIntIn(count, 17, 65536) || typeof count !== 'number') return { ok: false, detail: `reads[${i}].count not an integer in 17..65536` };
     reads.push({ width, count });
   }
   return { ok: true, mapping: false, ev: { kind: 'randomBytes', n, output, reads, bytesFetched } };
@@ -112,9 +115,9 @@ function parseReadsOutput(e: Incoming):
 export function checkRandomBytesReplay(e: Incoming): ReplayResult {
   // R0 (O-69, cto-g1-spec errata E-1): for a randomBytes record, params.n must be a safe integer >= 1. Runs before R1, so
   // a forged n = 0 / negative / fractional / string record is reported as R0 whatever the rest of the record holds.
-  if (isPlainObject(e) && field(e, 'kind') === 'randomBytes') {
+  if (isPlainObject(e) && typeof e === 'object' && e !== null && !Array.isArray(e) && field(e, 'kind') === 'randomBytes') {
     const params = field(e, 'params');
-    const n = isPlainObject(params) && hasOwn(params, 'n') ? field(params, 'n') : undefined;
+    const n = isPlainObject(params) && typeof params === 'object' && params !== null && !Array.isArray(params) && hasOwn(params, 'n') ? field(params, 'n') : undefined;
     if (!isValidBlockPlanN(n)) return { ok: false, code: 'R0', detail: `params.n ${JSON.stringify(n) ?? 'missing'} is not a safe integer >= 1 (PLAN L605: n = 0 throws RANGE_INVALID, no evidence)`, failures: ['R0'] };
   }
   const parsed = parseReadsOutput(e);
