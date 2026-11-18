@@ -41,7 +41,7 @@ test('strict flags are active: a scratch noUncheckedIndexedAccess / implicit-any
   const r = spawnSync(process.execPath, [TSC, '--noEmit', '--strict', '--noUncheckedIndexedAccess', f], { encoding: 'utf8' });
   assert.notEqual(r.status, 0); assert.match(r.stdout, /TS7006/); assert.match(r.stdout, /TS2322/);
 });
-test('node_modules is gitignored and never scanned as a claims surface, package.json or shipped source', () => {
+test('node_modules is gitignored; a tracked node_modules/ path is red (CPO-R104 G-10) and its content is never linted as a surface', () => {
   assert.match(readFileSync(join(ROOT, '.gitignore'), 'utf8'), /^node_modules\/$/m);
   assert.equal(spawnSync('git', ['check-ignore', '-q', 'node_modules/typescript/package.json'], { cwd: ROOT }).status, 0);
   assert.equal(execFileSync('git', ['ls-files', 'node_modules'], { cwd: ROOT, encoding: 'utf8' }), '');

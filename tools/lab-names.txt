@@ -1,9 +1,10 @@
-# open-rng-engine closed lab-name list v1 (CPO-R101 F-24, DECISIONS f8548860 L95; CPO-R102 F-26/F-27 + SIQ, DECISIONS 30b368bf L97). Additions need CPO review plus a known-bad fixture.
+# open-rng-engine closed lab-name list v1 (CPO-R101 F-24, DECISIONS f8548860 L95; CPO-R102 F-26/F-27 + SIQ, DECISIONS 30b368bf L97; CPO-R105 joined form BMMTestlabs, DECISIONS a0912b39 L108). Additions need CPO review plus a known-bad fixture.
 # Extracted by the CTO seat on 2026-11-18 from /home/box/company/rng/PLAN.md and /home/box/company/rng/research/** (incl. research/raw/);
 # SIQ has no PLAN/research mention and is sourced to the CPO-R102 ruling row.
-# Format: <name>|<first source file:line>. Matching in tools/claims-lint.mjs: case-insensitive, whole word (no [A-Za-z0-9_] on
-# either side; a following hyphen + digits such as GLI-19 still matches, F-27), any whitespace run between words. Used as a co-term for the validat phrase
-# rule (CPO-R100 F-16) and as an anchor for the comparative rule (R-16).
+# Format: <name>|<first source file:line>. Matching in tools/claims-lint.mjs (CPO-R104 D-2 as amended by CPO-R105 G-11):
+# case-insensitive; no preceding [A-Za-z0-9]; entries of <= 3 characters also need no following letter, entries of >= 4
+# characters match as a bare prefix; any whitespace run between words. Used as a co-term for the validat phrase rule
+# (CPO-R100 F-16) and as an anchor for the comparative rule (R-16, CPO-R104 G-6).
 GLI|PLAN.md:4
 Gaming Laboratories International|research/evaluative-labs-failures.md:38
 Gaming Laboratories|research/evaluative-labs-failures.md:38
@@ -49,3 +50,4 @@ eCOGRA Ltd|research/evaluative-labs-failures.md:171
 GLI LLC|research/evaluative-labs-failures.md:169
 GLI Europe BV|research/evaluative-labs-failures.md:169
 GLI Gaming Laboratories Ltd|research/evaluative-labs-failures.md:169
+BMMTestlabs|DECISIONS.md:108

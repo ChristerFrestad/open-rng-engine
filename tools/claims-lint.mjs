@@ -31,8 +31,8 @@ export const TERMS_PATH = 'tools/claims-terms.json';
 export const TERMS_SHA256 = '3c5227c0a1e836e53c0cf5823d2f7d8181db986c0b98b9ef7f9c7e800ae030d4';
 // CPO-R101 F-24: closed lab-name list v1, exact path + sha pin; additions need CPO review.
 export const LAB_NAMES_PATH = 'tools/lab-names.txt';
-export const LAB_NAMES_SHA256 = '5ad2178289872af3beaadfed58186cbdcd76e7fc729e0d43bc30f68610818a26';
-export const LAB_NAMES_COUNT = 45;
+export const LAB_NAMES_SHA256 = '1d9e087bdc3f3a945b52206fcdd999053742a5f548017704a123a83417f32dd4'; // CPO-R105: + BMMTestlabs (re-approval pending)
+export const LAB_NAMES_COUNT = 46;
 // CPO-R102 LF-10: closed authority co-term list v1 (regulators, standards bodies, lab/labs), exact path + sha pin.
 export const AUTHORITY_PATH = 'tools/authority-terms.txt';
 export const AUTHORITY_SHA256 = '5f4ff5734a43dd9b1648bb8fb6eb2e4c2092041f379ef54b04ea9c5b1ce5277a';
@@ -117,7 +117,13 @@ const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // CPO-R104 D-2: named entries match by PREFIX, case-insensitive: left boundary = no preceding letter or digit, NO right
 // boundary (BMMTestlabs, GLI19, ITL21, gli_11, iTech_Labs, UKGCs are hits). The generic words lab/labs stay whole-word (D-3).
 export const GENERIC_LAB_WORDS = new Set(['lab', 'labs']);
-const entrySrc = (n) => (GENERIC_LAB_WORDS.has(n.toLowerCase()) ? String.raw`(?<![A-Za-z0-9_])${escRe(n)}(?![A-Za-z0-9_])` : String.raw`(?<![A-Za-z0-9])${n.split(/\s+/).map(escRe).join(String.raw`\s+`)}`);
+// CPO-R105 G-11: entries of <= 3 characters (trimmed) also need no following LETTER (GLI19, ITL21, gli_11 stay red; glitch,
+// game, each, isObj are green). Entries of >= 4 characters stay bare-prefix (R104 D-2).
+const entrySrc = (n) => {
+  if (GENERIC_LAB_WORDS.has(n.toLowerCase())) return String.raw`(?<![A-Za-z0-9_])${escRe(n)}(?![A-Za-z0-9_])`;
+  const body = String.raw`(?<![A-Za-z0-9])${n.trim().split(/\s+/).map(escRe).join(String.raw`\s+`)}`;
+  return [...n.trim()].length <= 3 ? `${body}(?![A-Za-z])` : body;
+};
 export const labNameRe = (n) => new RegExp(entrySrc(n), 'i');
 
 const readMaybe = (p) => { try { return readFileSync(p); } catch { return null; } };

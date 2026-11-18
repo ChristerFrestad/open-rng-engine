@@ -231,6 +231,43 @@ test('D-2 (CPO-R104): list entries match by prefix, case-insensitive; left bound
   }
   for (const v of ['xGLI', 'aBMM', '9NIST']) assert.deepEqual(lintText('docs/a.md', `${PHR} as ${v} does it`), [], v);
 });
+// ---------- CPO-R105 G-11 (M-148 / M-150 / M-145; HoQ hoq-ph1-m1-erratum-draft B-4 + G-11) ----------
+test('G-11: entries of <= 3 characters need no following letter; >= 4 characters stay bare-prefix', () => {
+  const short = LAB_NAMES.concat(AUTHORITIES).filter((n) => [...n.trim()].length <= 3 && !['lab'].includes(n.toLowerCase()));
+  assert.ok(short.length >= 15, short.join(','));
+  for (const n of short) {
+    for (const tail of ['', '19', '_11', '-11', ' ', '.']) assert.ok(lintText('docs/a.md', `${PHR} ${n}${tail}x`.replace(/x$/, tail === '' ? '' : 'x')).length > 0, `${n}${tail}`);
+    assert.deepEqual(lintText('docs/a.md', `${PHR} ${n}abc`), [], `${n}abc must be green`);
+  }
+  for (const n of ['eCOGRA', 'Trisigma', 'UKGC', 'iTech', 'Quinel', 'NIST', 'AGCO']) assert.ok(lintText('docs/a.md', `${PHR} ${n}abc`).length > 0, `${n}abc stays red (prefix)`);
+});
+test('G-11 / M-148: red plants (B-4 escapes, joined form, digit/underscore suffix)', () => {
+  for (const v of ['BMMTestlabs', 'bmmtestlabs', 'GLI19', 'ITL21', 'gli_11', 'iTech_Labs', 'eCOGRAseal', 'UKGCs', 'GA4', 'ISO_17025', 'MGA-licensed', 'BMM-Testlabs', 'BMM Test Labs', 'iTechLabs', 'NMi Metrology & Gaming'])
+    assert.ok(lintText('docs/a.md', `${PHR} as ${v} does it`).length > 0, v);
+});
+test('G-11 / M-148 / M-150: green controls (HoQ false-hit sentences and words)', () => {
+  for (const t of ['This exceeds the limit for each read.', 'Above the game loop.', `${PHR} of each record`, `${PHR} of isolated input`, `${PHR} by glitchy input`,
+    `${PHR} for gaming, gate and early isObj checks`, `${PHR} of rtsp, iecy and dgettext`, 'Beyond the gate of each early iteration.'])
+    assert.deepEqual(lintText('docs/a.md', t), [], t);
+});
+test('G-11: a list name glued after a letter is GREEN (left boundary; kills the surviving left-boundary mutant)', () => {
+  for (const v of ['xGLI', 'aBMM', 'zNIST', 'myUKGC', 'preAGCO', 'xeCOGRA', 'qITL21', 'oGA4']) {
+    assert.deepEqual(lintText('docs/a.md', `${PHR} as ${v} does it`), [], v);
+    assert.deepEqual(lintText('docs/a.md', `This exceeds ${v} rules.`), [], `comparative ${v}`);
+  }
+});
+test('M-150: comparative anchored on lab/labs/entries is RED', () => {
+  for (const t of ['Exceeds what labs require.', 'beyond AGCO rules', 'above the lab threshold', 'surpasses GLI19', 'meets BMMTestlabs criteria'])
+    assert.ok(lintText('docs/a.md', t).some((h) => h.includes('R16-comparative')), t);
+});
+test('M-145: authority co-term on the same line is red; on the next line it is a green control', () => {
+  for (const ph of ['schema-\u0076alidated', 'schema \u0076alidator', 'schema \u0076alidation']) {
+    for (const c of ['NIST', 'UKGC', 'MGA', 'RTS', 'lab', 'labs', 'Lab', 'AGCO', 'NJ DGE']) {
+      assert.ok(lintText('docs/a.md', `The ${ph} step (${c}).`).length > 0, `${ph} + ${c}`);
+      assert.deepEqual(lintText('docs/a.md', `The ${ph} step.\nSee ${c} for the rules.`), [], `${ph} / next line ${c}`);
+    }
+  }
+});
 test('D-2 / D-3: the generic words lab and labs stay whole-word', () => {
   for (const v of ['lab', 'labs', 'Lab', 'LABS']) assert.ok(lintText('docs/a.md', `${PHR} in the ${v}`).length > 0, v);
   for (const v of ['labelled', 'collab', 'labsheet']) assert.deepEqual(lintText('docs/a.md', `${PHR} ${v}`), [], v);
