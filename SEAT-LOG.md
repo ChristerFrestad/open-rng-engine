@@ -74,3 +74,13 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Tests: npm test 242 pass / 0 fail; --self-test known-bad red + 186/186 near-miss; scratch removed.
 
 | 2026-11-18 08:09:39 CET | CTO via executor | C-10 tests (CPO-R97b): wrapped-sentence and one-line S-P1 hits; S-FIPS-1.0 800-90B green, 800-90A/CAVP red | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## Rule 40 product scanner (not yet wired into scripts; integration is the next commit)
+
+- tools/ci/rule40-protected-names.mjs sha256 d99ccb482f36c3c76da8dbc281aa369918fde1aa0a8c4fcdb934054bcbf4f45b (replaces the PH1 stub). Scans index bytes of every tracked path plus path names. Exactly two content exemptions by exact path string: tools/protected-names.txt (parsed as config; C-9 §4 + v1.1 errata parser; sha must equal the CPO approval pin in tools/protected-names.config.json: 7f56688e, version 1, 38 entries, CPO-R96a) and tools/protected-names.known-bad.json (escaped; decodes; materialised in scratch it hits 9/9 groups and both product-only entries). Config closed schema; any further exemption key red. References allowlist (R-79) supported with exact path, line, line sha, source tag on the line, CPO approver and begin/end anchors; empty today. LICENSE not exempt (scanned normally). Non-UTF-8 red (binary allowlist empty).
+- Strict readings (for CPO/HoQ awareness): product positions = package.json name/description/keywords (any package.json), headings in any tracked .md, every path segment under docs/examples/; in a product position a bare singular/plural is red even inside a TECHNICAL_TERM form. JS casefold = toUpperCase().toLowerCase() after NFKC.
+- Parity: one-off corpus of 2747 strings vs o55-scan.py 156340f7: identical except 3 strings that contain the CPO-R95 extra entry (expected). All o55 positive/negative controls plus the CPO-R95 positive control reproduce.
+- Tests: test/rule40.test.mjs 181 pass / 0 fail; npm test 423 pass / 0 fail. Tracked R-81 fixture test/x13-fixtures/generic-vocabulary/ (README.md, package.json) scans 0.
+- Scans on this commit: interim wrapper 0 hits (list excluded by exact path+sha after pn-validate), product scanner 0 hits / 0 config errors.
+
+| 2026-11-18 08:15:06 CET | CTO via executor | Rule 40 product scanner (R-79/R-81, quality 7.5, C-9): list parser, approval pin, exact-path self-scan, product positions, references allowlist, M-60/M-61/M-71 tests | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |

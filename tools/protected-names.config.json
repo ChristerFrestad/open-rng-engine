@@ -1,0 +1,14 @@
+{
+  "format": "open-rng-engine/rule40-config/v1",
+  "approval": {
+    "listPath": "tools/protected-names.txt",
+    "sha256": "7f56688ee17193182f47cc7e048b2bc2b25baa7f3c0a1ea678cfa5c77144277b",
+    "version": 1,
+    "entries": 38,
+    "cpoVerdict": "CPO-R96a (list v1 amended, 7f56688e)",
+    "ctoConfirm": "CTO CONFIRMED 2026-11-18 (validator afe76d15, format dadae96e)",
+    "formatSha256": "dadae96e9373a63dbb6eaaacbbae03dc071fd7820005659ac6d824e4f4d5a83f",
+    "validatorSha256": "afe76d15e0b36ec3695aa86818e72e069fa1fc5c6636a1648f64312c8f72a14a"
+  },
+  "references": []
+}
