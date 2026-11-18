@@ -182,17 +182,17 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 187 known-bad fixtures (allow-list, G-12..G-28, S-1, M-158..165, b1..b6) plus 9 extra cases', () => {
-  assert.equal(Object.keys(BAD).length, 187);
+test('HoQ: --self-test carries 206 known-bad fixtures (allow-list, G-12..G-28, S-1, G-37, M-158..165, b1..b6) plus 11 extra cases', () => {
+  assert.equal(Object.keys(BAD).length, 206);
   for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path', 'unicode-ident-globalThis', 'unicode-key-constructor', 'import-node-vm-default', 'import-node-vm-named', 'import-node-inspector', 'import-node-worker_threads', 'import-node-child_process', 'dynamic-import-node-vm', 'export-from-node-vm', 'require-node-vm', 'import-bare-fs', 'constructor-element', 'reflect-construct', 'object-getPrototypeOf', 'reflect-getPrototypeOf', 'proto-member', 'm158-concat-reflect-constructor', 'm158-template-key', 'm158-concat-crypto', 'extensionless-relative', 'parse-error', 'import-type-non-relative', 'm161-literal-typed-var', 'm161-string-typed', 'm161-concatenation-defineProperty', 'm161-fromCharCode-__proto__', 'm161-array-join-getPrototypeOf']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
-  assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink']);
+  assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink', 's1-g37-numeric-assign-control', 's1-g37-numeric-compound-minus-control']);
   for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
     'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n", 'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /187 known-bad fixtures red, good fixture green, 9 extra cases ok/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /206 known-bad fixtures red, good fixture green, 11 extra cases ok/);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -493,5 +493,56 @@ test('S-1: each fixture is red on the new checker; record the 373873ae verdict',
     console.log('S-1 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
     const flipped = rows.filter((r) => r.old === 'GREEN' && r.new === 'RED');
     assert.ok(flipped.length >= 11, `S-1 must flip the type-hole and new-ban fixtures from GREEN to RED; got ${JSON.stringify(rows, null, 2)}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const OLD_4F = new URL('./fixtures/rule27-checker-4f5619e5.mjs', import.meta.url);
+const G37_FIXTURES = [
+  { name: 's1-g37-array-destructure', expectOldRed: false },
+  { name: 's1-g37-object-destructure', expectOldRed: false },
+  { name: 's1-g37-shorthand', expectOldRed: false },
+  { name: 's1-g37-nested-pattern', expectOldRed: false },
+  { name: 's1-g37-default-pattern', expectOldRed: false },
+  { name: 's1-g37-rest', expectOldRed: false },
+  { name: 's1-g37-for-of-array', expectOldRed: false },
+  { name: 's1-g37-for-of-object', expectOldRed: false },
+  { name: 's1-g37-for-in-head', expectOldRed: true },
+  { name: 's1-g37-compound-plus-eq', expectOldRed: true },
+  { name: 's1-g37-compound-nullish-eq', expectOldRed: true },
+  { name: 's1-g37-compound-or-eq', expectOldRed: true },
+  { name: 's1-g37-compound-and-eq', expectOldRed: true },
+  { name: 's1-g37-nested-arrow-destructure', expectOldRed: false },
+  { name: 's1-g37-labelled-write', expectOldRed: false },
+  { name: 's1-g37-union-type', expectOldRed: false },
+  { name: 's1-g37-chain', expectOldRed: false },
+  { name: 's1-g37-chain2', expectOldRed: false },
+  { name: 's1-g37-chain-entropy', expectOldRed: false },
+];
+
+test('G-37: each new fixture is red on the new checker; record the 4f5619e5 verdict', async () => {
+  const old = await import(OLD_4F);
+  const dir = mkdtempSync(join(tmpdir(), 'r27-g37-'));
+  const rows = [];
+  try {
+    for (const m of G37_FIXTURES) {
+      const src = BAD[m.name];
+      assert.ok(src, `missing BAD fixture ${m.name}`);
+      const d = join(dir, m.name);
+      const file = BAD_PATH[m.name] ?? 'src/mapping/bad.ts';
+      writeFixture(d, { [file]: src, ...(BAD_EXTRA[m.name] ?? {}) });
+      const oldHits = old.scanTree(d).hits;
+      const newHits = scanTree(d).hits;
+      const oldComputed = oldHits.some((h) => /rule27-computed-access /.test(h));
+      const newComputed = newHits.some((h) => /rule27-computed-access /.test(h));
+      const oldAny = oldHits.length > 0;
+      const newAny = newHits.length > 0;
+      rows.push({ name: m.name, old: oldComputed ? 'RED' : (oldAny ? 'RED-OTHER' : 'GREEN'), new: newComputed ? 'RED' : (newAny ? 'RED-OTHER' : 'GREEN') });
+      assert.equal(newComputed, true, `${m.name} must be red on the new checker (computed-access):\n${newHits.join('\n')}`);
+      if (BAD_REASON[m.name]) assert.ok(newHits.some((h) => BAD_REASON[m.name].test(h)), `${m.name} wrong new reason:\n${newHits.join('\n')}`);
+      assert.equal(oldComputed, m.expectOldRed, `${m.name} old-checker computed-access expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${oldComputed ? 'RED' : 'GREEN'} (any=${oldAny}):\n${oldHits.join('\n')}`);
+    }
+    console.log('G-37 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
+    const flipped = rows.filter((r) => r.old === 'GREEN' && r.new === 'RED');
+    assert.ok(flipped.length >= 12, `G-37 must flip the remaining S-1 holes from GREEN to RED; got ${JSON.stringify(rows, null, 2)}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

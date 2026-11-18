@@ -20,9 +20,12 @@
 //    red, as are Reflect.construct, Object/Reflect.getPrototypeOf, and `__proto__`.
 //  G-25: the M-152c fixture is hasOwn(globalThis,'k') at a non-guard path and is red (globalThis-alias). The exact
 //    coreGuard forms are allowed only at packages/capability/src/coreGuard.ts.
-//  G-26: any `Reflect` identifier in scanned source is red. S-1: element-access and o[k]= keys are decided from the
-//    AST and scope, never the type checker (no typed-as-number path, no typed-array fallback). Reflective-base keys
-//    are green only as a source literal or a syntactically numeric form; a type-checker `number` is not enough.
+//  G-26: any `Reflect` identifier in scanned source is red. S-1/G-37: element-access and o[k]= keys use fail-closed
+//    reference classification. The type checker is used to resolve symbols (not name matching, so shadowing is
+//    handled) and, as a second layer only, never sufficient on its own, to require the binding's declared or
+//    inferred type to be exactly `number` (or a number literal / a union of only those; not a union with string).
+//    A type-checker `number` alone is never enough. Reflective-base keys are green only as a source literal or a
+//    syntactically numeric form.
 //    COMPUTED_LITERAL_KEYS_ALLOWED stays empty in production. S-1 also reds the `Proxy` identifier, `.crypto` as a
 //    member name on any base, and treats no-substitution templates like string literals everywhere (incl. keys).
 //  G-27: every relative specifier must have an explicit allowed extension (.ts/.mts/.cts) and resolve to exactly one
@@ -33,10 +36,14 @@
 //    __defineSetter__ are red as identifiers or member names. Object.getOwnPropertyDescriptor(s), getPrototypeOf,
 //    setPrototypeOf and defineProperty are red outside coreGuard's exact forms. Computed keys in destructuring
 //    patterns or object literals are red unless the key is a numeric literal. Element access is green only with a
-//    numeric literal key, or (S-1, no type checker) a syntactically numeric runtime key: a numeric literal; unary +/-
+//    numeric literal key, or a syntactically numeric runtime key: a numeric literal; unary +/-
 //    or ~ applied to anything; a binary operator that always yields a number (- * / % ** | & ^ << >> >>>, not + or +=);
-//    or a let/const declared in the same function whose every write (initialiser and assignments) is one of those forms or ++/--.
-//    Parameters, destructuring, imports, module-level bindings, closures written from another function, and += writes are red. Type assertions (as, <T>), any/unknown in type positions, the non-null !, @ts-ignore and @ts-nocheck
+//    or a same-function let/const whose every identifier reference, resolved by the checker symbol, is a pure READ or a
+//    recognised NUMERIC WRITE (initialiser or plain `=` whose RHS is one of those forms, ++/--, or a compound whose
+//    operator is in the S-1 numeric binary set). ANY assignment-target that is not a recognised numeric write is red
+//    (array/object/shorthand/nested/default/rest destructuring, for-in/for-of heads, += ??= ||= &&= and other
+//    non-numeric compounds, writes in nested functions/arrows or labelled blocks). Unclassifiable is red. Parameters,
+//    imports and module-level bindings stay red. Type assertions (as, <T>), any/unknown in type positions, the non-null !, @ts-ignore and @ts-nocheck
 //    are red; @ts-expect-error is allowed only at the single pinned entropy import line. Error.prepareStackTrace,
 //    captureStackTrace and stackTraceLimit are red.
 //  G-30: closed-world (unparsed-tracked) and js-under-src have their own fixtures. Tracked extensionless and .json
@@ -533,149 +540,155 @@ function isIncDec(node) {
   return false;
 }
 
-function isFunctionLikeParamName(decl) {
-  const p = decl && decl.parent;
-  return p && ts.isParameter(p) && p.name === decl;
+function unwrapAlias(checker, s) {
+  if (!s) return null;
+  if (s.flags & ts.SymbolFlags.Alias) {
+    try {
+      const a = checker.getAliasedSymbol(s);
+      if (a && a.escapedName !== 'unknown') return a;
+    } catch { /* keep s */ }
+  }
+  return s;
 }
 
-function patternBindsName(pat, name) {
-  if (!pat) return false;
-  if (ts.isIdentifier(pat)) return idText(pat) === name;
-  if (ts.isBindingElement(pat)) return patternBindsName(pat.name, name);
-  if (ts.isObjectBindingPattern(pat) || ts.isArrayBindingPattern(pat)) {
-    return pat.elements.some((el) => !ts.isOmittedExpression(el) && patternBindsName(el, name));
+function valueSymbol(checker, node) {
+  if (!checker || !node) return null;
+  return unwrapAlias(checker, checker.getSymbolAtLocation(node));
+}
+
+// Shorthand assignment targets ({ k } = ...) have a property symbol at the identifier;
+// the bound variable is checker.getShorthandAssignmentValueSymbol.
+function symbolsReferring(checker, ident) {
+  const out = [];
+  const add = (s) => { s = unwrapAlias(checker, s); if (s && !out.includes(s)) out.push(s); };
+  add(valueSymbol(checker, ident));
+  const p = ident && ident.parent;
+  if (p && ts.isShorthandPropertyAssignment(p) && p.name === ident) {
+    try { add(checker.getShorthandAssignmentValueSymbol(p)); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+function isExactlyNumberType(checker, node) {
+  if (!checker || !node) return false;
+  const type = checker.getTypeAtLocation(node);
+  if (!type) return false;
+  const leafOk = (t) => {
+    if (!t) return false;
+    if (typeof t.isUnion === 'function' && t.isUnion()) return t.types.every(leafOk);
+    if (t.flags & ts.TypeFlags.Number) return true;
+    if (t.flags & ts.TypeFlags.NumberLiteral) return true;
+    return false;
+  };
+  return leafOk(type);
+}
+
+function isInsideLabeledStatement(node, stopAt) {
+  let n = node && node.parent;
+  while (n && n !== stopAt) {
+    if (ts.isLabeledStatement(n)) return true;
+    n = n.parent;
   }
   return false;
 }
 
-function declarationsIntroducedBy(node) {
-  const out = [];
-  const takeList = (list) => {
-    if (list && ts.isVariableDeclarationList(list)) out.push(...list.declarations);
-  };
-  if (ts.isVariableStatement(node)) takeList(node.declarationList);
-  if (ts.isForStatement(node) && node.initializer) takeList(node.initializer);
-  if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && node.initializer) takeList(node.initializer);
-  if (ts.isBlock(node) || ts.isModuleBlock(node) || ts.isSourceFile(node) || ts.isCaseClause(node) || ts.isDefaultClause(node)) {
-    for (const st of node.statements ?? []) {
-      if (ts.isVariableStatement(st)) takeList(st.declarationList);
+// True when `start` sits in an assignment / for-in / for-of target pattern (destructuring).
+function isPartOfPatternAssignment(start) {
+  let n = start;
+  let inPattern = false;
+  while (n && n.parent) {
+    const p = n.parent;
+    if (ts.isParenthesizedExpression(p) && p.expression === n) { n = p; continue; }
+    if (ts.isArrayLiteralExpression(p) || ts.isObjectLiteralExpression(p)) { inPattern = true; n = p; continue; }
+    if (ts.isSpreadElement(p) || ts.isSpreadAssignment(p)) { inPattern = true; n = p; continue; }
+    if (ts.isPropertyAssignment(p) && (p.name === n || p.initializer === n)) { n = p; continue; }
+    if (ts.isShorthandPropertyAssignment(p) && (p.name === n || p.objectAssignmentInitializer === n)) { inPattern = true; n = p; continue; }
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === n) {
+      if (inPattern) return true;
+      const gp = p.parent;
+      const looksDefault = gp && (ts.isArrayLiteralExpression(gp) || ts.isObjectLiteralExpression(gp)
+        || ts.isParenthesizedExpression(gp) || ts.isPropertyAssignment(gp) || ts.isSpreadElement(gp));
+      if (looksDefault) { inPattern = true; n = p; continue; }
+      return false;
     }
+    if (ts.isBinaryExpression(p) && ts.isAssignmentOperator(p.operatorToken.kind) && p.left === n) {
+      return inPattern;
+    }
+    if ((ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer === n) {
+      return inPattern || ts.isArrayLiteralExpression(n) || ts.isObjectLiteralExpression(n);
+    }
+    return false;
   }
-  if (ts.isCatchClause(node) && node.variableDeclaration) out.push(node.variableDeclaration);
-  return out;
+  return false;
 }
 
-function matchBindingAt(cur, name) {
-  if (isFunctionLike(cur)) {
-    for (const p of cur.parameters ?? []) {
-      if (ts.isIdentifier(p.name) && idText(p.name) === name) return { kind: 'param', decl: p };
-      if (!ts.isIdentifier(p.name) && patternBindsName(p.name, name)) return { kind: 'destructure', decl: p };
-    }
+function isForInOfDirectHead(ident) {
+  const p = ident && ident.parent;
+  return !!(p && (ts.isForInStatement(p) || ts.isForOfStatement(p)) && p.initializer === ident);
+}
+
+// Classify one identifier reference bound to a candidate let/const: READ, NUMERIC_WRITE, or UNKNOWN.
+function classifyReference(ident, checker, seen) {
+  if (isForInOfDirectHead(ident) || isPartOfPatternAssignment(ident)) return 'UNKNOWN';
+  const p = ident.parent;
+  if (!p) return 'UNKNOWN';
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) && p.operand === ident
+    && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) {
+    return 'NUMERIC_WRITE';
   }
-  for (const d of declarationsIntroducedBy(cur)) {
-    if (ts.isIdentifier(d.name) && idText(d.name) === name) return { kind: 'var', decl: d };
-    if (!ts.isIdentifier(d.name) && patternBindsName(d.name, name)) return { kind: 'destructure', decl: d };
+  if (ts.isBinaryExpression(p) && p.left === ident && ts.isAssignmentOperator(p.operatorToken.kind)) {
+    const op = p.operatorToken.kind;
+    if (op === ts.SyntaxKind.EqualsToken) {
+      return isNumericKeyExpr(p.right, seen, checker) ? 'NUMERIC_WRITE' : 'UNKNOWN';
+    }
+    if (op === ts.SyntaxKind.PlusEqualsToken) return 'UNKNOWN';
+    if (NUMERIC_COMPOUND.has(op)) return 'NUMERIC_WRITE';
+    return 'UNKNOWN';
   }
-  return null;
+  return 'READ';
 }
 
-function resolveLocalBinding(ident) {
-  const name = idText(ident);
-  let cur = ident.parent;
-  while (cur) {
-    const found = matchBindingAt(cur, name);
-    if (found) return found;
-    if (isFunctionLike(cur)) return null;
-    cur = cur.parent;
-  }
-  return null;
-}
-
-// Walk through nested functions so a write in a closure can be attributed to an outer binding.
-function resolveBindingIncludingOuter(ident) {
-  const name = idText(ident);
-  let cur = ident.parent;
-  while (cur) {
-    const found = matchBindingAt(cur, name);
-    if (found) return found;
-    cur = cur.parent;
-  }
-  return null;
-}
-
-function isNumericWriteValue(expr, useFn, seen) {
-  if (isIncDec(expr)) return true;
-  const e = unwrapParens(expr);
-  if (e && ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) return false;
-  if (e && ts.isBinaryExpression(e) && NUMERIC_COMPOUND.has(e.operatorToken.kind)) return true;
-  if (e && ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken) return isNumericKeyExpr(e.right, seen);
-  return isNumericKeyExpr(expr, seen);
-}
-
-function identifierIsAssignedIn(node, decl, name) {
-  if (!node || !ts.isIdentifier(node)) return false;
-  if (idText(node) !== name) return false;
-  const resolved = resolveBindingIncludingOuter(node);
-  return !!(resolved && resolved.decl === decl);
-}
-
-function collectWrites(fn, decl, name) {
-  const writes = [];
-  const walkW = (node) => {
-    if (ts.isVariableDeclaration(node) && node === decl && node.initializer) writes.push({ kind: 'init', expr: node.initializer, at: node });
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && identifierIsAssignedIn(node.left, decl, name)) {
-      writes.push({ kind: 'assign', expr: node.right, at: node });
-    }
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind !== ts.SyntaxKind.EqualsToken && ts.isAssignmentOperator(node.operatorToken.kind)
-      && identifierIsAssignedIn(node.left, decl, name)) {
-      writes.push({ kind: 'compound', expr: node, at: node });
-    }
-    if (isIncDec(node)) {
-      const inner = unwrapParens(node);
-      const opnd = inner.operand;
-      if (identifierIsAssignedIn(opnd, decl, name)) writes.push({ kind: 'incdec', expr: node, at: node });
-    }
-    if ((ts.isForInStatement(node) || ts.isForOfStatement(node)) && identifierIsAssignedIn(node.initializer, decl, name)) {
-      writes.push({ kind: 'for-in-of', expr: node.initializer, at: node });
-    }
-    if (ts.isSpreadAssignment(node)) { /* skip */ }
-    ts.forEachChild(node, walkW);
-  };
-  walkW(fn);
-  return writes;
-}
-
-function isNumericLocalIdentifier(ident, seen) {
-  const resolved = resolveLocalBinding(ident);
-  if (!resolved || resolved.kind !== 'var') return false;
-  const decl = resolved.decl;
-  if (!ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name)) return false;
+function isNumericLocalIdentifier(ident, seen, checker) {
+  if (!checker) return false;
+  const useFn = containingFunction(ident);
+  if (!useFn) return false;
+  const sym = valueSymbol(checker, ident);
+  if (!sym) return false;
+  const decl = sym.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name)) return false;
   const list = decl.parent;
   if (!ts.isVariableDeclarationList(list)) return false;
   if (!(list.flags & ts.NodeFlags.Let) && !(list.flags & ts.NodeFlags.Const)) return false;
   if (!decl.initializer) return false;
-  const useFn = containingFunction(ident);
   const declFn = containingFunction(decl);
-  if (!useFn || useFn !== declFn) return false;
-  const name = idText(decl.name);
-  const writes = collectWrites(useFn, decl, name);
-  // A write whose containing function is not useFn means a nested function wrote it.
-  for (const w of writes) {
-    const wFn = containingFunction(w.at);
-    if (wFn !== useFn) return false;
-    if (w.kind === 'for-in-of') return false;
-    if (w.kind === 'compound') {
-      if (w.expr.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) return false;
-      if (!NUMERIC_COMPOUND.has(w.expr.operatorToken.kind)) return false;
-      continue;
+  if (!declFn || declFn !== useFn) return false;
+  if (!isNumericKeyExpr(decl.initializer, seen, checker)) return false;
+  // Second layer only, never sufficient on its own.
+  if (!isExactlyNumberType(checker, decl.name)) return false;
+  let ok = true;
+  const visit = (node) => {
+    if (!ok) return;
+    if (ts.isIdentifier(node)) {
+      const sMatch = symbolsReferring(checker, node).includes(sym);
+      if (sMatch && node !== decl.name) {
+        const kind = classifyReference(node, checker, seen);
+        const refFn = containingFunction(node);
+        if (refFn !== declFn) {
+          if (kind !== 'READ') ok = false;
+        } else if (kind === 'UNKNOWN') {
+          ok = false;
+        } else if (kind === 'NUMERIC_WRITE' && isInsideLabeledStatement(node, declFn)) {
+          ok = false;
+        }
+      }
     }
-    if (w.kind === 'incdec') continue;
-    if (!isNumericKeyExpr(w.expr, seen)) return false;
-  }
-  return true;
+    ts.forEachChild(node, visit);
+  };
+  visit(declFn);
+  return ok;
 }
 
-export function isNumericKeyExpr(expr, seen = new Set()) {
+export function isNumericKeyExpr(expr, seen = new Set(), checker = undefined) {
   if (!expr) return false;
   const e = unwrapParens(expr);
   if (!e) return false;
@@ -691,12 +704,12 @@ export function isNumericKeyExpr(expr, seen = new Set()) {
   if (ts.isBinaryExpression(e)) {
     return NUMERIC_BINARY.has(e.operatorToken.kind);
   }
-  if (ts.isIdentifier(e)) return isNumericLocalIdentifier(e, next);
+  if (ts.isIdentifier(e)) return isNumericLocalIdentifier(e, next, checker);
   return false;
 }
 
-function isGreenElementKey(expr) {
-  return isNumericKeyExpr(expr);
+function isGreenElementKey(expr, checker) {
+  return isNumericKeyExpr(expr, new Set(), checker);
 }
 
 function isComputedKeyContext(nameNode) {
@@ -899,7 +912,7 @@ export function scanFile(rel, src, opts = {}) {
     if (ts.isNonNullExpression(node)) addNode(node, 'non-null-assertion', 'non-null assertion is red in core src (G-28)');
     if (ts.isElementAccessExpression(node)) {
       const key = node.argumentExpression;
-      if (!isGreenElementKey(key)) {
+      if (!isGreenElementKey(key, checker)) {
         addNode(node, 'computed-access', `element access key is not a syntactically numeric form (S-1): ${key.getText()}`);
       }
     }
@@ -910,7 +923,7 @@ export function scanFile(rel, src, opts = {}) {
         if (idx >= 0 && node.arguments[idx]) {
           const key = node.arguments[idx];
           const v = computedKeyVerdict(key, checker, keyOpts);
-          if (!isGreenElementKey(key) && v !== 'source-literal' && v !== 'allowed' && v !== 'string-treated-safe') {
+          if (!isGreenElementKey(key, checker) && v !== 'source-literal' && v !== 'allowed' && v !== 'string-treated-safe') {
             addNode(key, 'reflective-key', `computed key at reflective base ${base} is not a source literal or a syntactically numeric form (${v}): ${key.getText()}`);
           }
         }
@@ -1168,10 +1181,6 @@ export function scanTree(root, { phaseExit = false, computedLiteralAllow, treatS
       const tracked = ls.stdout.toString('utf8').split('\0').filter(Boolean).map(normalizePosix);
       const parsedSet = new Set(files.map(([rel]) => rel));
       for (const rel of tracked) {
-        if (rel.startsWith('src/') && SRC_JS_EXT.test(rel) && !parsedSet.has(rel)) {
-          hits.push(`${rel}:1: rule27-js-under-src tracked .js/.mjs/.cjs under src/`);
-          continue;
-        }
         if (PARSE_EXT.test(rel) && !parsedSet.has(rel)) {
           hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);
         }
@@ -1343,6 +1352,153 @@ export const BAD = {
   'import-blob-url': "import x from 'blob:https://example.com/id';\n",
   'process-argv': 'process.argv;\n',
   'process-execArgv': 'process.execArgv;\n',
+  's1-g37-array-destructure': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  [k] = [s];
+  return o[k];
+}
+`,
+  's1-g37-object-destructure': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  ({ a: k } = { a: s });
+  return o[k];
+}
+`,
+  's1-g37-shorthand': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  ({ k } = { k: s });
+  return o[k];
+}
+`,
+  's1-g37-nested-pattern': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  ({ a: [k] } = { a: [s] });
+  return o[k];
+}
+`,
+  's1-g37-default-pattern': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  [k = 0] = [s];
+  return o[k];
+}
+`,
+  's1-g37-rest': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  const arr: string[] = [s];
+  [...k] = arr;
+  return o[k];
+}
+`,
+  's1-g37-for-of-array': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  for ([k] of a) return o[k];
+}
+`,
+  's1-g37-for-of-object': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  for ({ k } of rec) return o[k];
+}
+`,
+  's1-g37-for-in-head': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  for (k in o) return o[k];
+}
+`,
+  's1-g37-compound-plus-eq': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  k += 1;
+  return o[k];
+}
+`,
+  's1-g37-compound-nullish-eq': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  k ??= 1;
+  return o[k];
+}
+`,
+  's1-g37-compound-or-eq': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  k ||= 1;
+  return o[k];
+}
+`,
+  's1-g37-compound-and-eq': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  k &&= 1;
+  return o[k];
+}
+`,
+  's1-g37-nested-arrow-destructure': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  const g = () => { [k] = [s]; };
+  g();
+  return o[k];
+}
+`,
+  's1-g37-labelled-write': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k = 0;
+  L: { k = 1; }
+  return o[k];
+}
+`,
+  's1-g37-union-type': `function f(o: Record<string, number>, s: string, a: string[][], rec: Array<{ k: string }>) {
+  let k: number | string = 0;
+  return o[k];
+}
+`,
+  's1-g37-chain': `type C = { call(t: object, u: Uint8Array): Uint8Array };
+type Cr = Record<string, C>;
+type Gl = Record<string, Cr>;
+type F = Record<string, (s: string) => () => Gl>;
+export function reach(): Uint8Array | undefined {
+  let k: number | string = 0;
+  [k] = ['con'.concat('structor')];
+  const fb: F = Object(() => 0);
+  const g = fb[k]?.('return glob'.concat('alThis'))();
+  if (!g) return undefined;
+  let c: number | string = 0;
+  [c] = ['cry'.concat('pto')];
+  const cr = g[c];
+  if (!cr) return undefined;
+  let m: number | string = 0;
+  [m] = ['getRandom'.concat('Values')];
+  return cr[m]?.call(cr, new Uint8Array(4));
+}
+`,
+  's1-g37-chain2': `type Rb = { randomBytes(n: number): Uint8Array };
+type P = Record<string, (s: string) => Rb>;
+type F = Record<string, (s: string) => () => P>;
+export function reach(): Uint8Array | undefined {
+  let k: number | string = 0;
+  [k] = ['con'.concat('structor')];
+  const fb: F = Object(() => 0);
+  const p = fb[k]?.('return pro'.concat('cess'))();
+  if (!p) return undefined;
+  let m: number | string = 0;
+  [m] = ['getBuiltin'.concat('Module')];
+  const nc = p[m]?.('node:'.concat('crypto'));
+  return nc?.randomBytes(4);
+}
+`,
+  's1-g37-chain-entropy': `type C = { call(t: object, u: Uint8Array): Uint8Array };
+type Cr = Record<string, C>;
+type Gl = Record<string, Cr>;
+type F = Record<string, (s: string) => () => Gl>;
+export function reach(): Uint8Array | undefined {
+  let k: number | string = 0;
+  [k] = ['con'.concat('structor')];
+  const fb: F = Object(() => 0);
+  const g = fb[k]?.('return glob'.concat('alThis'))();
+  if (!g) return undefined;
+  let c: number | string = 0;
+  [c] = ['cry'.concat('pto')];
+  const cr = g[c];
+  if (!cr) return undefined;
+  let m: number | string = 0;
+  [m] = ['getRandom'.concat('Values')];
+  return cr[m]?.call(cr, new Uint8Array(4));
+}
+`,
 };
 
 
@@ -1476,6 +1632,25 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   'import-blob-url': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
   'process-argv': /^src\/mapping\/bad\.ts:\d+: rule27-process-reach /,
   'process-execArgv': /^src\/mapping\/bad\.ts:\d+: rule27-process-reach /,
+  's1-g37-array-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-object-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-shorthand': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-nested-pattern': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-default-pattern': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-rest': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-for-of-array': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-for-of-object': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-for-in-head': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-compound-plus-eq': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-compound-nullish-eq': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-compound-or-eq': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-compound-and-eq': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-nested-arrow-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-labelled-write': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-union-type': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-chain': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-chain2': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-g37-chain-entropy': /^src\/entropy\/g37-chain\.ts:\d+: rule27-computed-access /,
 };
 const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf|object-api|banned-string-literal|type-assertion|computed-key) /;
 for (const name of Object.keys(BAD)) {
@@ -1492,7 +1667,7 @@ export const BAD_PATH = { 'audited-import': 'src/audited/bad.ts', 'createHash-ou
   'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts',
   ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])),
   'guard-forms-non-guard-path': 'packages/capability/src/other.ts',
-  'extensionless-relative': 'src/health/a.ts' };
+  'extensionless-relative': 'src/health/a.ts', 's1-g37-chain-entropy': 'src/entropy/g37-chain.ts' };
 export const BAD_EXTRA = { 'extensionless-relative': { 'src/health/ev': 'export const k = 1;\n' } };
 export const GUARD_OK = "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n";
 
@@ -1500,7 +1675,7 @@ export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
 }
 
-export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink'];
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink', 's1-g37-numeric-assign-control', 's1-g37-numeric-compound-minus-control'];
 function mx12Case(base) {
   const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
   const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
@@ -1590,6 +1765,14 @@ export function selfTest() {
     writeFixture(loopDir, { 'src/mapping/ok.ts': 'function f(buf: number[], n: number) {\n  for (let i = 0; i < n; i++) buf[i] = i;\n}\n' });
     const loopHits = scanTree(loopDir).hits.filter((h) => /rule27-computed-access /.test(h));
     if (loopHits.length) fails.push(`for-loop numeric index must stay green:\n${loopHits.join('\n')}`);
+    const asgDir = join(base, 's1-g37-numeric-assign-control');
+    writeFixture(asgDir, { 'src/mapping/ok.ts': 'function f(o: number[], i: number) {\n  let k = 0;\n  k = i * 2;\n  return o[k];\n}\n' });
+    const asgHits = scanTree(asgDir).hits.filter((h) => /rule27-computed-access /.test(h));
+    if (asgHits.length) fails.push(`plain k = i * 2 must stay green:\n${asgHits.join('\n')}`);
+    const subDir = join(base, 's1-g37-numeric-compound-minus-control');
+    writeFixture(subDir, { 'src/mapping/ok.ts': 'function f(o: number[]) {\n  let i = 10;\n  i -= 1;\n  return o[i];\n}\n' });
+    const subHits = scanTree(subDir).hits.filter((h) => /rule27-computed-access /.test(h));
+    if (subHits.length) fails.push(`i -= 1 numeric compound must stay green:\n${subHits.join('\n')}`);
     if (TRACKED_NON_TS_ALLOWED.length !== 0) fails.push('TRACKED_NON_TS_ALLOWED must stay empty in production');
 
     // G-30: closed-world (unparsed-tracked) fixture — a tracked .ts under src/**/node_modules is walked-skipped.

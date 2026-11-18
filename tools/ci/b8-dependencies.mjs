@@ -14,6 +14,13 @@
 // A manifest change without a matching new G4 file is red. The `files` field
 // and `npm audit signatures` in CI are backlog preconditions for the first
 // packed build (do not add them to package.json while this G4 is current).
+// G-38: verification/g4/G4-PINS.json lists {file, sha256} for each G4 file. B8
+// authenticates each G4 file against that list, requires exactly one
+// `VERDICT: PASS` line, cross-checks the file's Package name@version and
+// manifest sha256 values against HEAD and the worktree, and requires every
+// devDep to be covered by a pinned and parsed PASS. Missing pin, unpinned G4
+// file, sha mismatch, FAIL verdict, missing or duplicate verdict line, wrong
+// version, or wrong manifest sha is red.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -68,6 +75,11 @@ export function parseG4File(text, path = 'g4.md') {
   if (!pkgSha) issues.push(`${path}:1: b8-g4 G4 file does not name a package.json sha256`);
   if (!lockSha) issues.push(`${path}:1: b8-g4 G4 file does not name a package-lock.json sha256`);
   if (!prov) issues.push(`${path}:1: b8-g4 G4 file does not record provenance present/absent (condition c)`);
+  const verdictLines = String(text).split(/\r?\n/).filter((l) => /^\s*VERDICT:\s+\S+/.test(l));
+  if (verdictLines.length === 0) issues.push(`${path}:1: b8-g4 G4 file is missing a VERDICT line`);
+  else if (verdictLines.length > 1) issues.push(`${path}:1: b8-g4 G4 file has a duplicate VERDICT line`);
+  else if (!/^\s*VERDICT:\s*PASS\s*$/.test(verdictLines[0])) issues.push(`${path}:1: b8-g4 G4 file VERDICT is not PASS (${verdictLines[0].trim()})`);
+  const pass = verdictLines.length === 1 && /^\s*VERDICT:\s*PASS\s*$/.test(verdictLines[0]);
   return {
     path,
     name: pkg ? pkg[1] : null,
@@ -76,6 +88,8 @@ export function parseG4File(text, path = 'g4.md') {
     packageJsonSha256: pkgSha ? pkgSha[1] : null,
     packageLockSha256: lockSha ? lockSha[1] : null,
     provenance: prov ? prov[1].toUpperCase() : null,
+    pass,
+    verdict: verdictLines.length === 1 ? verdictLines[0].trim() : null,
     issues,
   };
 }
@@ -90,6 +104,51 @@ export function loadG4Files(root) {
     out.push(parseG4File(readFileSync(join(root, rel), 'utf8'), rel));
   }
   return out;
+}
+
+export const G4_PINS_REL = `${G4_DIR}/G4-PINS.json`;
+
+export function loadG4Pins(root) {
+  const rel = G4_PINS_REL;
+  const abs = join(root, rel);
+  const issues = [];
+  if (!existsSync(abs)) {
+    return { pins: [], issues: [`${rel}:1: b8-g4 missing ${rel}`], byFile: new Map() };
+  }
+  let data;
+  try { data = JSON.parse(readFileSync(abs, 'utf8')); }
+  catch (e) { return { pins: [], issues: [`${rel}:1: b8-g4 unreadable G4-PINS.json (${e.message})`], byFile: new Map() }; }
+  const list = Array.isArray(data) ? data : (data && data.files);
+  if (!Array.isArray(list)) {
+    return { pins: [], issues: [`${rel}:1: b8-g4 G4-PINS.json must be an array of {file, sha256} or {files: [...]}`], byFile: new Map() };
+  }
+  const pins = [];
+  const byFile = new Map();
+  for (const ent of list) {
+    if (!ent || typeof ent.file !== 'string' || typeof ent.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(ent.sha256)) {
+      issues.push(`${rel}:1: b8-g4 pin entry is not {file, sha256 with a 64-char hex digest}`);
+      continue;
+    }
+    if (byFile.has(ent.file)) issues.push(`${rel}:1: b8-g4 duplicate pin for ${ent.file}`);
+    pins.push(ent);
+    byFile.set(ent.file, ent.sha256);
+  }
+  return { pins, issues, byFile };
+}
+
+export function writeG4PinsForTree(dir) {
+  const g4dir = join(dir, G4_DIR);
+  const files = [];
+  if (existsSync(g4dir)) {
+    for (const name of readdirSync(g4dir).sort()) {
+      if (!name.endsWith('.md')) continue;
+      const rel = `${G4_DIR}/${name}`;
+      files.push({ file: rel, sha256: fileSha256(join(dir, rel)) });
+    }
+  }
+  const p = join(dir, G4_PINS_REL);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ files }, null, 2) + '\n');
 }
 
 export function coveringG4Markdown({ name, version, packageJsonSha256, packageLockSha256, provenance = 'ABSENT' }) {
@@ -229,14 +288,34 @@ export function scanLockfile(root, rootPkg) {
 
 export function scanG4(root, rootPkg) {
   const hits = [];
+  const pins = loadG4Pins(root);
+  hits.push(...pins.issues);
   const g4s = loadG4Files(root);
-  for (const g of g4s) hits.push(...g.issues);
-  const usable = g4s.filter((g) => g.id && g.packageJsonSha256 && g.packageLockSha256 && g.provenance);
+  const seen = new Set();
+  for (const g of g4s) {
+    hits.push(...g.issues);
+    const abs = join(root, g.path);
+    const sha = existsSync(abs) ? fileSha256(abs) : null;
+    const pinned = pins.byFile.get(g.path);
+    if (!pinned) hits.push(`${g.path}:1: b8-g4 G4 file is not listed in ${G4_PINS_REL}`);
+    else if (sha && pinned !== sha) hits.push(`${g.path}:1: b8-g4 sha256 ${sha} does not match the pin ${pinned}`);
+    seen.add(g.path);
+  }
+  for (const file of pins.byFile.keys()) {
+    if (!seen.has(file)) hits.push(`${file}:1: b8-g4 pinned G4 file is missing`);
+  }
+  const pinOk = (g) => pins.byFile.get(g.path) && existsSync(join(root, g.path)) && pins.byFile.get(g.path) === fileSha256(join(root, g.path));
+  const usable = g4s.filter((g) => g.id && g.packageJsonSha256 && g.packageLockSha256 && g.provenance && g.pass && g.issues.length === 0 && pinOk(g));
   const byId = new Map(usable.map((g) => [g.id, g]));
   const dev = (rootPkg && rootPkg.devDependencies && typeof rootPkg.devDependencies === 'object') ? rootPkg.devDependencies : {};
   for (const [name, ver] of Object.entries(dev)) {
     const id = `${name}@${ver}`;
     if (!byId.has(id)) hits.push(`${G4_DIR}:1: b8-g4 no G4 PASS file covers devDependency ${id}`);
+  }
+  for (const g of g4s) {
+    if (g.name && g.version && Object.prototype.hasOwnProperty.call(dev, g.name) && String(dev[g.name]) !== g.version) {
+      hits.push(`${g.path}:1: b8-g4 G4 file Package version '${g.version}' does not match the manifest pin '${dev[g.name]}'`);
+    }
   }
   const pkgPath = join(root, 'package.json');
   const lockPath = join(root, 'package-lock.json');
@@ -391,6 +470,36 @@ export const BAD_FIXTURES = {
     reason: /manifest change without a matching new G4 file/,
     g4From: 'control',
   },
+  'fail-verdict': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /VERDICT is not PASS/,
+    g4Special: 'fail-verdict',
+  },
+  'edited-content': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /does not match the pin/,
+    g4Special: 'edited-content',
+  },
+  'forged-4-line': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /missing a VERDICT line/,
+    g4Special: 'forged-4-line',
+  },
+  'wrong-version': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /Package version .* does not match the manifest pin/,
+    g4Special: 'wrong-version',
+  },
+  'unpinned-extra-file': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /is not listed in/,
+    g4Special: 'unpinned-extra-file',
+  },
+  'pin-list-mismatch': {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: /does not match the pin/,
+    g4Special: 'pin-list-mismatch',
+  },
 };
 
 function writeJson(dir, rel, obj) {
@@ -408,6 +517,52 @@ function writeCoveringG4(dir, pkg, lock) {
   const p = join(dir, G4_DIR, 'g4-typescript-5.9.3.md');
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, md);
+  writeG4PinsForTree(dir);
+}
+
+export function writeSpecialG4(d, name, pkg, lock) {
+  const packageJsonSha256 = fileSha256(join(d, 'package.json'));
+  const packageLockSha256 = fileSha256(join(d, 'package-lock.json'));
+  const mdPass = coveringG4Markdown({ name: 'typescript', version: '5.9.3', packageJsonSha256, packageLockSha256, provenance: 'ABSENT' });
+  const g4path = join(d, G4_DIR, 'g4-typescript-5.9.3.md');
+  mkdirSync(dirname(g4path), { recursive: true });
+  if (name === 'fail-verdict') {
+    writeFileSync(g4path, mdPass.replace('VERDICT: PASS', 'VERDICT: FAIL'));
+    writeG4PinsForTree(d);
+  } else if (name === 'edited-content') {
+    writeFileSync(g4path, mdPass);
+    writeG4PinsForTree(d);
+    writeFileSync(g4path, mdPass + '\n# edited\n');
+  } else if (name === 'forged-4-line') {
+    const forged = [
+      `Package: \`typescript@5.9.3\``,
+      `package.json sha256 \`${packageJsonSha256}\``,
+      `package-lock.json sha256 \`${packageLockSha256}\``,
+      'provenance is ABSENT',
+      '',
+    ].join('\n');
+    writeFileSync(g4path, forged);
+    writeG4PinsForTree(d);
+  } else if (name === 'wrong-version') {
+    writeFileSync(g4path, mdPass);
+    const extra = coveringG4Markdown({ name: 'typescript', version: '5.9.2', packageJsonSha256, packageLockSha256, provenance: 'ABSENT' });
+    writeFileSync(join(d, G4_DIR, 'g4-typescript-5.9.2.md'), extra);
+    writeG4PinsForTree(d);
+  } else if (name === 'unpinned-extra-file') {
+    writeFileSync(g4path, mdPass);
+    writeG4PinsForTree(d);
+    writeFileSync(join(d, G4_DIR, 'g4-extra.md'), mdPass);
+  } else if (name === 'pin-list-mismatch') {
+    writeFileSync(g4path, mdPass);
+    writeG4PinsForTree(d);
+    const pinsPath = join(d, G4_PINS_REL);
+    const pins = JSON.parse(readFileSync(pinsPath, 'utf8'));
+    pins.files[0].sha256 = '0'.repeat(64);
+    writeFileSync(pinsPath, JSON.stringify(pins, null, 2) + '\n');
+  } else {
+    writeFileSync(g4path, mdPass);
+    writeG4PinsForTree(d);
+  }
 }
 
 export function selfTest() {
@@ -424,10 +579,13 @@ export function selfTest() {
       writeJson(d, 'package.json', JSON.parse(uUnescape(uEscape(JSON.stringify(fix.pkg)))));
       writeJson(d, 'package-lock.json', fix.lock);
       if (fix.extra) for (const [rel, obj] of Object.entries(fix.extra)) writeJson(d, rel, obj);
-      if (fix.g4From === 'control') {
+      if (fix.g4Special) {
+        writeSpecialG4(d, fix.g4Special, fix.pkg, fix.lock);
+      } else if (fix.g4From === 'control') {
         const p = join(d, G4_DIR, 'g4-typescript-5.9.3.md');
         mkdirSync(dirname(p), { recursive: true });
         writeFileSync(p, controlG4);
+        writeG4PinsForTree(d);
       } else if (isExactPin(Object.values(fix.pkg.devDependencies ?? {})[0] ?? '') && name !== 'lockfile-mismatch') {
         // Own covering G4 so the fixture is red for its intended reason, not only a missing G4.
         const packageJsonSha256 = fileSha256(join(d, 'package.json'));
@@ -437,6 +595,7 @@ export function selfTest() {
         const p = join(d, G4_DIR, 'g4-typescript-5.9.3.md');
         mkdirSync(dirname(p), { recursive: true });
         writeFileSync(p, md);
+        writeG4PinsForTree(d);
       }
       const hits = scanRoot(d);
       if (!hits.some((h) => fix.reason.test(h))) fails.push(`${name} did not turn B8 red:\n${hits.join('\n')}`);

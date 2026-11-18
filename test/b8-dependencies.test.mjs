@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'nod
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { scanRoot, BAD_FIXTURES, uEscape, uUnescape, G4_TYPESCRIPT_5_9_3_SHA256, G4_PINNED_PACKAGE_JSON_SHA256, G4_PINNED_PACKAGE_LOCK_SHA256, G4_DIR, fileSha256, coveringG4Markdown } from '../tools/ci/b8-dependencies.mjs';
+import { scanRoot, BAD_FIXTURES, uEscape, uUnescape, G4_TYPESCRIPT_5_9_3_SHA256, G4_PINNED_PACKAGE_JSON_SHA256, G4_PINNED_PACKAGE_LOCK_SHA256, G4_DIR, fileSha256, coveringG4Markdown, writeSpecialG4, writeG4PinsForTree } from '../tools/ci/b8-dependencies.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const STUB = join(ROOT, 'test/fixtures/ph1-stubs/b8-dependencies.mjs');
@@ -23,11 +23,11 @@ test('B8: this repo is green (dependencies {} , exact devDeps, lockfile integrit
 test('B8: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /19 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /25 known-bad fixtures red, control green/);
 });
 
 test('B8: a runtime dep, an unpinned devDep, a workspace runtime dep, or a lockfile mismatch is red', () => {
-  assert.equal(Object.keys(BAD_FIXTURES).length, 19);
+  assert.equal(Object.keys(BAD_FIXTURES).length, 25);
 });
 
 test('B8: the previous stub exits 2 and does not kill a known-bad fixture', () => withTmp((d) => {
@@ -101,6 +101,7 @@ test('G-32 / G4: each new fixture is red on the new checker; record the 475950db
         put(tmp, 'package-lock.json', goodLock);
         const md = coveringG4Markdown({ name: 'typescript', version: '5.9.3', packageJsonSha256: fileSha256(join(tmp, 'package.json')), packageLockSha256: fileSha256(join(tmp, 'package-lock.json')), provenance: 'ABSENT' });
         put(d, G4_DIR + '/g4-typescript-5.9.3.md', md);
+        writeG4PinsForTree(d);
       }
       const oldHits = old.scanRoot(d);
       const newHits = scanRoot(d);
@@ -112,5 +113,40 @@ test('G-32 / G4: each new fixture is red on the new checker; record the 475950db
       assert.equal(oldRed, m.expectOldRed, `${m.name} old expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${oldRed ? 'RED' : 'GREEN'}:\n${oldHits.join('\n')}`);
     }
     console.log('B8 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const OLD_B8_4F = new URL('./fixtures/b8-checker-4f5619e5.mjs', import.meta.url);
+const G38_FIXTURES = [
+  { name: 'fail-verdict', expectOldRed: false },
+  { name: 'edited-content', expectOldRed: false },
+  { name: 'forged-4-line', expectOldRed: false },
+  { name: 'wrong-version', expectOldRed: false },
+  { name: 'unpinned-extra-file', expectOldRed: false },
+  { name: 'pin-list-mismatch', expectOldRed: false },
+];
+
+test('G-38: each new fixture is red on the new checker; record the 4f5619e5 verdict', async () => {
+  const old = await import(OLD_B8_4F);
+  const dir = mkdtempSync(join(tmpdir(), 'b8-g38-'));
+  const rows = [];
+  try {
+    for (const m of G38_FIXTURES) {
+      const fix = BAD_FIXTURES[m.name];
+      assert.ok(fix, m.name);
+      const d = join(dir, m.name);
+      put(d, 'package.json', JSON.parse(uUnescape(uEscape(JSON.stringify(fix.pkg)))));
+      put(d, 'package-lock.json', fix.lock);
+      writeSpecialG4(d, fix.g4Special, fix.pkg, fix.lock);
+      const oldHits = old.scanRoot(d);
+      const newHits = scanRoot(d);
+      const oldRed = oldHits.length > 0;
+      const newRed = newHits.length > 0;
+      rows.push({ name: m.name, old: oldRed ? 'RED' : 'GREEN', new: newRed ? 'RED' : 'GREEN', oldHits: oldHits.join(' | '), newHits: newHits.join(' | ') });
+      assert.equal(newRed, true, `${m.name} must be red on the new checker:\n${newHits.join('\n')}`);
+      if (fix.reason) assert.ok(newHits.some((h) => fix.reason.test(h)), `${m.name} wrong reason:\n${newHits.join('\n')}`);
+      assert.equal(oldRed, m.expectOldRed, `${m.name} old expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${oldRed ? 'RED' : 'GREEN'}:\n${oldHits.join('\n')}`);
+    }
+    console.log('G-38 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
