@@ -6,7 +6,7 @@ Status: stub (PH0).
 
 Please report suspected vulnerabilities privately, never in a public issue, discussion or pull request.
 
-Private vulnerability reporting through GitHub security advisories is **to be enabled** on the hosted repository. Until it is enabled, the private reporting channel is not yet live; see `REMOTE-PENDING.md` for the pending repository setting.
+Private vulnerability reporting is enabled on the hosted repository. To report, open the repository's **Security** tab and choose **Report a vulnerability**, or go to <https://github.com/ChristerFrestad/open-rng-engine/security/advisories/new>. Only the maintainer can see the report.
 
 ## Scope
 
