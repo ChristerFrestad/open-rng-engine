@@ -1,0 +1,24 @@
+{
+  "name": "open-rng-engine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "General-purpose Node.js library for unbiased random integers, shuffles, samples and weighted picks on the platform CSPRNG. Pre-alpha.",
+  "keywords": [
+    "random",
+    "csprng",
+    "random-integer",
+    "shuffle",
+    "sampling",
+    "weighted-random",
+    "nodejs"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "lint:claims": "node tools/claims-lint.mjs",
+    "lint:claims:fixture": "node tools/claims-lint.mjs --expect-red tools/fixtures/claims-lint/README.known-bad.md",
+    "check:qiu05": "node tools/qiu05-check.mjs",
+    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --expect-red tools/fixtures/claims-lint/README.known-bad.md && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --expect-red tools/fixtures/qiu05/README.known-bad.md"
+  },
+  "dependencies": {}
+}
