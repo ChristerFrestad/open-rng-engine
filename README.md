@@ -1,23 +1,23 @@
-# Open RNG Engine
+# open-rng-engine
 
-Status: pre-alpha and planning. There is no code yet.
+Status: pre-alpha. Planning and scaffold only. There is no library code yet. The npm name is reserved; the published placeholder is not for use.
 
-Open RNG Engine is a general-purpose library for unbiased random outcomes (integers, shuffles, and weighted picks) on top of the platform CSPRNG. It is intended to help integrators produce evidence for their own lab submissions.
+open-rng-engine is planned as a general-purpose Node.js library for unbiased random outcomes (bounded integers, shuffles, samples and integer-weighted picks) drawn from the platform CSPRNG (`node:crypto`). It is intended to help integrators produce evidence for their own evaluations.
 
-Certification applies to an operator's or supplier's complete system, never to this library. This project is not a validated cryptographic module.
+## What this project is not
 
-The project is not intended for or targeted at Norway or any market where the user lacks a licence. This repository does not provide legal advice.
+- It is not a validated cryptographic module.
+- No regulator or test laboratory has evaluated this software. Any evaluation applies to an operator's or supplier's complete system, never to this library on its own.
+- It does not provide legal advice.
 
-## Reference documents
+## Market stance
 
-GLI-19 and NIST SP 800-22 are reference documents only.
-
-NIST SP 800-22 describes the NIST Statistical Test Suite (STS). STS results are statistical evidence, not proof.
+This project is not intended for, aimed at, or marketed to Norway, or any market where the integrator lacks a licence.
 
 ## License
 
-Apache-2.0. Copyright 2026 Christer Frestad. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Security
 
-Report a vulnerability privately via GitHub security advisories. See [SECURITY.md](SECURITY.md).
+See [SECURITY.md](SECURITY.md). Please do not report suspected vulnerabilities in public issues.
