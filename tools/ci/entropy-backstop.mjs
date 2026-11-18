@@ -10,8 +10,8 @@
 
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join, normalize, resolve, sep } from 'node:path';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { mkdtempSync, writeFileSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const require = createRequire(import.meta.url);
@@ -52,6 +52,19 @@ const BASE_ENTRY_POINT_IDS = [
   'DiffieHellman',
   'DiffieHellmanGroup',
   'Crypto.prototype.randomUUID',
+  // G-39 (HoQ 4c7adda0/f575fe1f §3.4): randomised encrypt and sign outputs. RSA-OAEP / PKCS#1 v1.5
+  // encryption pads with fresh bytes; ECDSA, DSA and RSA-PSS signing draw a nonce or salt; the WebCrypto
+  // versions (encrypt, sign, wrapKey with RSA-OAEP) do the same. Deterministic algorithms behind the same
+  // functions (Ed25519, HMAC, PKCS#1 v1.5 signing) are hooked too: the hook is by caller, not by algorithm.
+  'publicEncrypt',
+  'sign',
+  'Sign.prototype.sign',
+  'SubtleCrypto.prototype.encrypt',
+  'SubtleCrypto.prototype.sign',
+  'SubtleCrypto.prototype.wrapKey',
+  'subtle.encrypt',
+  'subtle.sign',
+  'subtle.wrapKey',
 ];
 const CONSTRUCTOR_IDS = new Set(['DiffieHellman', 'DiffieHellmanGroup']);
 export const ENTRY_POINT_IDS = Object.freeze(
@@ -86,6 +99,9 @@ export function refuseIfBackstopOverride(env = process.env) {
   if (Object.prototype.hasOwnProperty.call(env, 'ENTROPY_BACKSTOP_ALLOWED')) {
     const msg = 'entropy-backstop: ENTROPY_BACKSTOP_ALLOWED is set; the override was removed and check:ph0 refuses to run';
     console.error(msg);
+    // G-39 proof: the backstop is loaded and refuses; no user code runs, so this child proves itself.
+    const pf = env === process.env ? process.env.ENTROPY_BACKSTOP_PROOF_FILE : undefined;
+    if (pf) { try { writeFileSync(pf, `refused ${process.pid}`, { flag: 'wx' }); } catch { /* parent sees no proof */ } }
     // Exit so `node --import` and check:ph0 stop immediately.
     process.exit(2);
   }
@@ -308,6 +324,8 @@ function collectTargets(crypto) {
   const gt = globalThis.crypto;
   let ecdhProto = null;
   try { ecdhProto = Object.getPrototypeOf(crypto.createECDH('prime256v1')); } catch { /* missing curve */ }
+  let signProto = null;
+  try { signProto = Object.getPrototypeOf(crypto.createSign('sha256')); } catch { /* no Sign */ }
   const targets = [
     { id: 'Crypto.prototype.getRandomValues', obj: typeof Crypto === 'function' ? Crypto.prototype : null, key: 'getRandomValues' },
     { id: 'SubtleCrypto.prototype.generateKey', obj: typeof SubtleCrypto === 'function' ? SubtleCrypto.prototype : null, key: 'generateKey' },
@@ -336,6 +354,15 @@ function collectTargets(crypto) {
     { id: 'Crypto.prototype.randomUUID', obj: typeof Crypto === 'function' ? Crypto.prototype : null, key: 'randomUUID' },
     { id: 'DiffieHellman', obj: crypto, key: 'DiffieHellman' },
     { id: 'DiffieHellmanGroup', obj: crypto, key: 'DiffieHellmanGroup' },
+    { id: 'publicEncrypt', obj: crypto, key: 'publicEncrypt' },
+    { id: 'sign', obj: crypto, key: 'sign' },
+    { id: 'Sign.prototype.sign', obj: signProto, key: 'sign' },
+    { id: 'SubtleCrypto.prototype.encrypt', obj: typeof SubtleCrypto === 'function' ? SubtleCrypto.prototype : null, key: 'encrypt' },
+    { id: 'SubtleCrypto.prototype.sign', obj: typeof SubtleCrypto === 'function' ? SubtleCrypto.prototype : null, key: 'sign' },
+    { id: 'SubtleCrypto.prototype.wrapKey', obj: typeof SubtleCrypto === 'function' ? SubtleCrypto.prototype : null, key: 'wrapKey' },
+    { id: 'subtle.encrypt', obj: wc && wc.subtle, key: 'encrypt' },
+    { id: 'subtle.sign', obj: wc && wc.subtle, key: 'sign' },
+    { id: 'subtle.wrapKey', obj: wc && wc.subtle, key: 'wrapKey' },
   ];
   if (RANDOMUUIDV7_PRESENT) targets.push({ id: 'randomUUIDv7', obj: crypto, key: 'randomUUIDv7' });
   return targets;
@@ -448,13 +475,199 @@ export function childCommandStripsPreload(args) {
   return null;
 }
 
-function mapChildArgs(args) {
+// G-39 at the source (HoQ 4c7adda0/f575fe1f report, gap G-39; CTO D): two independent fail-closed rules.
+// (1) Child executable allowlist: a child may only be node (process.execPath, or `node` resolved in a
+//     trusted directory) or an allowlisted tool resolved in a trusted directory. Shells, interpreters,
+//     `env`, script files and anything else are refused, and so is every shell command line that is not one
+//     plain allowlisted command (no quotes, expansions, operators, redirections or VAR= prefixes).
+// (2) Proof of preload: every node child gets a per-call proof path; the backstop in the child writes it at
+//     install. A node child that exits without the proof is red (sync: throws; async: exit code 1).
+export const CHILD_EXECUTABLE_ALLOWLIST = Object.freeze(['node', 'git', 'mkdir', 'ln']);
+const TRUSTED_DIRS = Object.freeze([...new Set(['/usr/bin', '/bin', '/usr/local/bin', dirname(process.execPath)].map((d) => { try { return realpathSync(d); } catch { return d; } }))]);
+const PLAIN_WORD = /^[A-Za-z0-9_./:,@%+=-]+$/;
+const PROOF_ENV = 'ENTROPY_BACKSTOP_PROOF_FILE';
+let proofDir = null;
+let proofSeq = 0;
+export const proofFailures = [];
+
+function refuseChild(why) {
+  const msg = `entropy-backstop: child process refused (${why})`;
+  console.error(msg);
+  throw new NativeError(msg);
+}
+
+function resolveExecutable(file, envPath) {
+  if (file.includes('/')) {
+    const abs = isAbsolute(file) ? file : resolve(file);
+    try { return realpathSync(abs); } catch { return null; }
+  }
+  for (const d of String(envPath ?? '').split(delimiter)) {
+    if (!d) continue;
+    const c = join(d, file);
+    try { if (statSync(c).isFile()) return realpathSync(c); } catch { /* next */ }
+  }
+  return null;
+}
+
+let execReal = null;
+function isNodeBinary(real) {
+  if (execReal === null) { try { execReal = realpathSync(process.execPath); } catch { execReal = process.execPath; } }
+  return real === execReal;
+}
+
+// Returns { node: boolean } for an allowed child, or throws. kind: 'file' | 'shell' | 'fork'.
+export function classifyChild(kind, file, argv, options) {
+  const opts = options || {};
+  if (kind === 'fork') {
+    if (opts.execPath !== undefined && opts.execPath !== process.execPath) refuseChild(`fork execPath ${String(opts.execPath)}`);
+    return { node: true };
+  }
+  let exe = file;
+  if (kind === 'shell' || opts.shell) {
+    if (opts.shell !== undefined && opts.shell !== true && opts.shell !== false && opts.shell !== '/bin/sh') refuseChild(`shell ${String(opts.shell)}`);
+    const words = [String(file), ...(argv || []).map(String)].join(' ').trim().split(/\s+/);
+    if (!words.every((w) => PLAIN_WORD.test(w)) || words[0].includes('=')) refuseChild('shell command line is not one plain allowlisted command');
+    exe = words[0];
+  }
+  if (typeof exe !== 'string' || exe === '') refuseChild('no executable');
+  if (exe === process.execPath) return { node: true };
+  const base = basename(exe);
+  if (!CHILD_EXECUTABLE_ALLOWLIST.includes(base)) refuseChild(`executable ${base} is not on the child allowlist`);
+  const envPath = Object.prototype.hasOwnProperty.call(opts, 'env') && opts.env ? opts.env.PATH : process.env.PATH;
+  const real = resolveExecutable(exe, envPath);
+  if (!real) refuseChild(`executable ${exe} not found`);
+  if (!TRUSTED_DIRS.includes(dirname(real)) && !isNodeBinary(real)) refuseChild(`executable ${real} is outside the trusted directories`);
+  if (basename(real) !== base && !isNodeBinary(real)) refuseChild(`executable ${exe} resolves to ${real}`);
+  if (base === 'git') {
+    if (kind === 'shell' || opts.shell) refuseChild('git through a shell');
+    checkGitChild(argv, opts);
+    return { node: false, git: true };
+  }
+  return { node: base === 'node' || isNodeBinary(real) };
+}
+
+// git can run other programs (hooks, aliases, filters, pagers, ssh, external diff). Rule (1) for git:
+// only -C before the subcommand; the subcommand is on GIT_SUBCOMMANDS; `git config` only sets user.name or
+// user.email; options that run a program are refused; the repo's own config may only hold GIT_CONFIG_KEYS;
+// the child gets no system/global config, no GIT_* variables, hooks off and no ext:: transport.
+export const GIT_SUBCOMMANDS = Object.freeze(['add', 'cat-file', 'check-attr', 'check-ignore', 'checkout', 'clone', 'config', 'init', 'ls-files', 'rev-parse', 'rm', 'show', 'status']);
+const GIT_CONFIG_KEYS = [/^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/,
+  /^user\.(name|email)$/, /^remote\.[^.]+\.(url|fetch)$/, /^branch\.[^.]+\.(remote|merge)$/, /^extensions\.objectformat$/];
+const GIT_EXEC_OPTS = /^(-c|--config|--config-env|-u|--upload-pack|--receive-pack|--template|--separate-git-dir|--exec|--ext-diff|--textconv|--filters|--ext|-p|--paginate|--exec-path|--git-dir|--work-tree|--namespace|--super-prefix|--list-cmds|-x)(=|$)/;
+export const GIT_SAFE_PREFIX = Object.freeze(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always']);
+
+function gitConfigFiles(start) {
+  let d = resolve(start);
+  for (;;) {
+    const g = join(d, '.git');
+    try {
+      const st = statSync(g);
+      if (st.isDirectory()) return [join(g, 'config')];
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(g, 'utf8'));
+      if (!m) return [];
+      const gd = resolve(d, m[1].trim());
+      const out = [join(gd, 'config'), join(gd, 'config.worktree')];
+      try { out.push(join(resolve(gd, readFileSync(join(gd, 'commondir'), 'utf8').trim()), 'config')); } catch { /* no commondir */ }
+      return out;
+    } catch { /* not here */ }
+    const up = dirname(d);
+    if (up === d) return [];
+    d = up;
+  }
+}
+
+function gitConfigKeys(text) {
+  const keys = [];
+  let sec = null;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l || l.startsWith('#') || l.startsWith(';')) continue;
+    const h = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]\s*(.*)$/.exec(l);
+    if (h) { sec = h[2] !== undefined ? `${h[1].toLowerCase()}.${h[2]}` : h[1].toLowerCase(); if (!h[3]) continue; }
+    const body = h ? h[3] : l;
+    const k = /^([A-Za-z][A-Za-z0-9-]*)\s*(=|$)/.exec(body);
+    keys.push(sec === null || !k ? `?${body}` : `${sec}.${k[1].toLowerCase()}`);
+  }
+  return keys;
+}
+
+export function checkGitChild(argv, opts) {
+  const a = (argv || []).map(String);
+  let i = 0;
+  let dir = opts && opts.cwd ? String(opts.cwd) : process.cwd();
+  while (i < a.length && a[i].startsWith('-')) {
+    if (a[i] === '-C' && i + 1 < a.length) { dir = resolve(dir, a[i + 1]); i += 2; continue; }
+    refuseChild(`git global option ${a[i]}`);
+  }
+  const sub = a[i];
+  if (!GIT_SUBCOMMANDS.includes(sub)) refuseChild(`git subcommand ${String(sub)} is not on the allowlist`);
+  const rest = a.slice(i + 1);
+  if (sub === 'config' && !(rest.length === 2 && /^user\.(name|email)$/.test(rest[0]))) refuseChild('git config may only set user.name or user.email');
+  for (const x of rest) if (GIT_EXEC_OPTS.test(x)) refuseChild(`git option ${x}`);
+  if (sub !== 'clone' && sub !== 'init') {
+    for (const f of gitConfigFiles(dir)) {
+      let t;
+      try { t = readFileSync(f, 'utf8'); } catch { continue; }
+      for (const k of gitConfigKeys(t)) if (!GIT_CONFIG_KEYS.some((r) => r.test(k))) refuseChild(`git repo config key ${k} is not on the allowlist (${f})`);
+    }
+  }
+}
+
+function gitChildEnv(env) {
+  const e = {};
+  for (const [k, v] of Object.entries(env || {})) if (!/^GIT_/i.test(k)) e[k] = v;
+  e.GIT_CONFIG_NOSYSTEM = '1';
+  e.GIT_CONFIG_GLOBAL = '/dev/null';
+  e.GIT_TERMINAL_PROMPT = '0';
+  return e;
+}
+
+function childShape(name, args) {
+  if (name === 'exec' || name === 'execSync') {
+    const o = args.find((a, i) => i > 0 && a && typeof a === 'object' && !Array.isArray(a));
+    return { kind: 'shell', file: args[0], argv: [], options: o };
+  }
+  if (name === 'fork') {
+    const o = args.find((a, i) => i > 0 && a && typeof a === 'object' && !Array.isArray(a));
+    return { kind: 'fork', file: args[0], argv: [], options: o };
+  }
+  const argv = Array.isArray(args[1]) ? args[1] : [];
+  const o = args.find((a, i) => i > 0 && a && typeof a === 'object' && !Array.isArray(a));
+  return { kind: 'file', file: args[0], argv, options: o };
+}
+
+function newProofPath() {
+  if (proofDir === null) proofDir = mkdtempSync(join(tmpdir(), 'ebs-proof-'));
+  proofSeq += 1;
+  return join(proofDir, `${process.pid}-${proofSeq}`);
+}
+
+function checkProof(path, label) {
+  if (existsSync(path)) return true;
+  const msg = `entropy-backstop: node child did not prove the backstop is loaded (${label})`;
+  console.error(msg);
+  proofFailures.push(msg);
+  if (process.exitCode == null || process.exitCode === 0) process.exitCode = 1;
+  return false;
+}
+
+// Child side: write the proof the parent asked for (first install only).
+function writeProof() {
+  const p = process.env[PROOF_ENV];
+  if (!p) return;
+  try { writeFileSync(p, String(process.pid), { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
+  delete process.env[PROOF_ENV];
+}
+
+function mapChildArgs(args, name = 'spawn') {
   const strip = childCommandStripsPreload(args);
   if (strip) {
     const msg = `entropy-backstop: child command would drop the preload (${strip})`;
     console.error(msg);
     throw new NativeError(msg);
   }
+  const shape = childShape(name, args);
+  const cls = classifyChild(shape.kind, shape.file, shape.argv, shape.options);
   const out = args.slice();
   let idx = -1;
   for (let i = out.length - 1; i >= 0; i--) {
@@ -462,9 +675,47 @@ function mapChildArgs(args) {
     if (typeof a === 'function') continue;
     if (a && typeof a === 'object' && !Array.isArray(a)) { idx = i; break; }
   }
-  if (idx === -1) out.push(normalizeChildOptions({}));
-  else out[idx] = normalizeChildOptions(out[idx]);
-  return out;
+  if (idx === -1) { out.push(normalizeChildOptions({})); idx = out.length - 1; } else out[idx] = normalizeChildOptions(out[idx]);
+  let proof = null;
+  if (cls.git) {
+    const env = gitChildEnv(out[idx].env);
+    const o = { ...out[idx], env };
+    if (Array.isArray(out[1])) { out[1] = [...GIT_SAFE_PREFIX, ...out[1]]; out[idx] = o; }
+    else { out[idx] = o; out.splice(1, 0, [...GIT_SAFE_PREFIX]); }
+  }
+  if (cls.node) {
+    proof = newProofPath();
+    out[idx].env = { ...out[idx].env, [PROOF_ENV]: proof };
+  }
+  return { args: out, proof };
+}
+
+// G-39: process.binding('spawn_sync') and ('process_wrap') spawn a child without going through the
+// child_process module, so they skip both rules above. They are refused outright.
+export const REFUSED_BINDINGS = Object.freeze(['spawn_sync', 'process_wrap', 'pipe_wrap', 'tcp_wrap', 'stream_wrap', 'tty_wrap', 'udp_wrap', 'js_stream']);
+function installBindingGuard() {
+  const orig = process.binding;
+  if (typeof orig !== 'function' || orig._backstopBinding) return;
+  const guarded = function (name) {
+    if (REFUSED_BINDINGS.includes(String(name))) {
+      const msg = `entropy-backstop: process.binding('${String(name)}') refused (G-39)`;
+      console.error(msg);
+      throw new NativeError(msg);
+    }
+    return orig.call(this, name);
+  };
+  guarded._backstopBinding = true;
+  Object.defineProperty(process, 'binding', { configurable: false, writable: false, enumerable: true, value: guarded });
+  // A native addon can call any C API (fork/exec, RAND_bytes) behind every hook: refused in tests.
+  if (typeof process.dlopen === 'function' && !process.dlopen._backstopBinding) {
+    const dl = function () {
+      const msg = 'entropy-backstop: process.dlopen refused (G-39: native addons bypass every hook)';
+      console.error(msg);
+      throw new NativeError(msg);
+    };
+    dl._backstopBinding = true;
+    Object.defineProperty(process, 'dlopen', { configurable: false, writable: false, enumerable: true, value: dl });
+  }
 }
 
 function installChildProcessHook() {
@@ -472,7 +723,21 @@ function installChildProcessHook() {
   for (const name of ['spawn', 'spawnSync', 'fork', 'execFile', 'execFileSync', 'exec', 'execSync']) {
     const orig = cp[name];
     if (typeof orig !== 'function' || orig._backstopChild) continue;
-    const hooked = function (...args) { return orig.apply(this, mapChildArgs(args)); };
+    const sync = name.endsWith('Sync');
+    const hooked = function (...args) {
+      const { args: mapped, proof } = mapChildArgs(args, name);
+      if (!proof) return orig.apply(this, mapped);
+      if (sync) {
+        let r, err = null;
+        try { r = orig.apply(this, mapped); } catch (e) { err = e; }
+        if (!checkProof(proof, `${name} ${String(args[0]).slice(0, 80)}`)) throw new NativeError(`entropy-backstop: node child did not prove the backstop is loaded (${name})`);
+        if (err) throw err;
+        return r;
+      }
+      const child = orig.apply(this, mapped);
+      if (child && typeof child.once === 'function') child.once('exit', () => checkProof(proof, `${name} ${String(args[0]).slice(0, 80)}`));
+      return child;
+    };
     hooked._backstopChild = true;
     try {
       Object.defineProperty(cp, name, { configurable: false, writable: false, enumerable: true, value: hooked });
@@ -491,6 +756,8 @@ export function install(opts = {}) {
   installNodeOptions();
   installWorkerHook();
   installChildProcessHook();
+  installBindingGuard();
+  writeProof();
   const crypto = require('node:crypto');
   const targets = collectTargets(crypto);
   const seenFn = new WeakMap();
@@ -602,6 +869,7 @@ function onTeardown() {
     assertMarkerIdentity('beforeExit');
     assertIdentitiesAndStack('beforeExit');
     assertCountersHealthy('beforeExit');
+    if (proofFailures.length) throw new NativeError(proofFailures[0]);
   } catch (e) {
     if (process.exitCode == null || process.exitCode === 0) process.exitCode = 1;
   }

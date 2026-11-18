@@ -210,6 +210,15 @@ else if (id === 'DiffieHellman.prototype.generateKeys') {
 else if (id === 'DiffieHellman') new c.DiffieHellman(512).getPrime();
 else if (id === 'DiffieHellmanGroup') new c.DiffieHellmanGroup('modp14').generateKeys();
 else if (id === 'Crypto.prototype.randomUUID') Object.getPrototypeOf(globalThis.crypto).randomUUID.call(globalThis.crypto);
+else if (id === 'publicEncrypt') c.publicEncrypt(c.createPublicKey({ key: {"kty": "RSA", "n": "13xrz0QHLARQc2lIEPi7ZenbAIiRKw_9Fl9GDMqMfAw-jWXtwbySTssIn0H0Rpw4JOyQCJONvk-efonp-N4RMosNwARU5atL6wmmk3tGYJAGcReufg9Z7lcvxmIqCq_JKDomU4oA0bDuqF3kjkeYEFI4795qmKCtrvUmJbF0ISM", "e": "AQAB"}, format: 'jwk' }), buf);
+else if (id === 'sign') c.sign('sha256', buf, c.createPrivateKey({ key: {"kty": "EC", "x": "CXQPEZB9jjf6C-OahpjHmw_lbBJkiuQyG9KMdjX3yf4", "y": "Gxd1Iz-M8isUJg_HtUpfC2jza0wwFc0tCESHRtMpkNk", "crv": "P-256", "d": "_kfrbwFvV1Kfev2MWV0PdejJD4dIYlLgtdJwpLVa6p8"}, format: 'jwk' }));
+else if (id === 'Sign.prototype.sign') c.createSign('sha256').update(buf).sign(c.createPrivateKey({ key: {"kty": "EC", "x": "CXQPEZB9jjf6C-OahpjHmw_lbBJkiuQyG9KMdjX3yf4", "y": "Gxd1Iz-M8isUJg_HtUpfC2jza0wwFc0tCESHRtMpkNk", "crv": "P-256", "d": "_kfrbwFvV1Kfev2MWV0PdejJD4dIYlLgtdJwpLVa6p8"}, format: 'jwk' }));
+else if (id === 'SubtleCrypto.prototype.encrypt') SubtleCrypto.prototype.encrypt.call(c.webcrypto.subtle, { name: 'RSA-OAEP' }, null, buf);
+else if (id === 'SubtleCrypto.prototype.sign') SubtleCrypto.prototype.sign.call(c.webcrypto.subtle, { name: 'ECDSA', hash: 'SHA-256' }, null, buf);
+else if (id === 'SubtleCrypto.prototype.wrapKey') SubtleCrypto.prototype.wrapKey.call(c.webcrypto.subtle, 'raw', null, null, { name: 'RSA-OAEP' });
+else if (id === 'subtle.encrypt') c.webcrypto.subtle.encrypt({ name: 'RSA-OAEP' }, null, buf);
+else if (id === 'subtle.sign') c.webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, null, buf);
+else if (id === 'subtle.wrapKey') c.webcrypto.subtle.wrapKey('raw', null, null, { name: 'RSA-OAEP' });
 else throw new Error('unknown id ' + id);
 `;
 

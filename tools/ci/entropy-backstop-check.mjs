@@ -93,6 +93,15 @@ try {
   else if (id === 'DiffieHellman') new c.DiffieHellman(512).getPrime();
   else if (id === 'DiffieHellmanGroup') new c.DiffieHellmanGroup('modp14').generateKeys();
   else if (id === 'Crypto.prototype.randomUUID') Object.getPrototypeOf(globalThis.crypto).randomUUID.call(globalThis.crypto);
+  else if (id === 'publicEncrypt') c.publicEncrypt(c.createPublicKey({ key: {"kty": "RSA", "n": "13xrz0QHLARQc2lIEPi7ZenbAIiRKw_9Fl9GDMqMfAw-jWXtwbySTssIn0H0Rpw4JOyQCJONvk-efonp-N4RMosNwARU5atL6wmmk3tGYJAGcReufg9Z7lcvxmIqCq_JKDomU4oA0bDuqF3kjkeYEFI4795qmKCtrvUmJbF0ISM", "e": "AQAB"}, format: 'jwk' }), buf);
+  else if (id === 'sign') c.sign('sha256', buf, c.createPrivateKey({ key: {"kty": "EC", "x": "CXQPEZB9jjf6C-OahpjHmw_lbBJkiuQyG9KMdjX3yf4", "y": "Gxd1Iz-M8isUJg_HtUpfC2jza0wwFc0tCESHRtMpkNk", "crv": "P-256", "d": "_kfrbwFvV1Kfev2MWV0PdejJD4dIYlLgtdJwpLVa6p8"}, format: 'jwk' }));
+  else if (id === 'Sign.prototype.sign') c.createSign('sha256').update(buf).sign(c.createPrivateKey({ key: {"kty": "EC", "x": "CXQPEZB9jjf6C-OahpjHmw_lbBJkiuQyG9KMdjX3yf4", "y": "Gxd1Iz-M8isUJg_HtUpfC2jza0wwFc0tCESHRtMpkNk", "crv": "P-256", "d": "_kfrbwFvV1Kfev2MWV0PdejJD4dIYlLgtdJwpLVa6p8"}, format: 'jwk' }));
+  else if (id === 'SubtleCrypto.prototype.encrypt') SubtleCrypto.prototype.encrypt.call(c.webcrypto.subtle, { name: 'RSA-OAEP' }, null, buf);
+  else if (id === 'SubtleCrypto.prototype.sign') SubtleCrypto.prototype.sign.call(c.webcrypto.subtle, { name: 'ECDSA', hash: 'SHA-256' }, null, buf);
+  else if (id === 'SubtleCrypto.prototype.wrapKey') SubtleCrypto.prototype.wrapKey.call(c.webcrypto.subtle, 'raw', null, null, { name: 'RSA-OAEP' });
+  else if (id === 'subtle.encrypt') c.webcrypto.subtle.encrypt({ name: 'RSA-OAEP' }, null, buf);
+  else if (id === 'subtle.sign') c.webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, null, buf);
+  else if (id === 'subtle.wrapKey') c.webcrypto.subtle.wrapKey('raw', null, null, { name: 'RSA-OAEP' });
   else throw new Error('unknown id ' + id);
   console.error('planted call of ' + id + ' was not rejected');
   process.exit(0);
@@ -348,6 +357,78 @@ process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr) + S
 const r = spawnSync(${node}, [${cp}], { encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '--import ' + ${JSON.stringify(decoy)} } });
 process.stderr.write(String(r.stderr || '')); process.stdout.write(String(r.stdout || ''));
 process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr) + String(r.stdout)) ? 1 : 2));`],
+      // G-39 at the source (HoQ 4c7adda0/f575fe1f §3.4): HoQ's 8 bypasses, each must be refused.
+      ['hoq-1-export-n', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('bash', ['-c', 'export -n NODE_OPTIONS; ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-2-unset-indirect', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('bash', ['-c', 'N=NODE_OPTIONS; unset $N; ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-3-exec-c', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('bash', ['-c', 'exec -c ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-4-script-file', `import { spawnSync } from 'node:child_process';
+import { writeFileSync, chmodSync } from 'node:fs';
+const f = ${JSON.stringify(join(d, 'x.sh'))};
+writeFileSync(f, '#!/bin/sh\\nunset NODE_OPTIONS; exec ' + ${node} + ' ' + ${cp} + '\\n'); chmodSync(f, 0o755);
+const r = spawnSync(f, [], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-5-python', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('python3', ['-c', "import os; os.environ.pop('NODE_'+'OPTIONS'); os.execv(" + JSON.stringify(${node}) + ", [" + JSON.stringify(${node}) + ", " + JSON.stringify(${cp}) + "])"], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-6-perl', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('perl', ['-e', 'delete $ENV{NODE_OPTIONS}; exec(' + JSON.stringify(${node}) + ', ' + JSON.stringify(${cp}) + ')'], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-7-env-printf', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('sh', ['-c', 'env $(printf NODE_%s= OPTIONS) ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['hoq-8-declare-x', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('bash', ['-c', 'declare +x NODE_OPTIONS; ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      // Variants of the same classes through the other entry points, and two found while fixing.
+      ['shell-option-true', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('unset NODE_OPTIONS; ' + ${node} + ' ' + ${cp}, { shell: true, encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['exec-sync-shell', `import { execSync } from 'node:child_process';
+execSync('bash -c "unset NODE_OPTIONS; ' + ${node} + ' ' + ${cp} + '"', { stdio: 'pipe' });
+process.exit(0);`],
+      ['exec-file-perl', `import { execFileSync } from 'node:child_process';
+execFileSync('/usr/bin/perl', ['-e', 'delete $ENV{NODE_OPTIONS}; exec(' + JSON.stringify(${node}) + ', ' + JSON.stringify(${cp}) + ')'], { stdio: 'pipe' });
+process.exit(0);`],
+      ['fork-execpath', `import { fork } from 'node:child_process';
+const c = fork(${cp}, [], { execPath: '/bin/sh', stdio: 'pipe' });
+c.on('exit', (code) => process.exit(code === 0 ? 0 : 2));`],
+      ['binding-spawn-sync', `const b = process.binding('spawn_sync');
+const r = b.spawn({ file: ${node}, args: [${node}, ${cp}], envPairs: [], stdio: [{ type: 'pipe', readable: true }, { type: 'pipe', writable: true }, { type: 'pipe', writable: true }] });
+process.exit(r.status === 0 ? 0 : 2);`],
+      ['dlopen', `import { createRequire } from 'node:module';
+const m = { exports: {} };
+try { process.dlopen(m, '/nonexistent/addon.node'); } catch (e) { if (/entropy-backstop:/.test(String(e && e.message))) throw e; }
+process.exit(0);`],
+      ['shell-chain-after-allowed', `import { execSync } from 'node:child_process';
+execSync('mkdir -p ' + ${JSON.stringify(join(d, 'mk'))} + ' && perl -e ' + "'" + 'delete $ENV{NODE_OPTIONS}; exec(' + JSON.stringify(${node}) + ', ' + JSON.stringify(${cp}) + ')' + "'", { stdio: 'pipe' });
+process.exit(0);`],
+      ['git-alias', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('git', ['-c', 'alias.x=!unset NODE_OPTIONS; ' + ${node} + ' ' + ${cp}, 'x'], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['git-repo-config', `import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+const g = ${JSON.stringify(join(d, 'gr'))};
+mkdirSync(g + '/.git', { recursive: true });
+spawnSync('git', ['init', '-q'], { cwd: g });
+writeFileSync(g + '/.git/config', '[core]\\n\\tpager = unset NODE_OPTIONS; node x\\n');
+const r = spawnSync('git', ['status'], { cwd: g, encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['git-subcommand', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('git', ['difftool', '-x', 'sh'], { encoding: 'utf8' });
+process.exit(r.status === 0 ? 0 : 2);`],
+      // Proof of preload: a node child that never loads the backstop has no proof and is red, even
+      // though it draws nothing (fail-closed: no marker = red).
+      ['proof-missing-sync', `import { spawnSync } from 'node:child_process';
+spawnSync(process.execPath, ['--version'], { encoding: 'utf8' });
+process.exit(0);`],
+      ['proof-missing-async', `import { spawn } from 'node:child_process';
+spawn(process.execPath, ['--version'], { stdio: 'ignore' });`],
       ['marker-break-call', `import { breakMarkerIdentityForTestOnly } from ${JSON.stringify(pathToFileURL(BACKSTOP).href)};
 import { createRequire } from 'node:module';
 breakMarkerIdentityForTestOnly();
