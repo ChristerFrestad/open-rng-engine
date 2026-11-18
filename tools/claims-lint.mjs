@@ -142,7 +142,7 @@ export const RULES = [
   ['R16-fips', /\b\u0046IPS\b/gi],
   ['R16-badge', /!\[[^\]]*(?:GLI|NIST)[^\]]*\]\([^)]*\)|!\[[^\]]*\]\([^)]*(?:GLI|NIST)[^)]*\)|<img\b[^>]*(?:GLI|NIST)[^>]*>/gi],
   ['C10-drbg-reserved', /(?<![0-9])800-90A\b|\b\u0043AVP\b/gi], // CPO-R97b (2)
-  ['C10-validat', /\b\u0076alidat\w*/gi], // CPO-R99 O-68; term exceptions per CPO-R100 F-16
+  ['C10-validat', /[A-Za-z0-9_]*\u0076alidat\w*/gi], // CPO-R99 O-68 (no leading boundary: un-/in-/_-prefixed forms are hits, quality M-124); term exceptions per CPO-R100 F-16
   ['C10-crypto-module', new RegExp(String.raw`\b\u0063ryptographic${SEP_CLASS}+modules?\b`, 'gi')], // CPO-R99 O-68; variants CPO-R100 F-19
   ['C10-cmvp', /\b\u0043MVP\b/gi], // CPO-R99 O-68
 ];
@@ -616,6 +616,28 @@ export function nearMissCases() {
   // CPO-R102 F-27: GLI and ITL match document ids (hyphen + digits)
   for (const id of ['GLI-11', 'GLI-19', 'GLI-33', 'GLI-1', 'ITL-21', 'gli-19']) add(`F-27 ${id} is a lab co-term`, `schema \u0076alidation per ${id}`, 'red');
   add('F-27 control: no lab id on the line', 'schema \u0076alidation per RFC 8259', 'clean');
+  // quality v5.5.6 M-124 / M-125 / M-138 / M-139 (exact case sets)
+  const VD = '\u0076alidat';
+  const PH = [`schema-${VD}ed`, `schema ${VD}or`, `schema ${VD}ion`];
+  for (const t of [`The context data is schema-${VD}ed before hashing.`, `Run the schema ${VD}or first.`, `See schema ${VD}ion errors.`]) add(`M-124 control: ${t}`, t, 'clean');
+  for (const t of [`Schema-${VD}ed`, `SCHEMA ${VD.toUpperCase()}OR`, `Schema ${VD[0].toUpperCase()}${VD.slice(1)}ion`, `schema ${VD}ed`, `schema-${VD}or`, `schema-${VD}ion`,
+    `schema  ${VD}or`, `schema\t${VD}or`, `schema\u00a0${VD}ion`, `schema-${VD}ing`, `schema ${VD}ors`, `schema ${VD}ions`, `schema-${VD}edness`, `jsonschema ${VD}or`,
+    `json-schema-${VD}ed`, `re-${VD}ed`, `un${VD}ed`, `${VD}ed schema`]) add(`M-124 plant: ${t}`, t, 'red');
+  const CO = ['module', 'modules', 'submodule', 'crypto', 'cryptographic', 'node:crypto', 'Crypto', '\u0046IPS', 'fips', '\u0043MVP', '\u0063ertified', '\u0063ertification',
+    'GLI', 'BMM', 'iTech Labs', 'eCOGRA', 'NMi', 'Trisigma', 'Gaming Associates', 'SIQ', 'QUINEL'];
+  for (const ph of PH) for (const c of CO) add(`M-125 co-term: ${ph} + ${c}`, `The ${ph} step (${c}).`, 'red');
+  for (const ph of PH) add(`M-125 control: co-term on the next line (${ph})`, `The ${ph} step.\nGLI and \u0043MVP are mentioned here.`, 'red'); // line 2 alone is a CMVP hit
+  for (const ph of PH) add(`M-125 control: lab co-term on the next line (${ph})`, `The ${ph} step.\nSee GLI-19 for context.`, 'clean');
+  for (const ph of PH) {
+    for (const t of [`a${ph}`, `${ph}x`, `2${ph}`, `${ph}2`, `json-${ph}`, `${ph}-input`, `_${ph}`, `${ph}_x`]) add(`M-138 plant: ${t}`, t, 'red');
+    for (const t of [ph, `(${ph})`, `"${ph}"`, `${ph}.`, `${ph},`, `${ph}:`, `\`${ph}\``, `\t${ph}`]) add(`M-138 control: ${JSON.stringify(t)}`, t, 'clean');
+  }
+  add('M-138 plant: schema_validation', `schema_${VD}ion`, 'red');
+  const LABV = ['GLI', 'gli', 'GLI-19', 'GLI-11', 'GLI-33', 'Gaming Laboratories International', 'Gaming Laboratories', 'BMM', 'BMM Testlabs', 'BMM Test Labs', 'BMM Australia',
+    'BMM Spain Testlabs', 'eCOGRA', 'ecogra', 'ECOGRA', 'Trisigma', 'trisigma', 'NMi', 'NMi Metrology & Gaming', 'Quinel', 'QUINEL', 'Quinel Ltd', 'iTech Labs', 'iTech', 'itechlabs',
+    'iTechLabs', 'Gaming Associates', 'Gaming Associates Europe', 'GA Europe'];
+  for (const ph of PH) for (const n of LABV) add(`M-139 lab veto: ${ph} + ${n}`, `${ph} as ${n} does it`, 'red');
+  for (const ph of PH) add(`M-139 control: lab name on the next line (${ph})`, `${ph} as usual\nas BMM Testlabs does it`, 'clean');
   // M-119: trailing whitespace on an allowlisted line (incl. CR, F-15)
   for (const [id, s] of ALLOW) for (const [w, tail] of [['space', ' '], ['tab', '\t'], ['nbsp', '\u00a0'], ['two spaces', '  '], ['CR', '\r']]) add(`M-119 ${id} + ${w}`, `${s}${tail}`, 'red');
   add('M-119 space after closing wrapper', `/* ${R39} */ `, 'red');

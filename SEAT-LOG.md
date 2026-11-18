@@ -98,3 +98,5 @@ One line per commit, written before the commit by the committing seat. Columns: 
 
 | 2026-11-18 08:33:47 CET | CTO via executor | Replay R0 (CPO-R99 O-69; spec errata E-1): params.n safe integer >= 1 checked before R1; mutant kills M-100..M-105, M-106 (replay half), M-108..M-110 (incl. CSPRNG trap), M-117 (b)-(d) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 - Tests: npm test (see commit report). Strict tsc still PENDING (no tsc on the box); sources run via Node 24 type stripping only.
+
+| 2026-11-18 08:34:23 CET | CTO via executor | Claims lint: quality v5.5.6 M-124/M-125/M-138/M-139 case sets; validat stem now also matches un-/in-/underscore-prefixed forms (M-124 unvalidated, M-138 schema_validation were green before) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
