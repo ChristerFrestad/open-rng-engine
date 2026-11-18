@@ -22,8 +22,11 @@
 //     (i) a file under src/entropy/ imports anything from node:crypto/crypto, re-exports from it, exports a name matching
 //         /read|fetch|bytes|entropy|fill|draw/i (incl. aliases, types, export *, export default, destructured exports:
 //         all red), or calls fill*/read*/randomBytes/randomFill*/getRandomValues/randomUUID/randomInt (bare or member).
-//         Only carve-out, so a pure constant is not an API: `export const UPPER_CASE = <numeric literal>` (e.g.
-//         FINGERPRINT_BYTES = 16 in blockPlan.ts). Comments and string contents are ignored; everything else errs red.
+//         Only carve-out (HoQ tighten ruling, 2026-11-18): the exact-name allow-list READ_NAME_ALLOW = { FINGERPRINT_BYTES },
+//         allowed only as the declaration `export const FINGERPRINT_BYTES = 16;` (canonical decimal literal 16; no type
+//         annotation, no 0x10/1_6/16n/'16'/16.0, no expression or identifier, not let/var, not a re-export). Any other
+//         exported name matching the heuristic is red. Each future allow-list entry needs its own HoQ ruling plus its own
+//         fixture. Comments and string contents are ignored; everything else errs red.
 //     (ii) package.json has main/module/exports (package root exported), or a module reachable by static imports or
 //         re-exports from a core entry (src/index.ts, src/audited/index.ts) exports createRng/createAuditedRng/randomInt/
 //         shuffle/sample/weightedPick/randomBytes or any create*Rng / random* name;
@@ -146,15 +149,18 @@ const READ_NAME = /read|fetch|bytes|entropy|fill|draw/i;
 const READ_CALL = /(^|[^\w$])((fill|read)[\w$]*|randomBytes|randomFill[\w$]*|getRandomValues|randomUUID|randomInt)\s*\(/gi;
 const ENTRY_NAME = /^(createRng|createAuditedRng|randomInt|shuffle|sample|weightedPick|randomBytes|create[\w$]*Rng|random[\w$]*)$/;
 
-// Exported names of one module: [{ name, numericConst }], plus opaque=true for export * / default / destructuring.
+// Exported names of one module: [{ name, allowed }], plus opaque=true for export * / default / destructuring.
+// allowed = true only for an exact READ_NAME_ALLOW declaration (HoQ tighten ruling; each entry needs a HoQ ruling + fixture).
+export const READ_NAME_ALLOW = Object.freeze({ FINGERPRINT_BYTES: '16' });
 export function exportsOf(src) {
   const [a, b] = strip(src); const out = []; let opaque = [];
   for (const m of b.matchAll(/(^|[^\w$.])export\s+(declare\s+)?(async\s+)?(function\s*\*?|class|const|let|var|type|interface|enum)\s*([A-Za-z_$][\w$]*)/g)) {
-    const numericConst = m[4] === 'const' && /^[A-Z][A-Z0-9_]*$/.test(m[5]) && new RegExp(`^export\\s+const\\s+${m[5]}\\s*(:\\s*number\\s*)?=\\s*-?[0-9][0-9_]*(\\.[0-9_]+)?\\s*;`, 'm').test(a.slice(m.index + m[1].length));
-    out.push({ name: m[5], numericConst });
+    const want = Object.hasOwn(READ_NAME_ALLOW, m[5]) ? READ_NAME_ALLOW[m[5]] : undefined;
+    const allowed = want !== undefined && m[4] === 'const' && !m[2] && new RegExp(`^export\\s+const\\s+${m[5]}\\s*=\\s*${want}\\s*;`).test(a.slice(m.index + m[1].length));
+    out.push({ name: m[5], allowed });
   }
   for (const m of a.matchAll(/(^|[^\w$.])export\s+(type\s+)?\{([^}]*)\}/g)) for (const part of m[3].split(',').map((x) => x.trim()).filter(Boolean)) {
-    const ps = part.replace(/^type\s+/, '').split(/\s+as\s+/).map((x) => x.trim()); out.push({ name: ps[1] ?? ps[0], numericConst: false });
+    const ps = part.replace(/^type\s+/, '').split(/\s+as\s+/).map((x) => x.trim()); out.push({ name: ps[1] ?? ps[0], allowed: false });
   }
   for (const m of b.matchAll(/(^|[^\w$.])export\s*(\*|default\b|(const|let|var)\s*[\[{])/g)) opaque.push(m[2]);
   return { names: out, opaque };
@@ -170,7 +176,7 @@ export function entropyTriggers(root, { phaseExit = false } = {}) {
     if (SPECS(a).some((x) => x === 'node:crypto' || x === 'crypto')) why.push(`(i) ${rel} imports or re-exports from node:crypto`);
     const ex = exportsOf(src);
     for (const o of ex.opaque) why.push(`(i) ${rel} has an opaque export (${o.trim()}), treated as a read API`);
-    for (const e of ex.names) if (READ_NAME.test(e.name) && !e.numericConst) why.push(`(i) ${rel} exports ${e.name}`);
+    for (const e of ex.names) if (READ_NAME.test(e.name) && !e.allowed) why.push(`(i) ${rel} exports ${e.name}`);
     for (const m of b.matchAll(READ_CALL)) why.push(`(i) ${rel}:${lineOf(src, m.index + m[1].length)} calls ${m[2]}(`);
   }
   try {

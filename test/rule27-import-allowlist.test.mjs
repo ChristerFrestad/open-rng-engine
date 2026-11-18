@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, entropyTriggers } from '../tools/ci/import-allowlist.mjs';
+import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, entropyTriggers, READ_NAME_ALLOW } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const EXPECT = {
@@ -149,3 +149,28 @@ for (const [name, files] of [['package exports', { 'package.json': '{"name":"x",
     assert.ok(scanTree(d).hits.some((x) => /entropy\/\).*PH1-M1 trigger: .*\(ii\)/.test(x)), JSON.stringify(scanTree(d)));
   }));
 }
+
+// HoQ tighten ruling: trigger (i) carve-out is the exact-name allow-list { FINGERPRINT_BYTES } = `export const ... = 16;`.
+const BP = () => readFileSync(join(ROOT, 'src/entropy/blockPlan.ts'), 'utf8');
+const trig = (d) => scanTree(d).hits.some((x) => /rule27-missing-pair \(randomFillSync, entropy\/\).*PH1-M1 trigger: \(i\)/.test(x));
+test('(e) export const SEED_BYTES = 32 is red (no UPPER_CASE numeric carve-out any more)', () => withTmp((d) => {
+  put(d, 'src/entropy/blockPlan.ts', BP()); put(d, 'src/entropy/s.ts', 'export const SEED_BYTES = 32;\n'); assert.ok(trig(d));
+}));
+for (const v of ['15', '0x10', '1_6', '16n', "'16'", '16.0', '16 + 0', 'SIXTEEN', '(16)', '16, X_BYTES = 1']) {
+  test(`(f) FINGERPRINT_BYTES = ${v} is red`, () => withTmp((d) => {
+    put(d, 'src/entropy/blockPlan.ts', BP().replace('export const FINGERPRINT_BYTES = 16;', `const SIXTEEN = 16;\nexport const FINGERPRINT_BYTES = ${v};`)); assert.ok(trig(d));
+  }));
+}
+test('(f) FINGERPRINT_BYTES with a type annotation or via a re-export is red', () => withTmp((d) => {
+  put(d, 'src/entropy/blockPlan.ts', BP().replace('export const FINGERPRINT_BYTES = 16;', 'export const FINGERPRINT_BYTES: number = 16;')); assert.ok(trig(d));
+  put(d, 'src/entropy/blockPlan.ts', BP().replace('export const FINGERPRINT_BYTES = 16;', 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };')); assert.ok(trig(d));
+}));
+for (const kw of ['let', 'var']) {
+  test(`(g) export ${kw} FINGERPRINT_BYTES = 16 is red`, () => withTmp((d) => {
+    put(d, 'src/entropy/blockPlan.ts', BP().replace('export const FINGERPRINT_BYTES = 16;', `export ${kw} FINGERPRINT_BYTES = 16;`)); assert.ok(trig(d));
+  }));
+}
+test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FINGERPRINT_BYTES', () => withTmp((d) => {
+  put(d, 'src/entropy/blockPlan.ts', BP()); assert.deepEqual(scanTree(d).hits, []); assert.deepEqual(entropyTriggers(d), []);
+  assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
+}));
