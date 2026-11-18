@@ -2,7 +2,7 @@
   "name": "open-rng-engine",
   "version": "0.0.0",
   "private": true,
-  "description": "General-purpose Node.js library for unbiased random integers, shuffles, samples and weighted picks on the platform CSPRNG. Pre-alpha.",
+  "description": "Open-source TypeScript RNG and mapping library for Node.js, intended to be submitted as part of a licensee's system for independent lab evaluation. Not certified. Not a validated module.",
   "keywords": [
     "random",
     "csprng",
@@ -10,7 +10,10 @@
     "shuffle",
     "sampling",
     "weighted-random",
-    "nodejs"
+    "nodejs",
+    "unbiased-random",
+    "general-purpose",
+    "pre-alpha"
   ],
   "license": "Apache-2.0",
   "type": "module",

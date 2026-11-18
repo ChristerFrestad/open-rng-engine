@@ -17,4 +17,6 @@ Platform CSPRNG
 - Outcome types in scope are integers, shuffles, and weighted picks.
 - Random bits come from the platform CSPRNG.
 - GLI-19 and NIST SP 800-22 are reference documents only. NIST STS results are statistical evidence, not proof.
-- This library is not a validated cryptographic module. Certification applies to an operator's or supplier's complete system, never to this library.
+- Not certified. Not a validated module.
+- The library is not certified and cannot be.
+- Any evaluation applies to an operator's or supplier's complete system, never to this library.
