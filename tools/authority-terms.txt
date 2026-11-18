@@ -2,8 +2,10 @@
 # Regulators, standards bodies and the plain word lab/labs, extracted by the CTO seat on 2026-11-18 from
 # /home/box/company/rng/PLAN.md and /home/box/company/rng/research/** (incl. research/raw/). Any entry on a line blocks an
 # allowed validat phrase on that line, exactly as tools/lab-names.txt does. Format: <name>|<first source file:line>.
-# Matching: case-insensitive, whole word (no [A-Za-z0-9_] on either side; hyphen-digit suffixes still match), any
-# whitespace run between words. Jurisdiction names and lottery operators are not listed (not regulators or standards bodies);
+# Matching in tools/claims-lint.mjs (CPO-R104 D-2 as amended by CPO-R105 G-11): case-insensitive; no preceding
+# [A-Za-z0-9]; entries of <= 3 characters also need no following letter; entries of >= 4 characters match as a bare
+# prefix; lab and labs stay whole-word (no [A-Za-z0-9_] on either side); any whitespace run between words. Entries also
+# anchor the comparative rule (CPO-R104 G-6). Jurisdiction names and lottery operators are not listed (not regulators or standards bodies);
 # the excluded names are in the CTO report. Source file names that contain a protected name (rule 40) are abbreviated with
 # '~' (research/super-h~.md); the CTO report carries the full path.
 NIST|PLAN.md:9

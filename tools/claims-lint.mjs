@@ -35,7 +35,7 @@ export const LAB_NAMES_SHA256 = '1d9e087bdc3f3a945b52206fcdd999053742a5f54801770
 export const LAB_NAMES_COUNT = 46;
 // CPO-R102 LF-10: closed authority co-term list v1 (regulators, standards bodies, lab/labs), exact path + sha pin.
 export const AUTHORITY_PATH = 'tools/authority-terms.txt';
-export const AUTHORITY_SHA256 = '5f4ff5734a43dd9b1648bb8fb6eb2e4c2092041f379ef54b04ea9c5b1ce5277a';
+export const AUTHORITY_SHA256 = '43091c7aa6d1d76d6d955b6b9e4d191a0bfbbc5e497de77fbc169c07258540e1'; // CPO-R106: header-only reword of 5f4ff573 (non-# lines byte-identical)
 export const AUTHORITY_COUNT = 36;
 // CPO pins (rulings bdde9834 L118-L173; quality §8.19.2). Exactly these six ids; nothing else may be configured.
 export const CPO_PINS = Object.freeze({
