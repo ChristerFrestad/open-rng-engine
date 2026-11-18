@@ -2,13 +2,13 @@
 // cto-g1-spec.md §5.2–§5.4; CPO-R98 / C-11, DECISIONS L77). VERIFICATION BUILD ONLY (src/verify/, rule 24).
 // Pure function: never fetches, no I/O, no clock, no state. The context check (CONTEXT_MISMATCH, §3.11)
 // runs before this in the full replay and is out of scope here.
-// Order (first failure wins): R1 schema, R2 len(output)==n, R3 lowercase even-length hex, R4 reads vs blockPlan(n),
+// Order (first failure wins): R0 n is a safe integer >= 1 (CPO-R99 O-69; spec errata E-1), R1 schema, R2 len(output)==n, R3 lowercase even-length hex, R4 reads vs blockPlan(n),
 // R5 count===width per entry, R6 Σcount===bytesFetched, R7 bytesFetched===n+16·⌈n/65520⌉.
 // R1 checks the §5.2 shape except the `output` hex pattern, which is reported as R3 so each invariant is observable.
 
 import { blockCount, blockWidthAt, blockPlanTotal, isValidBlockPlanN } from '../entropy/blockPlan.ts';
 
-export type ReplayCode = 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7';
+export type ReplayCode = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7';
 export type ReplayResult = { ok: true } | { ok: false; code: ReplayCode; detail: string; failures: ReplayCode[] };
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
@@ -53,12 +53,19 @@ export function validateReadsOutputSchema(e: unknown): string | null {
 }
 
 /**
- * R-93 replay invariants R1..R7 for kind = randomBytes. Never fetches.
+ * R-93 replay invariants R0..R7 for kind = randomBytes. Never fetches.
  * `code` is the first failure in spec order; `failures` lists every invariant that fails when R2..R7 are each
  * evaluated independently (R1 failure stops evaluation). Note: given R4 and R5, Σcount equals Σ blockPlan(n),
  * so a bytesFetched error always fails R6 first and R7 together; `failures` makes R7 observable.
  */
 export function checkRandomBytesReplay(e: unknown): ReplayResult {
+  // R0 (O-69, cto-g1-spec errata E-1): for a randomBytes record, params.n must be a safe integer >= 1. Runs before R1, so
+  // a forged n = 0 / negative / fractional / string record is reported as R0 whatever the rest of the record holds.
+  if (isObj(e) && e['kind'] === 'randomBytes') {
+    const params = e['params'];
+    const n = isObj(params) && has(params, 'n') ? params['n'] : undefined;
+    if (!isValidBlockPlanN(n)) return { ok: false, code: 'R0', detail: `params.n ${JSON.stringify(n) ?? 'missing'} is not a safe integer >= 1 (PLAN L605: n = 0 throws RANGE_INVALID, no evidence)`, failures: ['R0'] };
+  }
   const schemaErr = validateReadsOutputSchema(e);
   if (schemaErr !== null) return { ok: false, code: 'R1', detail: schemaErr, failures: ['R1'] };
   const ev = e as Record<string, unknown>;

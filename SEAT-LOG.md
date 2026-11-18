@@ -95,3 +95,6 @@ One line per commit, written before the commit by the committing seat. Columns: 
 
 | 2026-11-18 08:31:59 CET | CTO via executor | Claims lint for CPO-R99/R100/R101/R102: pinned allowlist/terms/lab (45)/authority (36) configs; claims-surface scope incl. CHANGELOG/CONTRIBUTING/release notes, all package.json string values, .d.ts/JSDoc/shipped string literals (built half PENDING); validat/crypto-module/CMVP; strict phrase boundaries; S-P1 presence on README, P8 README, package.json and repo description; LICENSE not scanned by exact path+sha; CI rule 46; .gitattributes LF; README/package.json/REMOTE-PENDING S-P1 | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 - Tests: npm test 860 pass / 0 fail (claims-lint near-miss 574/574). check:ph0 exit 0. Remotes 0.
+
+| 2026-11-18 08:33:47 CET | CTO via executor | Replay R0 (CPO-R99 O-69; spec errata E-1): params.n safe integer >= 1 checked before R1; mutant kills M-100..M-105, M-106 (replay half), M-108..M-110 (incl. CSPRNG trap), M-117 (b)-(d) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+- Tests: npm test (see commit report). Strict tsc still PENDING (no tsc on the box); sources run via Node 24 type stripping only.
