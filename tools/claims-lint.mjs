@@ -353,14 +353,31 @@ export function r39Header(path, text) {
 }
 
 /** Lint a whole tree. files: Map<repo-relative path, Buffer>. */
-export function lintTree(files, built = new Map()) {
+// M-122: exact-path exemptions and scanned paths must be canonical repo-relative paths; tracked symlinks are red
+// (a symlink could point an exempt path at other bytes or escape the repo).
+export const nonCanonicalPath = (p) => p === '' || p.startsWith('/') || p.startsWith('./') || p.endsWith('/') || p.includes('\\') || p.includes('//') || p.split('/').some((seg) => seg === '.' || seg === '..');
+// M-130: .gitattributes must force LF for text files.
+export const GITATTR_LF = /^\*\s+(?:text=auto\s+eol=lf|text\s+eol=lf|eol=lf|text=auto\s+eol=lf\s+.*)\s*$/m;
+export function lintTree(files, built = new Map(), { symlinks = new Set() } = {}) {
   const hits = [];
   let codeFiles = 0, dtsFiles = 0;
+  for (const p of files.keys()) if (nonCanonicalPath(p)) hits.push(`${p}:0: M122-path: non-canonical path (./, .., //, trailing slash or absolute)`);
+  for (const p of symlinks) hits.push(`${p}:0: M122-symlink: tracked symlink (exempt paths and scanned files must be regular files)`);
+  if (files.has('package.json')) {
+    const ga = files.get('.gitattributes');
+    if (!ga) hits.push('.gitattributes:0: M130-eol: missing (text must be forced to LF)');
+    else if (!GITATTR_LF.test(ga.toString('utf8'))) hits.push('.gitattributes:0: M130-eol: no LF rule for text files (* text=auto eol=lf)');
+  }
   if (CONFIG_ERRORS.length) return { hits: CONFIG_ERRORS.map((e) => `CONFIG: ${e}`), report: { config: 'ERROR' } };
   let scoped = 0;
   for (const [p, b] of files) {
     if (selfExempt(p, b)) continue;
-    if (isClaimsSurface(p)) { scoped++; hits.push(...lintText(p, b.toString('utf8'))); }
+    if (isClaimsSurface(p)) {
+      scoped++;
+      const t = b.toString('utf8');
+      hits.push(...lintText(p, t));
+      if (t.includes('\r')) hits.push(`${p}:0: M130-crlf: CR line ending on a claims surface`);
+    }
     if (isPkg(p)) {
       let j;
       try { j = JSON.parse(b.toString('utf8')); } catch { hits.push(`${p}:0: CONFIG: package.json does not parse`); continue; }
@@ -418,9 +435,16 @@ export function builtFiles(root) {
   return out;
 }
 
+/** Tracked symlinks (index mode 120000). */
+export function trackedSymlinks(root) {
+  const out = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root }).toString('utf8').split('\0').filter(Boolean);
+  return new Set(out.filter((l) => l.startsWith('120000 ')).map((l) => l.split('\t')[1]));
+}
+
 function trackedFiles(root) {
   const out = execFileSync('git', ['ls-files', '--cached', '-z'], { cwd: root }).toString('utf8').split('\0').filter(Boolean);
-  return new Map(out.filter((p) => existsSync(join(root, p))).map((p) => [p, readFileSync(join(root, p))]));
+  // existsSync/statSync follow links; a dangling or directory-target symlink is skipped here and reported by trackedSymlinks.
+  return new Map(out.filter((p) => existsSync(join(root, p)) && statSync(join(root, p)).isFile()).map((p) => [p, readFileSync(join(root, p))]));
 }
 
 // ---------- known-bad fixtures (escaped; materialised only in scratch) ----------
@@ -713,7 +737,12 @@ function main() {
       const v = text.replace(/\n$/, '');
       hits = lintText(`${f}#description`, v);
       if (v !== SP1()) hits.push(`${f}#description:0: O67-p1-presence: does not equal S-P1 exactly (${Buffer.byteLength(v)} bytes)`);
-    } else { console.error('claims-lint: --surface p8|repo-description FILE'); process.exit(2); }
+    } else if (kind === 'p8-package') { // published package.json (M-129): every string value linted; description must equal S-P1
+      let j = null;
+      try { j = JSON.parse(text); } catch { j = null; }
+      hits = j === null ? [`${f}:0: CONFIG: package.json does not parse`] : jsonStrings(j).flatMap(([at, v]) => lintText(`${f}#${at}`, v));
+      if (j && j.description !== SP1()) hits.push(`${f}#/description:0: O67-p1-presence: does not equal S-P1 exactly`);
+    } else { console.error('claims-lint: --surface p8|p8-package|repo-description FILE'); process.exit(2); }
     hits.forEach((h) => console.log(h));
     console.log(`claims-lint: --surface ${kind} ${f}: ${hits.length} hit(s)`);
     process.exit(hits.length ? 1 : 0);
@@ -726,7 +755,7 @@ function main() {
     console.log(`claims-lint: known-bad fixture ${f} turned red with ${hits.length} hit(s) (expected, PASS)`);
     process.exit(0);
   }
-  const { hits, report } = lintTree(trackedFiles(ROOT), builtFiles(ROOT));
+  const { hits, report } = lintTree(trackedFiles(ROOT), builtFiles(ROOT), { symlinks: trackedSymlinks(ROOT) });
   hits.forEach((h) => console.log(h));
   const p1 = report.p1.map((r) => `${r.surface}=${r.ok === null ? 'n/a' : r.ok ? 'ok' : 'MISSING'}`).join('; ');
   console.log(`claims-lint: ${report.scoped} scope item(s) + ${report.codeFiles} shipped source file(s) + ${report.dtsFiles} .d.ts, ${hits.length} hit(s); built output: ${report.builtOutput}; labs ${LAB_NAMES.length} (${LAB_NAMES_SHA256.slice(0, 8)}), authorities ${AUTHORITIES.length} (${AUTHORITY_SHA256.slice(0, 8)}); LICENSE: ${report.license}; P1: ${p1}; allowlist ${report.allowlist}, terms ${report.terms}`);

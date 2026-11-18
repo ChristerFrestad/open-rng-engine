@@ -17,3 +17,5 @@ PLAN r4.9 FROZEN `206e0511…`, §7 PH0 row. Recorded by the CTO seat (via execu
 | O-55 scrub (G1 precondition) | PASS: 0 hits on the staged tree at every commit (scanner sha256 `156340f7…9882`) | n/a | `SEAT-LOG.md` |
 
 G-PH0 (CoS → Principal) cannot pass until RP-1, RP-2 and RP-5/RP-6 are applied remotely. Those need a CoS go and are not in this seat's remit.
+
+**CA-1 statement (CPO-R100 CA-1, G-PH0 exit condition; M-131):** the claims lint does **NOT** scan `LICENSE`. It skips only the exact path `LICENSE` whose bytes hash to sha256 `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`; changed or missing bytes are red and the changed text is linted as content. Tests: `test/claims-lint.test.mjs` ("CA-1: unmodified LICENSE at the exact path is not scanned", "CA-1: changed LICENSE bytes are red and the changed text is linted as content", "CA-1: a missing LICENSE is red; a LICENSE-like sibling is linted, never exempt"). Integrity: CI rule 46 `tools/ci/rule46-license-integrity.mjs` (LF-7), tests in `test/rule46-gitattributes.test.mjs`.
