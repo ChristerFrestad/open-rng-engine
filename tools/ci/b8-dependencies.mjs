@@ -888,11 +888,25 @@ export function selfTest() {
 const here = fileURLToPath(import.meta.url);
 if (process.argv[1] && here === process.argv[1]) {
   const args = process.argv.slice(2);
-  if (args.includes('--self-test')) selfTest();
-  else {
+  // Evidence-harness preconditions (decision rule v1 FROZEN 5d09c75a, rules 8, 15, 17) ride on this check:ph0
+  // step because package.json is frozen; they run only for this repo's own tree, not for scratch roots.
+  const ownRoot = join(dirname(here), '..', '..');
+  if (args.includes('--self-test')) {
+    selfTest();
+    const h = await import('../../verification/harness/check.mjs');
+    const r = await h.selfTest(ownRoot);
+    if (r.fails.length) { console.error(`harness self-test FAILED:\n${r.fails.join('\n')}`); process.exit(1); }
+    console.log(`harness self-test: ${r.fixtures.length} fixtures as expected, ${r.mutants.filter((x) => x.status === 'KILLED').length}/${r.mutants.length} mutants killed`);
+  } else {
     const root = args.find((a) => !a.startsWith('-')) ?? process.cwd();
     const hits = scanRoot(root);
     if (hits.length) { hits.forEach((h) => console.log(h)); console.log(`b8 dependencies: ${hits.length} finding(s)`); process.exit(1); }
     console.log('b8 dependencies: 0 finding(s)');
+    if (resolve(root) === resolve(ownRoot)) {
+      const h = await import('../../verification/harness/check.mjs');
+      const f = await h.runChecks(ownRoot);
+      if (f.length) { f.forEach((x) => console.log(x)); console.log(`harness preconditions: ${f.length} finding(s)`); process.exit(1); }
+      console.log('harness preconditions: 0 finding(s) (rule 8 df table not built)');
+    }
   }
 }

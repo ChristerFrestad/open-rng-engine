@@ -1,0 +1,96 @@
+// Evidence-harness preconditions, decision rule v1 (FROZEN 5d09c75a): rule 15 pins (STS answer file,
+// TestU01 driver, archives), rule 8 / M-153 floor, rule 17(i) counts, and the mutant self-test.
+// Digest literals are held here on their own (not imported from the harness), so a changed pin in
+// verification/harness/pins.mjs and a changed pinned file are each red here.
+// Rule 8 df table for the 72 entries: not built (open ambiguity, verification/harness/README.md).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import * as pins from '../verification/harness/pins.mjs';
+import * as floor from '../verification/harness/n-floor.mjs';
+import * as counts from '../verification/harness/counts.mjs';
+import { runChecks, selfTest, runMutants, loadKTests } from '../verification/harness/check.mjs';
+
+const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+const ANSWERS_SHA = 'f71ec11d82f83311666af9dc05707227b736f69d1ab768a5448c0ffcfb666383';
+const DRIVER_SHA = '5fa75bdd52a49c6fb812f511d97f40f7f0367c230f6a88408ad5ec07dc997c88';
+const STS_ZIP_SHA = '0238d2f1d26e120e3cc748ed2d4c674cdc636de37fc4027c76cc2a394fff9157';
+const TU01_ZIP_SHA = 'bc1d1dd2aea7ed3b3d28eaad2c8ee55913f11ce67aec8fe4f643c1c0d2ed1cac';
+
+test('rule 15: STS answer file bytes are the pinned literal', () => {
+  assert.equal(sha('verification/harness/sts-answers.txt'), ANSWERS_SHA);
+  assert.equal(readFileSync('verification/harness/sts-answers.txt', 'utf8'), '0\nraw-stream.bin\n1\n0\n1000\n1\n');
+  assert.equal(pins.HARNESS_FILE_PINS['verification/harness/sts-answers.txt'], ANSWERS_SHA);
+});
+
+test('rule 15: TestU01 driver source is the pinned literal', () => {
+  assert.equal(sha('verification/harness/tu01-driver.c'), DRIVER_SHA);
+  assert.equal(pins.HARNESS_FILE_PINS['verification/harness/tu01-driver.c'], DRIVER_SHA);
+  assert.match(readFileSync('verification/harness/tu01-driver.c', 'utf8'), /unif01_CreateExternGenBits/);
+});
+
+test('rule 15 / 17(ii): archive pins equal the frozen rule text', () => {
+  const rule = readFileSync('verification/decision-rule-v1.md', 'utf8');
+  assert.ok(rule.includes('`sts-2_1_2.zip`, sha256 `' + STS_ZIP_SHA + '`'));
+  assert.ok(rule.includes('`TestU01-1.2.3.zip`, sha256 `' + TU01_ZIP_SHA + '`'));
+  assert.deepEqual(pins.ARCHIVE_PINS.map((a) => a.sha256), [STS_ZIP_SHA, TU01_ZIP_SHA]);
+  assert.deepEqual(pins.checkArchivePinsAgainstFrozen('.'), []);
+});
+
+test('rule 17(ii): an archive whose bytes differ from the pin is red', () => {
+  const f = pins.checkArchiveFile('verification/harness/tu01-driver.c', 'TestU01-1.2.3.zip');
+  assert.ok(f.some((x) => /rule 17\(ii\)/.test(x)));
+  assert.ok(pins.checkArchiveFile('/nonexistent/sts-2_1_2.zip', 'sts-2_1_2.zip').length > 0);
+});
+
+test('preconditions: real tree green (pins + M-153 floor on all 157 K ids)', async () => {
+  assert.deepEqual(await runChecks(), []);
+});
+
+test('rule 8 / M-153: floor is 10^9 and the boundary is exact', () => {
+  assert.equal(floor.N_MIN, 1e9);
+  const k = loadKTests();
+  const p = (n) => floor.checkPlan({ id: 'randomInt/chi2/min-0-max-38', n, unit: 'public-call', counter: floor.COUNTER_PER_PUBLIC_CALL }, k);
+  assert.equal(p(1e9).ok, true);
+  assert.equal(p(1e9 + 1).ok, true);
+  assert.equal(p(1e9 - 1).ok, false);
+  assert.match(p(1e9 - 1).reason, /n < 10\^9 public-call outcomes/);
+  assert.equal(p(1e8).ok, false);
+  assert.equal(p(0).ok, false);
+  assert.equal(p(undefined).ok, false);
+});
+
+test('rule 17(i): expected counts are the frozen numbers', () => {
+  assert.equal(counts.STS_PER_SEQUENCE, 188);
+  assert.equal(Object.values(counts.STS_PER_TEST).reduce((a, b) => a + b, 0), 188);
+  assert.equal(counts.BIGCRUSH_PER_STREAM, 160);
+  assert.deepEqual([...counts.BIGCRUSH_STREAMS], ['raw', 'u32']);
+  assert.equal(counts.DIEHARDER_EMITTED, 114);
+  assert.equal(counts.DIEHARDER_COUNTED, 110);
+  assert.deepEqual([...counts.DIEHARDER_EXCLUDED], ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums']);
+});
+
+test('self-test: every fixture as expected, all 23 mutants killed, none PATCH-FAILED', async () => {
+  const r = await selfTest();
+  assert.deepEqual(r.fails, []);
+  assert.equal(r.mutants.length, 23);
+  assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
+});
+
+test('self-test: a mutant whose patch does not apply is PATCH-FAILED, not killed', async () => {
+  const [r] = await runMutants(undefined, [['MU-X bad patch', 'code', 'counts.mjs', [['no such text in counts.mjs', 'x']]]]);
+  assert.equal(r.status, 'PATCH-FAILED');
+});
+
+test('check:ph0 wiring: b8 step runs the harness checks on this tree', () => {
+  const out = execFileSync('node', ['tools/ci/b8-dependencies.mjs'], { encoding: 'utf8' });
+  assert.match(out, /harness preconditions: 0 finding\(s\)/);
+  assert.match(readFileSync('package.json', 'utf8'), /node tools\/ci\/b8-dependencies\.mjs && node tools\/ci\/b8-dependencies\.mjs --self-test/);
+});
+
+test('no evidence data in the harness directory', () => {
+  const files = execFileSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'verification/harness'], { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
+  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/counts.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
+});
