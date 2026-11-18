@@ -154,6 +154,13 @@ test('M-129: --surface p8 / p8-package on scratch copies of a published reserved
   assert.equal(run('p8-package', JSON.stringify({ name: 'open-rng-engine', description: SP1(), keywords: [PLANT] })), 1);
   assert.equal(run('p8-package', JSON.stringify({ name: 'open-rng-engine', description: SP1() })), 0);
 });
+test('G-14 (kills MX-12): --surface p8-package lints keys; a key-only plant is red with a (key) hit', () => {
+  const f = join(dir, `p8-key-${Math.random().toString(16).slice(2)}`);
+  writeFileSync(f, JSON.stringify({ name: 'open-rng-engine', description: SP1(), ['\u0063ertified-by']: 1 }));
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools/claims-lint.mjs'), '--surface', 'p8-package', f], { encoding: 'utf8' });
+  assert.equal(r.status, 1, r.stdout);
+  assert.ok(r.stdout.split('\n').some((l) => /#\/?\u0063ertified-by\(key\):/.test(l) || (l.includes('(key)') && l.includes('\u0063ertified'))), r.stdout);
+});
 
 // ---------- M-130: line endings ----------
 test('M-130: .gitattributes missing or without an LF rule is red; CRLF on a claims surface is red', () => {

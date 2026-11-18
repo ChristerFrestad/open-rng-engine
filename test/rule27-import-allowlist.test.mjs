@@ -176,12 +176,25 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 32 known-bad fixtures incl. the five allow-list red cases', () => {
-  assert.equal(Object.keys(BAD).length, 32);
+test('HoQ: --self-test carries 42 known-bad fixtures incl. the five allow-list red cases and the ten G-12/13/15/16 cases', () => {
+  assert.equal(Object.keys(BAD).length, 42);
+  for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
     'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n", 'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /32 known-bad fixtures red/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /42 known-bad fixtures red/);
+});
+
+// G-12 (HoQ 2de685b2): fail-closed reach to the global object.
+for (const [name, src, code] of [['window alias', 'const w = window;\nw.crypto;\n', 'global-self'], ['new Function', "new Function('return this')();\n", 'function-eval'],
+  ['eval', "eval('this');\n", 'function-eval'], ['constructor call', "(() => 1).constructor('return this')();\n", 'function-eval'],
+  ['globalThis as call argument', 'f(globalThis);\n', 'globalThis-alias'], ['self alias', 'const s2 = self;\n', 'global-self'],
+  ['hasOwn(globalThis) outside the guard', "Object.hasOwn(globalThis, 'k');\n", 'globalThis-alias']]) {
+  test(`G-12: ${name} is red`, () => assert.ok(scanFile('src/mapping/x.ts', src).hits.some((h) => h.includes(`rule27-${code} `)), name));
+}
+test('G-12: globalThis.<other> member access stays green; the coreGuard.ts exact-path forms stay green', () => {
+  assert.deepEqual(scanFile('src/mapping/x.ts', 'export const t = globalThis.queueMicrotask;\n').hits, []);
+  assert.deepEqual(scanFile('packages/capability/src/coreGuard.ts', GUARD_OK).hits, []);
 });

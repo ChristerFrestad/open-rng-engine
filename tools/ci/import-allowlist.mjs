@@ -34,6 +34,14 @@
 //     evidence/ and identity/ keep the plain rule: blocking once the directory exists.
 //  randomFillSync anywhere outside src/entropy/ is red; inside it only the exact `import { randomFillSync } from
 //  'node:crypto'` is allowed (no alias, no other path).
+//  HoQ coverage gaps on 2de685b2 (G-12, G-13, G-15, G-16), fail-closed:
+//     G-12 globalThis may appear only as a member-access base (`globalThis.x`; `.crypto` and computed `[...]` stay red).
+//          Any other reference (alias `const g = globalThis`, destructuring `const {crypto: c} = globalThis`, passing it to
+//          Reflect.get / Object.getOwnPropertyDescriptor / any call) is red, except exactly `Object.hasOwn(globalThis,` and
+//          `Object.defineProperty(globalThis,` in packages/capability/src/coreGuard.ts. `window` is red like global/self.
+//          Function / eval (any use, incl. `new Function`, `Function('return this')()`) and `.constructor(` calls are red.
+//     G-13 require('node:module') / require('module') are red (createRequire and import from node:module already are).
+//     G-15 an `export const|let|var` statement with more than one declarator is an opaque export (trigger (i) red).
 // PENDING: the dist/ grep half (no packed core yet).
 // Usage: node tools/ci/import-allowlist.mjs [root] [--phase-exit]   --self-test runs the known-bad fixtures.
 import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -122,11 +130,21 @@ export function scanFile(rel, src) {
     [b, /(^|[^\w$.])crypto\b(?!\s*:)/g, 'bare-global-crypto', 'bare global crypto'],
     [b, /(^|[^\w$.])(global|self)\b(?!\s*:)/g, 'global-self', 'global / self'],
     [b, /(^|[^\w$])createRequire\b/g, 'createRequire', 'createRequire identifier'],
+    [a, /(^|[^\w$.])require\s*\(\s*(['"`])(node:)?module\2\s*\)/g, 'node-module', "require('node:module'|'module')"],
+    [b, /(^|[^\w$.])window\b(?!\s*:)/g, 'global-self', 'window'],
+    [b, /(^|[^\w$.])(Function|eval)\b(?!\s*:)/g, 'function-eval', 'Function / eval (code-from-string can reach the global object)'],
+    [b, /\.\s*constructor\s*\(/g, 'function-eval', '.constructor( call (Function-constructor reach)'],
     ...(rel.startsWith('src/entropy/') ? [] : [[b, /(^|[^\w$])randomFillSync\b/g, 'randomFillSync-outside-entropy', 'randomFillSync outside src/entropy/']]),
     [b, /(^|[^\w$])(setFips|fips)\b/g, 'fips', 'setFips / fips identifier or member'],
     [a, /\[\s*(['"`])(setFips|fips)\1\s*\]/g, 'fips', 'computed setFips / fips member'],
   ];
   for (const [text, re, code, msg] of pat) for (const m of text.matchAll(re)) add(m.index + (m[1]?.length ?? 0), code, msg);
+  // G-12: globalThis only as a member-access base; the two guard forms are allowed only at GUARD_PATH.
+  for (const m of b.matchAll(/(^|[^\w$.])globalThis\b(?!\s*(\?\.|\.|\[))/g)) {
+    const at = m.index + m[1].length; const pre = b.slice(Math.max(0, at - 40), at);
+    if (rel === GUARD_PATH && /Object\s*\.\s*(hasOwn|defineProperty)\s*\(\s*$/.test(pre) && /^globalThis\s*,/.test(b.slice(at))) continue;
+    add(at, 'globalThis-alias', 'globalThis referenced other than as a member-access base (alias, destructuring or argument)');
+  }
   // QR-25 L228 / R-58(6): exactly one Object.defineProperty(globalThis, "<literal>", { value, writable: false,
   // configurable: false, enumerable: false }) in GUARD_PATH only, preceded by an Object.hasOwn(globalThis, KEY) check that throws.
   const dps = [...b.matchAll(/(^|[^\w$.])Object\s*\.\s*defineProperty\s*\(\s*globalThis\b/g)];
@@ -163,6 +181,13 @@ export function exportsOf(src) {
     const ps = part.replace(/^type\s+/, '').split(/\s+as\s+/).map((x) => x.trim()); out.push({ name: ps[1] ?? ps[0], allowed: false });
   }
   for (const m of b.matchAll(/(^|[^\w$.])export\s*(\*|default\b|(const|let|var)\s*[\[{])/g)) opaque.push(m[2]);
+  // G-15: more than one declarator in one exported declaration is opaque.
+  for (const m of b.matchAll(/(^|[^\w$.])export\s+(const|let|var)\s+[A-Za-z_$]/g)) {
+    let depth = 0; let multi = false;
+    for (let i = m.index + m[0].length; i < b.length; i++) { const ch = b[i];
+      if ('([{'.includes(ch)) depth++; else if (')]}'.includes(ch)) depth--; else if (depth === 0 && (ch === ';' || ch === '\n')) break; else if (depth === 0 && ch === ',') { multi = true; break; } }
+    if (multi) opaque.push(`${m[2]} with several declarators`);
+  }
   return { names: out, opaque };
 }
 
@@ -242,12 +267,27 @@ export const BAD = {
   'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n",
   'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
   'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n',
+  // HoQ coverage gaps on 2de685b2.
+  'allowlist-FINGERPRINT_BYTES-multi': 'export const FINGERPRINT_BYTES = 16, X_BYTES = 1;\n', // G-15
+  'globalThis-destructure': 'const {crypto: c} = globalThis;\n', // G-12
+  'globalThis-alias': 'const g = globalThis;\ng.crypto;\n', // G-12
+  'globalThis-Reflect-get': "Reflect.get(globalThis,'crypto');\n", // G-12
+  'globalThis-getOwnPropertyDescriptor': "Object.getOwnPropertyDescriptor(globalThis,'crypto');\n", // G-12
+  'Function-return-this': "Function('return this')();\n", // G-12
+  'require-node-module': "const m = require('node:module');\n", // G-13
+  'require-module': "const m = require('module');\n", // G-13
+  'fips-identifier': 'const v = fips;\n', // G-16
+  'fips-computed': "x['fips'];\n", // G-16
 };
 // Expected reason for fixtures whose hit is not at the planted file (self-test fails if the reason does not match).
 const ALLOW_REASON = (n) => new RegExp(`^src/entropy/:0: rule27-missing-pair \\(randomFillSync, entropy/\\).*PH1-M1 trigger: \\(i\\) src/entropy/a\\.ts exports ${n}\\b`);
 export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 'allowlist-FINGERPRINT_BYTES-15': ALLOW_REASON('FINGERPRINT_BYTES'),
   'allowlist-FINGERPRINT_BYTES-string': ALLOW_REASON('FINGERPRINT_BYTES'), 'allowlist-FINGERPRINT_BYTES-let': ALLOW_REASON('FINGERPRINT_BYTES'),
-  'allowlist-FINGERPRINT_BYTES-reexport': ALLOW_REASON('FINGERPRINT_BYTES') };
+  'allowlist-FINGERPRINT_BYTES-reexport': ALLOW_REASON('FINGERPRINT_BYTES'),
+  'allowlist-FINGERPRINT_BYTES-multi': new RegExp(ALLOW_REASON('FINGERPRINT_BYTES').source.replace('exports FINGERPRINT_BYTES\\b', 'has an opaque export \\(const with several declarators\\)')),
+  ...Object.fromEntries([['globalThis-destructure', 'globalThis-alias'], ['globalThis-alias', 'globalThis-alias'], ['globalThis-Reflect-get', 'globalThis-alias'],
+    ['globalThis-getOwnPropertyDescriptor', 'globalThis-alias'], ['Function-return-this', 'function-eval'], ['require-node-module', 'node-module'],
+    ['require-module', 'node-module'], ['fips-identifier', 'fips'], ['fips-computed', 'fips']].map(([n, c]) => [n, new RegExp(`^src/mapping/bad\\.ts:\\d+: rule27-${c} `)])) };
 // Control planted the same way: the single allow-listed declaration stays green (report-only).
 export const ALLOW_CONTROL = 'export const FINGERPRINT_BYTES = 16;\n';
 // Where each known-bad fixture is planted (default src/mapping/bad.ts).
