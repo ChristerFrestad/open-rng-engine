@@ -9,7 +9,7 @@ Each script below is a **stub**: it prints `STUB` and exits 2, so it can never b
 | `rule40-protected-names.mjs` | 40 | **LIVE** (not a stub): protected names per the C-9 format, CPO approval pin, exact-path self-exemption, product positions, references allowlist |
 | `rule46-license-integrity.mjs` | quality CI 46 (CPO-R101 LF-7) | **LIVE** (not a stub): the tracked `LICENSE` (index and worktree) hashes to the pinned unmodified Apache-2.0 sha256 cfc7749b; missing or changed bytes exit 1 |
 | `b8-dependencies.mjs` | B8, R-35 | `dependencies` is `{}` in every published package |
-| `import-allowlist.mjs` | R-44 and others | per-module `node:` import allowlist (for example, `evidence/` imports only `createHash`) |
+| `import-allowlist.mjs` | quality CI 27 (L596), QR-25, R-44, R-51 | **REAL CHECK, not yet gating**: exact (symbol, directory) set {(`randomFillSync`, `entropy/`), (`createHash`, `evidence/`), (`getFips`, `identity/`)} for named `node:crypto` imports in core `src/`; banned forms per L596; `audited/` imports only core-internal modules; `--self-test` runs 19 known-bad fixtures. Red today only for the 3 missing pairs (the modules are not written yet), so it is not in `check:ph0` until CPO/HoQ answers when the exact-set half gates. The `dist/` grep half is PENDING |
 
 Already live (PH0): `tools/claims-lint.mjs` (B10, R-16) and `tools/qiu05-check.mjs` (DOD-PH0-QIU05).
 Live (G1/PH1): `tools/ci/rule40-protected-names.mjs` (PLAN rule 40 / quality CI 31): `npm run check:rule40` scans the staged index bytes; `--self-test` materialises the escaped known-bad fixture in scratch. `tools/license-guard.mjs`: LICENSE is skipped only by exact path + sha256 cfc7749b; altered bytes are red.

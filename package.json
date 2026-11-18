@@ -27,7 +27,9 @@
     "check:rule40": "node tools/ci/rule40-protected-names.mjs",
     "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test",
     "check:rule46": "node tools/ci/rule46-license-integrity.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check:rule27": "node tools/ci/import-allowlist.mjs",
+    "check:rule27:self-test": "node tools/ci/import-allowlist.mjs --self-test"
   },
   "devDependencies": {
     "typescript": "5.9.3"
