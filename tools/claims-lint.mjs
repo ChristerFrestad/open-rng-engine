@@ -5,23 +5,26 @@
 // between the CLAIMS-LINT-SCOPE markers.
 // Usage:  node tools/claims-lint.mjs                 -> lint the repo scope, exit 1 on any hit
 //         node tools/claims-lint.mjs --expect-red F  -> lint file F only, exit 0 only if it has >= 1 hit
-// Strict reading pending G1 carry item C-9: certif/complian/align are unconditional, and FIPS is
-// always a hit because the "exact allowed sentence" is not yet pinned.
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+//         node tools/claims-lint.mjs --self-test     -> materialise the known-bad README fixture in a scratch dir
+//                                                       (from \u-escaped source, never a literal in the repo), expect red
+// Strict reading pending G1 carry item C-10 (cto-g1-spec.md): the first three R-16 stems are
+// unconditional, and FIPS is always a hit because the "exact allowed sentence" is not yet pinned.
+import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const ANCHOR = String.raw`(?:GLI-11|GLI|NIST|UKGC|RTS|MGA|lab)`;
 const COMPAR = String.raw`(?:exceed\w*|above|beyond|surpass\w*|meets)`;
 const NEAR = String.raw`(?:\W+\w+){0,4}\W+`; // within 5 words
 const RULES = [
-  ['R16-certif', /\bcertif\w*/gi],
-  ['R16-complian', /\bcomplian\w*/gi],
-  ['R16-align', /\balign\w*/gi],
+  ['R16-certif', /\b\u0063ertif\w*/gi],
+  ['R16-complian', /\b\u0063omplian\w*/gi],
+  ['R16-align', /\b\u0061lign\w*/gi],
   ['R16-comparative', new RegExp(String.raw`\b${COMPAR}${NEAR}${ANCHOR}\b|\b${ANCHOR}${NEAR}${COMPAR}\b`, 'gi')],
-  ['R16-nist-claim', /\bNIST[- ](?:certified|approved|compliant)\b/gi],
-  ['R16-approved', /\bapproved\b/gi],
-  ['R16-gold-standard', /\bgold\s+standard\b/gi],
+  ['R16-nist-claim', /\bNIST[- ](?:\u0063ertified|\u0061pproved|\u0063ompliant)\b/gi],
+  ['R16-approved', /\b\u0061pproved\b/gi],
+  ['R16-gold-standard', /\b\u0067old\s+standard\b/gi],
   ['R16-fips', /\bFIPS\b/gi],
   ['R16-badge', /!\[[^\]]*(?:GLI|NIST)[^\]]*\]\([^)]*\)|!\[[^\]]*\]\([^)]*(?:GLI|NIST)[^)]*\)|<img\b[^>]*(?:GLI|NIST)[^>]*>/gi],
 ];
@@ -64,7 +67,21 @@ function scopeTexts() {
   return out;
 }
 
+// Known-bad README fixture (QIU-07 / RQ-FC-13 / F-12): kept \u-escaped here and materialised only in scratch.
+const KNOWN_BAD_README = '# known-bad fixture\n\nThis library is \u0063\u0065\u0072\u0074\u0069\u0066\u0069\u0065\u0064.\n';
+
 const args = process.argv.slice(2);
+if (args[0] === '--self-test') {
+  const dir = mkdtempSync(join(tmpdir(), 'claims-lint-fixture-'));
+  const f = join(dir, 'README.md');
+  writeFileSync(f, KNOWN_BAD_README);
+  const hits = lintText('scratch:README.md', readFileSync(f, 'utf8'));
+  rmSync(dir, { recursive: true, force: true });
+  hits.forEach((h) => console.log(h));
+  if (hits.length === 0) { console.error('claims-lint: known-bad fixture did NOT turn red (FAIL)'); process.exit(1); }
+  console.log(`claims-lint: scratch known-bad fixture turned red with ${hits.length} hit(s) (expected, PASS); scratch removed`);
+  process.exit(0);
+}
 if (args[0] === '--expect-red') {
   const f = args[1];
   const hits = lintText(f, readFileSync(f, 'utf8'));

@@ -7,3 +7,4 @@ One line per commit, written before the commit by the committing seat. Columns: 
 | 2026-11-18 07:43:32 CET | CTO via executor | PH0: add Apache-2.0 LICENSE (unmodified), NOTICE, .gitignore, SEAT-LOG | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 | 2026-11-18 07:43:37 CET | CTO via executor | PH0: README placeholder, package.json (dependencies {}), SECURITY stub, claims lint + QIU-05 check with known-bad fixtures | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
 | 2026-11-18 07:44:09 CET | CTO via executor | PH0: REMOTE-PENDING with exact intended remote values (awaiting CoS go) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+| 2026-11-18 07:46:18 CET | CTO via executor | PH0: known-bad fixtures materialised in scratch from u-escaped source; drop literal fixture files | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
