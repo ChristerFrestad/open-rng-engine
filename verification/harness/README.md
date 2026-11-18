@@ -5,7 +5,7 @@ Checked by `check:ph0` through the `tools/ci/b8-dependencies.mjs` step (package.
 
 | Frozen rule | Item | File | State |
 |---|---|---|---|
-| 8 | df fixed for the 72 `unspecified`/`proposed` entries | none | OPEN: not built (ambiguity below) |
+| 8 | df fixed for every `df: null` K entry (HoQ ruling: all 76) | `df-table.mjs` (table digest `1ed710bfb77b8e2a6736407386e60b70401398e88603b97b172d8df1d3817e63`) | 9 fixed, 67 OPEN; harness NOT-READY (below) |
 | 15, 17(ii) | STS 2.1.2 answer file | `sts-answers.txt` (sha256 `f71ec11d82f83311666af9dc05707227b736f69d1ab768a5448c0ffcfb666383`) | pinned |
 | 15, 17(ii) | TestU01 1.2.3 driver | `tu01-driver.c` (sha256 `5fa75bdd52a49c6fb812f511d97f40f7f0367c230f6a88408ad5ec07dc997c88`) | pinned |
 | 15, 17(ii) | archives `sts-2_1_2.zip`, `TestU01-1.2.3.zip` | `pins.mjs`, cross-checked against the frozen text and `tool-pins-v1.1.json` | pinned; re-fetched 2026-11-18 22:55 CET, sha256 unchanged |
@@ -29,6 +29,15 @@ Checked by `check:ph0` through the `tools/ci/b8-dependencies.mjs` step (package.
 
 `tu01-driver <SmallCrush|Crush|BigCrush> <raw|u32> <out.tsv>`, input on stdin as little-endian 32-bit words. Input that runs out or ends in a partial word stops the driver (exit 3 or 4); it never wraps or pads. Output is one header line and one line per `bbattery_pVal[j]`, j < `bbattery_NTests`; `counts.mjs` reads it. On 2026-11-18 the source compiled with `gcc -std=c99 -Wall -Wextra -pedantic` (0 warnings) against the pinned TestU01 1.2.3 archive (sha256 `bc1d1dd2…`), built with direct `gcc` calls because the box has no `make`. Only the usage, empty-input (exit 3) and partial-word (exit 4) paths were exercised; no battery was run.
 
-## Open: rule 8 df table (not built)
+## Rule 8 df table and harness readiness
 
-Frozen rule 8: "The df of 72 entries are marked `unspecified` or `proposed` in the list. The harness fixes each df with its test code, before any data". In `k-tests-v1.1.json` (f75299de) 76 entries have `df: null`: 67 `unspecified`, 4 `unspecified-large-r` and 1 `unspecified-lehmer` (these 5 carry `proposed_df` 999), and 4 `cells-from-source-df-unspecified` (`shuffle/adjacency/n-52-i-{0,1,25,50}`). Which 72 the rule means, and whether the 5 `proposed_df` values are adopted, is for HoQ to state.
+Frozen rule 8: "The df of 72 entries are marked `unspecified` or `proposed` in the list. The harness fixes each df with its test code, before any data". In `k-tests-v1.1.json` (f75299de) 76 entries have `df: null`. HoQ ruling (CTO relay, 2026-11-18 23:30 CET): the rule 8 set is all 76; the count is read from k-tests, never hard-coded.
+
+- `shuffle/adjacency/n-52-i-{0,1,25,50}`: df 2651. The ordered pair (π[i], π[i+1]) takes one of 52×51 = 2652 cells; one observation per shuffle; a single multinomial goodness-of-fit, df = 2652 − 1, expected count 10^9/2652.
+- `randomInt/chi2/min-0-max-{2147483649,4294967296,4294967297,281474976710656}` and `shuffle/chi2/lehmer-52`: df 999. Exactly 1000 contiguous bins over [0, r), bin k = [⌊k·r/1000⌋, ⌊(k+1)·r/1000⌋); exact BigInt cell probability width/r (unequal widths for r not divisible by 1000, never 1/1000); every expected count ≥ 5 at n = 10^9 asserted; df = bins − 1. The Lehmer-52 rank is computed in BigInt (identity → 0, bin 0; reversed → 52! − 1, bin 999).
+- The other 67 (runs, serial correlation, overlaps, coupon collector and duplicates over the randomInt configs, the Lehmer-52 stream and weightedPick; shuffle mod-4 / div-4 adjacency counts) are OPEN. They are never filled with a placeholder. Design note: `verification/df-design-v1.md` (for HoQ ruling, not code).
+
+Two separate checks:
+
+1. Integrity (`checkDfTable`, part of `runChecks`, fails check:ph0): table digest, every table id is a df-null K entry, adjacency cells 2652 and df = cells − 1, binned `proposed_cells` 1000 and df = `proposed_df` = bins − 1, support r matches the K list, bins cover [0, r) with no empty bin, expected ≥ 5.
+2. Readiness (`dfReadiness` / `evidence-entry.mjs`): every df-null K entry has a df after the table is applied. check:ph0 prints `harness readiness: NOT-READY (...)` and does not fail. `assertEvidenceRunReady()` throws while anything is open; every evidence-run start must call it first. No evidence-run entry point exists in this repo yet.

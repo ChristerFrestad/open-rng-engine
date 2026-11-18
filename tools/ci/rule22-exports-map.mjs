@@ -123,29 +123,38 @@ export function exportNameNonAscii(name) {
   return /[^\x00-\x7f]/.test(String(name));
 }
 
+// QR-33 segmentation (HoQ ruling, CTO relay 2026-11-18 23:30 CET): a term matches a WHOLE camel or snake
+// segment or its plural, or is a substring inside ONE segment (the substring scan stays). It is never
+// stitched across a segment boundary ('_', digits, or a camel break), so names whose letters only join
+// into a term across segments are green.
 export function qr33Hit(name) {
-  const folded = foldConfusables(name);
-  const lower = folded.toLowerCase();
-  const joined = lower.replace(/[^a-z]/g, '');
-  const segs = nameSegments(folded);
+  const segs = nameSegments(foldConfusables(name));
   for (const t of QR33_TERMS) {
     if (segs.some((s) => segmentMatchesTerm(s, t))) return t;
-    if (lower.includes(t)) return t;
-    if (joined.includes(t)) return t; // G-42: a term split by '_' or digits
+    if (segs.some((s) => s.includes(t))) return t; // substring scan, within one segment only
   }
   return null;
 }
 
+// QR-33 segmentation controls (HoQ ruling): names whose letters join into a term only across a segment
+// boundary are green; a whole segment or a substring inside one segment stays red. Red names are built
+// from the escaped term list, never written literally.
+export const QR33_BOUNDARY_GREEN = Object.freeze(['start_page', 'short_poll', 'import_path', 'sort_product', 'part_power', 'cash_and', 'sub_urn', 'startProcess']);
+export function qr33BoundaryRed() {
+  const t0 = uUnescape(QR33_TERM_ESCAPES[0]);
+  const t12 = uUnescape(QR33_TERM_ESCAPES[12]);
+  return [`check${t0[0].toUpperCase()}${t0.slice(1)}`, `${t0}${t12}`];
+}
+
 const G42_GRAPH_BASE = 9;
+const QR33_SEG_RED_CASES = 2;
 // G-42 residual cases; term text is built from the escaped term list, never written literally.
 export function g42Cases(cardName) {
   const Card = cardName[0].toUpperCase() + cardName.slice(1);
   const deal = `deal${Card}`;
-  const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
   const aud = { 'src/audited/index.ts': 'export {};\n' };
   const homoglyph = [...cardName].map((c) => ({ a: '\u0430', c: '\u0441' }[c] ?? c)).join('');
   return [
-    { name: 'g42-split-term', files: { 'src/index.ts': `export const ${t11.slice(0, 4)}_${t11.slice(4)} = 1;\n`, ...aud }, reason: /QR-33 term/ },
     { name: 'g42-static-string', files: { 'src/index.ts': `export class C { static '${deal}' = 1; }\n`, ...aud }, reason: /QR-33 term/ },
     { name: 'g42-static-computed', files: { 'src/index.ts': `export class C { static ['${deal}'] = 1; }\n`, ...aud }, reason: /QR-33 term/ },
     { name: 'g42-static-private', files: { 'src/index.ts': `export class C { static #${deal} = 1; }\n`, ...aud }, reason: /QR-33 term/ },
@@ -556,7 +565,21 @@ export function selfTest() {
       },
       // G-42 residual (HoQ a43a432c, section 4).
       ...g42Cases(cardName),
+      // QR-33 segmentation (HoQ ruling): a whole segment and a substring inside one segment stay red.
+      ...qr33BoundaryRed().map((n, i) => ({ name: `qr33-seg-red-${i}`, files: { 'src/index.ts': `export const ${n} = 1;\n`, 'src/audited/index.ts': 'export {};\n' }, reason: /QR-33 term/ })),
     ];
+    // QR-33 segmentation green controls: a term stitched across a segment boundary is not a hit. The
+    // former G-42 split-term case (term index 11 split by '_') is one of these under the ruling.
+    const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
+    for (const n of [...QR33_BOUNDARY_GREEN, `${t11.slice(0, 4)}_${t11.slice(4)}`]) {
+      const d = join(base, `qr33-seg-green-${n.replace(/[^A-Za-z0-9]/g, '-')}`);
+      writeJson(d, 'package.json', GOOD_PKG);
+      mkdirSync(join(d, 'src/audited'), { recursive: true });
+      writeFileSync(join(d, 'src/index.ts'), `export const ${n} = 1;\n`);
+      writeFileSync(join(d, 'src/audited/index.ts'), 'export {};\n');
+      const hits = scanRoot(d);
+      if (hits.length) fails.push(`qr33-seg-green ${n}: a term across a segment boundary must be green:\n${hits.join('\n')}`);
+    }
     for (const [name, { pkg, reason }] of Object.entries(BAD_FIXTURES)) {
       // Materialise from a \u-escaped form; the escaped source is what we keep in-repo as the fixture text.
       const escaped = uEscape(JSON.stringify(pkg));
@@ -599,7 +622,7 @@ export function selfTest() {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + G42_GRAPH_BASE + g42Cases('x').length + 1} known-bad fixtures red, control green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + G42_GRAPH_BASE + g42Cases('x').length + QR33_SEG_RED_CASES + 1} known-bad fixtures red, ${QR33_BOUNDARY_GREEN.length + 1 + 1} controls green`);
 }
 
 const here = fileURLToPath(import.meta.url);

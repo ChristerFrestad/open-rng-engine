@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'nod
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { scanRoot, scanExports, BAD_FIXTURES, REQUIRED_EXPORT_KEYS, selfTest, uEscape, uUnescape } from '../tools/ci/rule22-exports-map.mjs';
+import { scanRoot, scanExports, BAD_FIXTURES, REQUIRED_EXPORT_KEYS, selfTest, uEscape, uUnescape, qr33Hit, QR33_BOUNDARY_GREEN, qr33BoundaryRed } from '../tools/ci/rule22-exports-map.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const STUB = join(ROOT, 'test/fixtures/ph1-stubs/rule22-exports-map.mjs');
@@ -39,7 +39,7 @@ test('G-42: tools/qr33-allow.json is empty and its sha256 is pinned as a literal
 test('rule 22: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /32 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /33 known-bad fixtures red, 10 controls green/);
 });
 
 for (const name of Object.keys(BAD_FIXTURES)) {
@@ -105,4 +105,19 @@ test('G-31 / G-34 / G-36: each new fixture is red on the new checker; record the
     assert.equal(oldRed, m.expectOldRed, `${m.name} old expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${oldRed ? 'RED' : 'GREEN'}:\n${oldHits.join('\n')}`);
   }
   console.log('rule22 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
+});
+
+// QR-33 segmentation (HoQ ruling, CTO relay 2026-11-18 23:30 CET): never stitched across a segment boundary.
+for (const n of ['start_page', 'short_poll', 'import_path', 'sort_product', 'part_power', 'cash_and', 'sub_urn', 'startProcess']) {
+  test(`QR-33 segmentation: ${n} is green (term only across a segment boundary)`, () => {
+    assert.equal(qr33Hit(n), null);
+    assert.ok(QR33_BOUNDARY_GREEN.includes(n));
+  });
+}
+test('QR-33 segmentation: a whole segment and a substring inside one segment stay red', () => {
+  const [camel, joinedInOne] = qr33BoundaryRed();
+  assert.equal(camel.slice(0, 5), 'check');
+  assert.notEqual(qr33Hit(camel), null);
+  assert.notEqual(qr33Hit(joinedInOne), null);
+  assert.equal(joinedInOne.length, 8);
 });

@@ -964,7 +964,11 @@ if (process.argv[1] && here === process.argv[1]) {
       const h = await import('../../verification/harness/check.mjs');
       const f = await h.runChecks(ownRoot);
       if (f.length) { f.forEach((x) => console.log(x)); console.log(`harness preconditions: ${f.length} finding(s)`); process.exit(1); }
-      console.log('harness preconditions: 0 finding(s) (rule 8 df table not built)');
+      console.log('harness preconditions: 0 finding(s)');
+      // Readiness is reported, never a PH0 failure; it blocks only the evidence-run entry (evidence-entry.mjs).
+      const { harnessReadiness } = await import('../../verification/harness/evidence-entry.mjs');
+      const rd = harnessReadiness(ownRoot);
+      console.log(`harness readiness: ${rd.ready ? 'READY' : 'NOT-READY'} (rule 8 df fixed ${rd.df.fixed} of ${rd.df.dfNull} df-null entries, ${rd.df.open.length} open; evidence-run entry blocked while open)`);
     }
   }
 }

@@ -2,7 +2,8 @@
 // TestU01 driver, archives), rule 8 / M-153 floor, rule 17(i) counts, and the mutant self-test.
 // Digest literals are held here on their own (not imported from the harness), so a changed pin in
 // verification/harness/pins.mjs and a changed pinned file are each red here.
-// Rule 8 df table for the 72 entries: not built (open ambiguity, verification/harness/README.md).
+// Rule 8 df table (HoQ ruling: all df-null K entries): the 9 ruled entries are fixed; the rest stay open and
+// the harness is NOT-READY, which check:ph0 reports without failing and the evidence-run entry refuses.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -12,6 +13,8 @@ import * as pins from '../verification/harness/pins.mjs';
 import * as floor from '../verification/harness/n-floor.mjs';
 import * as counts from '../verification/harness/counts.mjs';
 import { runChecks, selfTest, runMutants, loadKTests } from '../verification/harness/check.mjs';
+import * as df from '../verification/harness/df-table.mjs';
+import { harnessReadiness, assertEvidenceRunReady } from '../verification/harness/evidence-entry.mjs';
 
 const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
 const ANSWERS_SHA = 'f71ec11d82f83311666af9dc05707227b736f69d1ab768a5448c0ffcfb666383';
@@ -72,10 +75,10 @@ test('rule 17(i): expected counts are the frozen numbers', () => {
   assert.deepEqual([...counts.DIEHARDER_EXCLUDED], ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums']);
 });
 
-test('self-test: every fixture as expected, all 23 mutants killed, none PATCH-FAILED', async () => {
+test('self-test: every fixture as expected, all 36 mutants killed, none PATCH-FAILED', async () => {
   const r = await selfTest();
   assert.deepEqual(r.fails, []);
-  assert.equal(r.mutants.length, 23);
+  assert.equal(r.mutants.length, 36);
   assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
 });
 
@@ -87,10 +90,50 @@ test('self-test: a mutant whose patch does not apply is PATCH-FAILED, not killed
 test('check:ph0 wiring: b8 step runs the harness checks on this tree', () => {
   const out = execFileSync('node', ['tools/ci/b8-dependencies.mjs'], { encoding: 'utf8' });
   assert.match(out, /harness preconditions: 0 finding\(s\)/);
+  assert.match(out, /harness readiness: NOT-READY \(rule 8 df fixed 9 of 76 df-null entries, 67 open;/);
   assert.match(readFileSync('package.json', 'utf8'), /node tools\/ci\/b8-dependencies\.mjs && node tools\/ci\/b8-dependencies\.mjs --self-test/);
 });
 
 test('no evidence data in the harness directory', () => {
   const files = execFileSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'verification/harness'], { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
-  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/counts.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
+  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
+});
+
+// Digest and df literals held here on their own (not imported from the table).
+const DF_DIGEST = '1ed710bfb77b8e2a6736407386e60b70401398e88603b97b172d8df1d3817e63';
+test('rule 8 df table: ruled values, digest literal, K-list sha', () => {
+  const kSha = sha('verification/k-tests-v1.1.json');
+  assert.equal(kSha, 'f75299de7fa063b96e2a031ec7072ed4fe34f219a4bc04e3534125b973097c4c');
+  assert.equal(df.DF_TABLE_SHA256, DF_DIGEST);
+  assert.equal(createHash('sha256').update(df.dfTableCanonical()).digest('hex'), DF_DIGEST);
+  for (const i of [0, 1, 25, 50]) assert.equal(df.DF_TABLE[`shuffle/adjacency/n-52-i-${i}`], 2651);
+  for (const id of ['randomInt/chi2/min-0-max-2147483649', 'randomInt/chi2/min-0-max-4294967296', 'randomInt/chi2/min-0-max-4294967297', 'randomInt/chi2/min-0-max-281474976710656', 'shuffle/chi2/lehmer-52']) assert.equal(df.DF_TABLE[id], 999);
+  assert.equal(Object.keys(df.DF_TABLE).length, 9);
+  assert.deepEqual(df.checkDfTable(loadKTests(), { kTestsSha256: kSha }), []);
+});
+
+test('rule 8 readiness: open set computed from k-tests; evidence-run entry refuses; PH0 does not fail', () => {
+  const k = loadKTests();
+  const nulls = k.filter((t) => t.df === null);
+  assert.equal(nulls.length, 76);
+  const r = harnessReadiness();
+  assert.equal(r.ready, false);
+  assert.equal(r.df.dfNull, nulls.length);
+  assert.equal(r.df.open.length, nulls.length - 9);
+  assert.ok(r.df.open.every((id) => !(id in df.DF_TABLE)));
+  assert.throws(() => assertEvidenceRunReady(), /harness NOT-READY: rule 8 df open for 67 of 76 df-null entries/);
+});
+
+test('rule 8 bins: exact BigInt probabilities, unequal for non-divisible r, Lehmer rank in BigInt', () => {
+  const r = 2147483649n;
+  assert.deepEqual(df.binProbability(0, r), [2147483n, r]);
+  assert.notEqual(df.binProbability(0, r)[0] * 1000n, r);
+  assert.equal(df.binOf(0n, r), 0);
+  assert.equal(df.binOf(r - 1n, r), 999);
+  assert.throws(() => df.binOf(1, r), TypeError);
+  assert.equal(df.minExpectedOk(r), true);
+  const id52 = Array.from({ length: 52 }, (_, i) => i);
+  assert.equal(df.lehmerRank(id52), 0n);
+  assert.equal(df.lehmerRank([...id52].reverse()), df.factorial(52) - 1n);
+  assert.equal(df.binOf(df.lehmerRank([...id52].reverse()), df.LEHMER_52_SUPPORT), 999);
 });
