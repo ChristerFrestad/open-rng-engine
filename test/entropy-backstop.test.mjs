@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { MARK, ENTRY_POINT_IDS, isExactAllowed, isPrefixAllowed, parseCallerFrames, defaultAllowedCallers } from '../tools/ci/entropy-backstop.mjs';
+import { MARK, ENTRY_POINT_IDS, isExactAllowed, isPrefixAllowed, parseCallerFrames, defaultAllowedCallers, innermostSrcFrame, isUnderEntropy, isUnderRepoSrc } from '../tools/ci/entropy-backstop.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const BACKSTOP = join(ROOT, 'tools/ci/entropy-backstop.mjs');
@@ -23,8 +23,11 @@ for (const id of ENTRY_POINT_IDS) {
   if (n !== 0) throw new Error(`entropy-backstop counter ${id} was ${n} at install (must be 0)`);
   if (!marker.wrappers?.[id]) throw new Error(`entropy-backstop missing wrapper for ${id}`);
 }
-if (marker.entryPointIds.length !== 8) {
-  throw new Error(`entropy-backstop must wrap 8 entry points, got ${marker.entryPointIds.join(',')}`);
+if (marker.entryPointIds.length !== ENTRY_POINT_IDS.length) {
+  throw new Error(`entropy-backstop must wrap ${ENTRY_POINT_IDS.length} entry points, got ${marker.entryPointIds.join(',')}`);
+}
+if (ENTRY_POINT_IDS.length < 14) {
+  throw new Error(`G-29: expected the expanded entry-point list, got ${ENTRY_POINT_IDS.length}`);
 }
 
 test('M-162: preload marker lists every entry point and wrappers are live identities', () => {
@@ -40,16 +43,19 @@ test('M-162: preload marker lists every entry point and wrappers are live identi
     'subtle.generateKey': () => crypto.webcrypto.subtle.generateKey,
     'globalThis.crypto.getRandomValues': () => globalThis.crypto.getRandomValues,
   };
-  for (const id of ENTRY_POINT_IDS) {
-    assert.equal(typeof expected[id](), 'function', id);
-    // Node's crypto.getRandomValues is a non-configurable getter that forwards
-    // to webcrypto.getRandomValues; identity is tracked on that hook.
+  for (const [id, getter] of Object.entries(expected)) {
+    assert.equal(typeof getter(), 'function', id);
     if (id === 'getRandomValues') {
-      assert.equal(marker.wrappers[id], marker.wrappers['webcrypto.getRandomValues']);
-      assert.equal(crypto.webcrypto.getRandomValues, marker.wrappers[id], 'cjs getRandomValues is hooked via the webcrypto wrapper');
+      // Non-configurable getter: identity is aliased to a hook on the prototype or webcrypto.
+      assert.ok(marker.wrappers[id] === marker.wrappers['webcrypto.getRandomValues']
+        || marker.wrappers[id] === marker.wrappers['Crypto.prototype.getRandomValues'],
+        'cjs getRandomValues is hooked via the webcrypto or prototype wrapper');
       continue;
     }
-    assert.equal(expected[id](), marker.wrappers[id], `${id} live identity must be the stored wrapper`);
+    assert.equal(getter(), marker.wrappers[id], `${id} live identity must be the stored wrapper`);
+  }
+  for (const id of ENTRY_POINT_IDS) {
+    assert.equal(typeof marker.wrappers[id], 'function', `wrapper missing for ${id}`);
   }
 });
 
@@ -115,18 +121,22 @@ test('M-162: the same call from src/entropy (exact allowed file) passes', () => 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('M-162: an unwrap by code under test fails at teardown', () => {
+test('G-29: hooks are frozen; an unwrap attempt does not let a planted call through', () => {
   const dir = mkdtempSync(join(tmpdir(), 'm162-unwrap-'));
   try {
-    const ok = join(dir, 'src', 'entropy', 'unwrap.mjs');
-    mkdirSync(dirname(ok), { recursive: true });
-    writeFileSync(ok, readFileSync(join(FIX, 'unwrap-getRandomValues.mjs')));
-    const r = spawnSync(process.execPath, ['--import', BACKSTOP, ok], {
+    const planted = join(dir, 'src', 'health', 'unwrap.mjs');
+    const allowed = join(dir, 'src', 'entropy', 'ok.mjs');
+    mkdirSync(dirname(planted), { recursive: true });
+    mkdirSync(dirname(allowed), { recursive: true });
+    writeFileSync(allowed, 'export {}\n');
+    writeFileSync(planted, readFileSync(join(FIX, 'unwrap-getRandomValues.mjs')));
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: ok },
+      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
     });
-    assert.notEqual(r.status, 0, `unwrap must fail:\n${r.stdout}\n${r.stderr}`);
-    assert.match(`${r.stderr}\n${r.stdout}`, /unwrapped or re-wrapped/);
+    assert.notEqual(r.status, 0, `unwrap + planted call must fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop:/);
+    assert.doesNotMatch(`${r.stderr}\n${r.stdout}`, /call ok/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -157,4 +167,126 @@ test('M-162: default allowed callers are the explicit src/entropy files', () => 
     resolve(ROOT, 'src/entropy/blockPlan.ts'),
     resolve(ROOT, 'src/entropy/index.ts'),
   ]);
+});
+
+const PLANTED_CALL = (id) => `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const c = require('node:crypto');
+const buf = new Uint8Array(1);
+const id = ${JSON.stringify(id)};
+if (id === 'randomFillSync') c.randomFillSync(buf);
+else if (id === 'randomBytes') c.randomBytes(1);
+else if (id === 'randomInt') c.randomInt(0, 2);
+else if (id === 'randomUUID') c.randomUUID();
+else if (id === 'getRandomValues') c.getRandomValues(buf);
+else if (id === 'webcrypto.getRandomValues') c.webcrypto.getRandomValues(buf);
+else if (id === 'globalThis.crypto.getRandomValues') globalThis.crypto.getRandomValues(buf);
+else if (id === 'Crypto.prototype.getRandomValues') Crypto.prototype.getRandomValues.call(globalThis.crypto, buf);
+else if (id === 'webcrypto.randomUUID') c.webcrypto.randomUUID();
+else if (id === 'subtle.generateKey') c.webcrypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+else if (id === 'SubtleCrypto.prototype.generateKey') SubtleCrypto.prototype.generateKey.call(c.webcrypto.subtle, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+else if (id === 'randomFill') c.randomFill(buf, () => {});
+else if (id === 'generateKeySync') c.generateKeySync('hmac', { length: 256 });
+else if (id === 'generateKey') c.generateKey('hmac', { length: 256 }, () => {});
+else if (id === 'generatePrime') c.generatePrime(16, () => {});
+else if (id === 'generatePrimeSync') c.generatePrimeSync(16);
+else if (id === 'generateKeyPair') c.generateKeyPair('ed25519', () => {});
+else if (id === 'generateKeyPairSync') c.generateKeyPairSync('ed25519');
+else if (id === 'ECDH.prototype.generateKeys') {
+  const e = c.createECDH('prime256v1');
+  Object.getPrototypeOf(e).generateKeys.call(e);
+} else throw new Error('unknown id ' + id);
+`;
+
+for (const id of ENTRY_POINT_IDS) {
+  test(`G-29 / M-166: planted src/health call of ${id} is rejected`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'm166-plant-'));
+    try {
+      const planted = join(dir, 'src', 'health', 'planted.mjs');
+      const allowed = join(dir, 'src', 'entropy', 'ok.mjs');
+      mkdirSync(dirname(planted), { recursive: true });
+      mkdirSync(dirname(allowed), { recursive: true });
+      writeFileSync(planted, PLANTED_CALL(id));
+      writeFileSync(allowed, 'export {}\n');
+      const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
+        cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+        env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+      });
+      assert.notEqual(r.status, 0, `planted ${id} must fail:\n${r.stdout}\n${r.stderr}`);
+      assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop:/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+test('G-29: innermost repo src/ frame must be in src/entropy/; outer src frames are allowed', () => {
+  const entropy = resolve(ROOT, 'src/entropy/index.ts');
+  const index = resolve(ROOT, 'src/index.ts');
+  const health = resolve(ROOT, 'src/health/cht.ts');
+  const testFile = resolve(ROOT, 'test/entropy-backstop.test.mjs');
+  assert.equal(innermostSrcFrame([entropy, index, testFile]), entropy);
+  assert.equal(isUnderEntropy(innermostSrcFrame([entropy, index])), true);
+  assert.equal(isUnderRepoSrc(index), true);
+  assert.equal(isUnderEntropy(innermostSrcFrame([health, index])), false);
+  assert.equal(innermostSrcFrame([testFile]), null);
+});
+
+test('G-29: Error.prepareStackTrace spoofing is rejected on a wrapped call', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'm166-spoof-'));
+  try {
+    const planted = join(dir, 'src', 'health', 'spoof.mjs');
+    const allowed = join(dir, 'src', 'entropy', 'ok.mjs');
+    mkdirSync(dirname(planted), { recursive: true });
+    mkdirSync(dirname(allowed), { recursive: true });
+    writeFileSync(allowed, 'export {}\n');
+    writeFileSync(planted, `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+Error.prepareStackTrace = () => 'Error\\n    at f (${allowed}:1:1)';
+require('node:crypto').randomBytes(1);
+`);
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+    });
+    assert.notEqual(r.status, 0, `prepareStackTrace spoof must fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(`${r.stderr}\n${r.stdout}`, /prepareStackTrace|entropy-backstop:/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('G-29: a worker inherits the preload via NODE_OPTIONS and rejects a planted call', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'm166-worker-'));
+  try {
+    const planted = join(dir, 'src', 'health', 'worker-host.mjs');
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, `
+import { Worker } from 'node:worker_threads';
+const w = new Worker("require('node:crypto').randomBytes(1);", { eval: true });
+w.on('error', (e) => { console.error(String(e)); process.exit(2); });
+w.on('exit', (code) => process.exit(code === 0 ? 0 : (code || 1)));
+`);
+    const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
+      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env },
+    });
+    assert.notEqual(r.status, 0, `worker planted call must fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop:/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('G-29: Crypto.prototype and SubtleCrypto.prototype hooks are frozen', () => {
+  const require = createRequire(import.meta.url);
+  const crypto = require('node:crypto');
+  const grv = Object.getOwnPropertyDescriptor(Crypto.prototype, 'getRandomValues');
+  const gk = Object.getOwnPropertyDescriptor(SubtleCrypto.prototype, 'generateKey');
+  assert.equal(grv?.configurable, false);
+  assert.equal(grv?.writable, false);
+  assert.equal(gk?.configurable, false);
+  assert.equal(gk?.writable, false);
+  assert.equal(typeof Crypto.prototype.getRandomValues, 'function');
+  assert.equal(typeof SubtleCrypto.prototype.generateKey, 'function');
+  assert.equal(crypto.webcrypto.getRandomValues, marker.wrappers['webcrypto.getRandomValues'] || marker.wrappers['Crypto.prototype.getRandomValues']);
+});
+
+test('G-29: package.json check:ph0 runs the backstop check', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.match(pkg.scripts['check:ph0'], /entropy-backstop-check[.]mjs/);
 });

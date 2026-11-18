@@ -29,6 +29,17 @@
 //  G-27: every relative specifier must have an explicit allowed extension (.ts/.mts/.cts) and resolve to exactly one
 //    file this scan parsed; unresolved, extensionless, outside the scanned set, or via node_modules is red. Every
 //    git-tracked source file under SCAN_ROOTS must be parsed (`git ls-files`). `.js`/`.mjs`/`.cjs` under src/ is red.
+//  G-28: string literals / no-substitution templates whose value is constructor / __proto__ / prototype are red
+//    anywhere in scanned source (AST value, any position). __lookupGetter__/__lookupSetter__/__defineGetter__/
+//    __defineSetter__ are red as identifiers or member names. Object.getOwnPropertyDescriptor(s), getPrototypeOf,
+//    setPrototypeOf and defineProperty are red outside coreGuard's exact forms. Computed keys in destructuring
+//    patterns or object literals are red unless the key is a numeric literal. Element access is green only with a
+//    numeric literal key, or an identifier the TS checker types as number (string keys are AST-only, never from the
+//    TS type). Type assertions (as, <T>), any/unknown in type positions, the non-null !, @ts-ignore and @ts-nocheck
+//    are red; @ts-expect-error is allowed only at the single pinned entropy import line. Error.prepareStackTrace,
+//    captureStackTrace and stackTraceLimit are red.
+//  G-30: closed-world (unparsed-tracked) and js-under-src have their own fixtures. Tracked extensionless and .json
+//    files under SCAN_ROOTS are red unless listed on TRACKED_NON_TS_ALLOWED (exact paths; empty for src).
 // HoQ ruling on rule 27 (relayed by CTO 2026-11-18 09:00 CET):
 //  Q1 'no more' always blocks; 'no fewer' blocks once entropy/, evidence/ or identity/ exists under src/, is report-only
 //     for a directory that does not exist yet, and is red for a missing directory under --phase-exit.
@@ -99,6 +110,13 @@ export const COMPUTED_LITERAL_KEYS_ALLOWED = Object.freeze([]); // G-26/M-161: e
 export const REFLECTIVE_BASES = Object.freeze(['Reflect', 'getOwnPropertyDescriptor', 'defineProperty', 'getPrototypeOf', 'constructor', '__proto__']);
 export const RELATIVE_SPEC_EXT = Object.freeze(['.ts', '.mts', '.cts']);
 export const BANNED_COMPUTED_KEY_NAMES = Object.freeze(['constructor', '__proto__', 'getPrototypeOf', 'defineProperty', 'getOwnPropertyDescriptor', 'construct', 'crypto', 'fips', 'setFips', 'require', ...PROCESS_ALWAYS_BANNED]);
+export const BANNED_STRING_LITERALS = Object.freeze(['constructor', '__proto__', 'prototype']);
+export const BANNED_LOOKUP_NAMES = Object.freeze(['__lookupGetter__', '__lookupSetter__', '__defineGetter__', '__defineSetter__']);
+export const BANNED_OBJECT_APIS = Object.freeze(['getOwnPropertyDescriptor', 'getOwnPropertyDescriptors', 'getPrototypeOf', 'setPrototypeOf', 'defineProperty']);
+export const BANNED_STACK_APIS = Object.freeze(['prepareStackTrace', 'captureStackTrace', 'stackTraceLimit']);
+export const TRACKED_NON_TS_ALLOWED = Object.freeze([]); // exact posix paths; empty for src (G-30 NIT)
+export const PINNED_TS_EXPECT_ERROR_REL = 'src/entropy/index.ts';
+export const PINNED_TS_EXPECT_ERROR_TEXT = '@ts-expect-error node:crypto typings are not in the pinned devDependencies.';
 const SRC_JS_EXT = /\.(js|mjs|cjs)$/;
 const PARSE_EXT = /\.(ts|mts|cts)$/;
 const READ_CALL_NAME = /^(?:(?:fill|read)[\w$]*|randomBytes|randomFill[\w$]*|getRandomValues|randomUUID|randomInt)$/;
@@ -427,6 +445,85 @@ function isHasOwnGlobalThis(call) {
   return call.arguments[0] && isIdent(call.arguments[0], 'globalThis');
 }
 
+function isAllowedGuardDefinePropertyCall(call) {
+  return isDefinePropertyGlobalThis(call) && isExactGuardDescriptor(call.arguments[2]);
+}
+
+function isInsideAllowedGuardDefineProperty(node, rel) {
+  if (rel !== GUARD_PATH) return false;
+  let n = node;
+  while (n) {
+    if (ts.isCallExpression(n) && isAllowedGuardDefinePropertyCall(n)) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+function isGreenElementKey(expr, checker) {
+  if (!expr) return false;
+  if (ts.isNumericLiteral(expr)) return true;
+  if (ts.isIdentifier(expr) && checker && isNumberType(checker.getTypeAtLocation(expr))) return true;
+  return false;
+}
+
+function isComputedKeyContext(nameNode) {
+  const p = nameNode.parent;
+  if (!p) return false;
+  if (ts.isBindingElement(p) && p.propertyName === nameNode) return true;
+  if ((ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isMethodDeclaration(p)
+    || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isSpreadAssignment(p))
+    && p.name === nameNode && p.parent && ts.isObjectLiteralExpression(p.parent)) return true;
+  return false;
+}
+
+function commentBody(text, range) {
+  const raw = text.slice(range.pos, range.end);
+  return raw.replace(/^\/\/\/?/, '').replace(/^\/\*/, '').replace(/\*\/$/, '').trim();
+}
+
+function isPinnedEntropyImport(node) {
+  if (!node || !ts.isImportDeclaration(node) || !node.moduleSpecifier || !isStringLiteralLike(node.moduleSpecifier)) return false;
+  if (node.moduleSpecifier.text !== 'node:crypto') return false;
+  const clause = node.importClause;
+  if (!clause || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)) return false;
+  if (clause.name || clause.namedBindings.elements.length !== 1) return false;
+  const el = clause.namedBindings.elements[0];
+  return idText(el.propertyName ?? el.name) === 'randomFillSync' && idText(el.name) === 'randomFillSync' && !el.propertyName;
+}
+
+function scanCommentDirectives(sf, rel, add) {
+  const text = sf.text;
+  const byRange = new Map();
+  const consider = (range, owner) => {
+    const key = range.pos + ':' + range.end;
+    const rec = byRange.get(key) ?? { range, owners: [] };
+    rec.owners.push(owner);
+    byRange.set(key, rec);
+  };
+  const walkC = (node) => {
+    for (const r of (ts.getLeadingCommentRanges(text, node.getFullStart()) ?? [])) consider(r, node);
+    for (const r of (ts.getTrailingCommentRanges(text, node.end) ?? [])) consider(r, undefined);
+    ts.forEachChild(node, walkC);
+  };
+  walkC(sf);
+  for (const { range, owners } of byRange.values()) {
+    const body = commentBody(text, range);
+    if (body.startsWith('@ts-ignore')) add(range.pos, 'ts-directive', '@ts-ignore is red in core src (G-28)');
+    if (body.startsWith('@ts-nocheck')) add(range.pos, 'ts-directive', '@ts-nocheck is red in core src (G-28)');
+    if (body.startsWith('@ts-expect-error')) {
+      const ok = rel === PINNED_TS_EXPECT_ERROR_REL && body === PINNED_TS_EXPECT_ERROR_TEXT && owners.some((o) => isPinnedEntropyImport(o));
+      if (!ok) add(range.pos, 'ts-directive', '@ts-expect-error is allowed only at the pinned entropy randomFillSync import line (G-28)');
+    }
+  }
+}
+
+function isTrackedNonTs(rel) {
+  const base = (rel.split('/').pop() ?? '');
+  if (base.endsWith('.json')) return true;
+  if (!base.includes('.')) return true;
+  return false;
+}
+
 function callName(node) {
   if (ts.isIdentifier(node)) return idText(node);
   if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return accessMemberName(node);
@@ -473,6 +570,7 @@ export function scanFile(rel, src, opts = {}) {
     if (got) sf = got;
   }
   for (const d of parseErrors(sf)) add(d.start ?? 0, 'parse', ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+  scanCommentDirectives(sf, rel, add);
 
   const specs = collectSpecifiers(sf, rel);
   for (const s of specs) {
@@ -535,11 +633,38 @@ export function scanFile(rel, src, opts = {}) {
     if (ts.isIdentifier(node) && idText(node) === 'Reflect') {
       addNode(node, 'reflect-identifier', 'Reflect identifier is red in scanned source (G-26)');
     }
+    // G-28: banned string literals / no-substitution templates, any position, AST value.
+    if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && BANNED_STRING_LITERALS.includes(node.text)) {
+      addNode(node, 'banned-string-literal', `string literal or no-substitution template '${node.text}' is red in any position (G-28)`);
+    }
+    if ((ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) && BANNED_LOOKUP_NAMES.includes(idText(node))) {
+      addNode(node, 'banned-lookup', `'${idText(node)}' is red as an identifier or member name (G-28)`);
+    }
+    if ((ts.isIdentifier(node) && BANNED_OBJECT_APIS.includes(idText(node)))
+      || ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && BANNED_OBJECT_APIS.includes(accessMemberName(node)))) {
+      if (!isInsideAllowedGuardDefineProperty(node, rel)) {
+        const nm = ts.isIdentifier(node) ? idText(node) : accessMemberName(node);
+        addNode(node, 'object-api', `${nm} is red outside coreGuard's exact forms (G-28)`);
+      }
+    }
+    if ((ts.isIdentifier(node) && BANNED_STACK_APIS.includes(idText(node)))
+      || ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && BANNED_STACK_APIS.includes(accessMemberName(node)))) {
+      const nm = ts.isIdentifier(node) ? idText(node) : accessMemberName(node);
+      addNode(node, 'prepare-stack', `${nm} is red in core src (G-28)`);
+    }
+    if (ts.isComputedPropertyName(node) && isComputedKeyContext(node) && !ts.isNumericLiteral(node.expression)) {
+      addNode(node, 'computed-key', `computed key in a destructuring pattern or object literal is not a numeric literal: ${node.expression.getText()}`);
+    }
+    if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+      addNode(node, 'type-assertion', 'type assertion (as or angle-bracket) is red in core src (G-28)');
+    }
+    if (node.kind === ts.SyntaxKind.AnyKeyword) addNode(node, 'banned-type', 'any in a type position is red (G-28)');
+    if (node.kind === ts.SyntaxKind.UnknownKeyword) addNode(node, 'banned-type', 'unknown in a type position is red (G-28)');
+    if (ts.isNonNullExpression(node)) addNode(node, 'non-null-assertion', 'non-null assertion is red in core src (G-28)');
     if (ts.isElementAccessExpression(node)) {
       const key = node.argumentExpression;
-      const v = computedKeyVerdict(key, checker, keyOpts);
-      if (v !== 'source-literal' && v !== 'number' && v !== 'allowed' && v !== 'string-treated-safe') {
-        addNode(node, 'computed-access', `computed member access key is not a source literal or allowed typed key (${v}): ${key.getText()}`);
+      if (!isGreenElementKey(key, checker)) {
+        addNode(node, 'computed-access', `element access key is not a numeric literal or a number-typed identifier: ${key.getText()}`);
       }
     }
     if (ts.isCallExpression(node)) {
@@ -811,6 +936,9 @@ export function scanTree(root, { phaseExit = false, computedLiteralAllow, treatS
         if (PARSE_EXT.test(rel) && !parsedSet.has(rel)) {
           hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);
         }
+        if (rel.startsWith('src/') && isTrackedNonTs(rel) && !TRACKED_NON_TS_ALLOWED.includes(rel)) {
+          hits.push(`${rel}:1: rule27-tracked-non-ts tracked extensionless or .json file is not on TRACKED_NON_TS_ALLOWED`);
+        }
       }
     }
   }
@@ -924,6 +1052,39 @@ export const BAD = {
   // M-161 extras: literal-typed var / string-typed computed keys are red under the empty production allow-list
   'm161-literal-typed-var': "const k = 'foo' as const;\no[k];\n",
   'm161-string-typed': "const s: string = 'x';\no[s];\n",
+  // G-28 / M-163..M-165 and HoQ b1..b6 (planted in src/health in HoQ's run; fixtures here use src/mapping/bad.ts unless noted).
+  'b1-lookupGetter-gopd': "const FP = ({}).__lookupGetter__('__proto__').call(() => 0);\nconst F = Object.getOwnPropertyDescriptor(FP, 'constructor').value;\nconst g = F('return globalThis')();\ng.crypto.getRandomValues(new Uint8Array(1));\n",
+  'b2-computed-destructure': "const k = 'constr'+'uctor';\nconst { [k]: F } = (() => 0);\nconst g = F('return globalThis')();\nconst k2 = 'cry'+'pto';\nconst { [k2]: c } = g;\nc.getRandomValues(new Uint8Array(1));\n",
+  'b3-number-laundered-key': "const k = 'constructor' as unknown as number;\nconst fn = () => 0;\nconst F = fn[k];\nconst g = F('return globalThis')();\nconst c = g['crypto' as unknown as number];\nc.getRandomValues(new Uint8Array(1));\n",
+  'b4-literal-computed-destructure': "const { ['constructor']: F } = (() => 0);\nconst g = F('return globalThis')();\ng.crypto.getRandomValues(new Uint8Array(1));\n",
+  'b5-b1-plus-prototype': "const FP = ({}).__lookupGetter__('__proto__').call(() => 0);\nconst F = Object.getOwnPropertyDescriptor(FP, 'constructor').value;\nconst g = F('return globalThis')();\nCrypto.prototype.getRandomValues.call(g.crypto, new Uint8Array(1));\n",
+  'b6-b2-plus-randomUUID': "const k = 'constr'+'uctor';\nconst { [k]: F } = (() => 0);\nconst g = F('return globalThis')();\ng.crypto.randomUUID();\n",
+  'm163-computed-destructure': "const k = 'constr'+'uctor';\nconst { [k]: F } = (() => 0);\n",
+  'm163-literal-computed-destructure': "const { ['constructor']: F } = (() => 0);\n",
+  'm164-lookupGetter': "({}).__lookupGetter__('__proto__');\n",
+  'm164-literal-gopd': "Object.getOwnPropertyDescriptor(Array.prototype, 'constructor');\n",
+  'm165-number-laundered-key': "const k = 'constructor' as unknown as number;\nfn[k];\n",
+  'banned-string-constructor': "const s = 'constructor';\n",
+  'banned-string-proto': "const s = '__proto__';\n",
+  'banned-string-prototype': "const s = 'prototype';\n",
+  'banned-template-constructor': 'const s = `constructor`;\n',
+  'banned-lookupSetter': 'x.__lookupSetter__;\n',
+  'banned-defineGetter': 'x.__defineGetter__;\n',
+  'banned-defineSetter': 'x.__defineSetter__;\n',
+  'type-assertion-as': 'const x = 1 as number;\n',
+  'type-assertion-angle': 'const x = <number>1;\n',
+  'banned-type-any': 'const x: any = 1;\n',
+  'banned-type-unknown': 'const x: unknown = 1;\n',
+  'non-null-assertion': 'const x = y!;\n',
+  'ts-ignore': '// @ts-ignore\nconst x = 1;\n',
+  'ts-nocheck': '// @ts-nocheck\nconst x = 1;\n',
+  'ts-expect-error-unpinned': '// @ts-expect-error typings\nconst x = 1;\n',
+  'prepareStackTrace': 'Error.prepareStackTrace = f;\n',
+  'captureStackTrace': 'Error.captureStackTrace(e);\n',
+  'stackTraceLimit': 'Error.stackTraceLimit = 0;\n',
+  'computed-object-key': "const k = 'a'+'b';\nconst o = { [k]: 1 };\n",
+  'string-element-access': "const o = { kind: 1 };\no['kind'];\n",
+  'setPrototypeOf': 'Object.setPrototypeOf(x, y);\n',
 };
 function m161KeyForms(target) {
   const mid = Math.ceil(target.length / 2);
@@ -1005,8 +1166,40 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   'import-type-non-relative': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
   'm161-literal-typed-var': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
   'm161-string-typed': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'b1-lookupGetter-gopd': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'b2-computed-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-computed-key /,
+  'b3-number-laundered-key': /^src\/mapping\/bad\.ts:\d+: rule27-type-assertion /,
+  'b4-literal-computed-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'b5-b1-plus-prototype': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'b6-b2-plus-randomUUID': /^src\/mapping\/bad\.ts:\d+: rule27-computed-key /,
+  'm163-computed-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-computed-key /,
+  'm163-literal-computed-destructure': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'm164-lookupGetter': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'm164-literal-gopd': /^src\/mapping\/bad\.ts:\d+: rule27-object-api /,
+  'm165-number-laundered-key': /^src\/mapping\/bad\.ts:\d+: rule27-type-assertion /,
+  'banned-string-constructor': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'banned-string-proto': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'banned-string-prototype': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'banned-template-constructor': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'banned-lookupSetter': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'banned-defineGetter': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'banned-defineSetter': /^src\/mapping\/bad\.ts:\d+: rule27-banned-lookup /,
+  'type-assertion-as': /^src\/mapping\/bad\.ts:\d+: rule27-type-assertion /,
+  'type-assertion-angle': /^src\/mapping\/bad\.ts:\d+: rule27-type-assertion /,
+  'banned-type-any': /^src\/mapping\/bad\.ts:\d+: rule27-banned-type /,
+  'banned-type-unknown': /^src\/mapping\/bad\.ts:\d+: rule27-banned-type /,
+  'non-null-assertion': /^src\/mapping\/bad\.ts:\d+: rule27-non-null-assertion /,
+  'ts-ignore': /^src\/mapping\/bad\.ts:\d+: rule27-ts-directive /,
+  'ts-nocheck': /^src\/mapping\/bad\.ts:\d+: rule27-ts-directive /,
+  'ts-expect-error-unpinned': /^src\/mapping\/bad\.ts:\d+: rule27-ts-directive /,
+  'prepareStackTrace': /^src\/mapping\/bad\.ts:\d+: rule27-prepare-stack /,
+  'captureStackTrace': /^src\/mapping\/bad\.ts:\d+: rule27-prepare-stack /,
+  'stackTraceLimit': /^src\/mapping\/bad\.ts:\d+: rule27-prepare-stack /,
+  'computed-object-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-key /,
+  'string-element-access': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'setPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-object-api /,
 };
-const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf) /;
+const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf|object-api|banned-string-literal|type-assertion|computed-key) /;
 for (const name of Object.keys(BAD)) {
   if (!name.startsWith('m161-') || name === 'm161-literal-typed-var' || name === 'm161-string-typed') continue;
   BAD_REASON[name] = M161_REASON;
@@ -1029,7 +1222,7 @@ export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
 }
 
-export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control'];
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts'];
 function mx12Case(base) {
   const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
   const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
@@ -1040,6 +1233,14 @@ function mx12Case(base) {
   const clean = run('mx12-clean.json', { name: 'open-rng-engine', description: sp1 });
   if (clean.status !== 0) out.push(`MX-12 control: clean p8-package not green (status ${clean.status}):\n${clean.stdout}`);
   return out;
+}
+
+function initGit(dir) {
+  const r = spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0) return r;
+  spawnSync('git', ['config', 'user.email', 'ci@example.test'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'ci'], { cwd: dir });
+  return r;
 }
 
 export function selfTest() {
@@ -1063,16 +1264,15 @@ export function selfTest() {
     if (COMPUTED_LITERAL_KEYS_ALLOWED.length !== 0) fails.push('COMPUTED_LITERAL_KEYS_ALLOWED must stay empty in production');
     const expectedBases = ['Reflect', 'getOwnPropertyDescriptor', 'defineProperty', 'getPrototypeOf', 'constructor', '__proto__'];
     for (const b of expectedBases) if (!REFLECTIVE_BASES.includes(b)) fails.push(`REFLECTIVE_BASES is missing ${b}`);
-    // M-161 control: a static allow-listed literal is GREEN only when a test-only allow-list is injected.
-    const ctlSrc = "const k = 'm161-ok' as const;\no[k];\n";
+    // G-28: string keys are AST-only. An injected computed-literal allow-list must not green o[k] or o['kind'].
+    const ctlSrc = "const k = 'm161-ok';\no[k];\n";
     const c1 = join(base, 'm161-allow-control'); writeFixture(c1, { 'src/mapping/bad.ts': ctlSrc });
     const chDefault = scanTree(c1).hits;
-    if (!chDefault.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161 control without allow-list must be red:\n${chDefault.join('\n')}`);
+    if (!chDefault.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161 string-key control without allow-list must be red:\n${chDefault.join('\n')}`);
     const chInjected = scanTree(c1, { computedLiteralAllow: ['m161-ok'] }).hits;
-    if (chInjected.some((h) => /rule27-computed-access /.test(h))) fails.push(`m161 control with injected allow-list must be green:\n${chInjected.join('\n')}`);
-    // Hand mutant 1 (killed by check:ph0): widen the allow-list to any literal — would green the production-empty control.
+    if (!chInjected.some((h) => /rule27-computed-access /.test(h))) fails.push(`G-28: injected allow-list must not green a string key:\n${chInjected.join('\n')}`);
     const anyHits = scanTree(c1, { computedLiteralAllow: 'ANY' }).hits;
-    if (anyHits.some((h) => /rule27-computed-access /.test(h))) fails.push('internal: ANY allow-list should green the m161-ok control');
+    if (!anyHits.some((h) => /rule27-computed-access /.test(h))) fails.push('G-28: ANY allow-list must not green a string key');
     // Hand mutant 2 (killed by check:ph0): drop one base from the reflective set — the defineProperty concat fixture must still be red.
     const defDir = join(base, 'm161-concatenation-defineProperty');
     const defSrc = BAD['m161-concatenation-defineProperty'];
@@ -1103,10 +1303,46 @@ export function selfTest() {
     writeFixture(numDir, { 'src/mapping/ok.ts': 'const i: number = 0;\nconst a: string[] = [];\na[i];\n' });
     const numHits = scanTree(numDir).hits.filter((h) => /rule27-computed-access /.test(h));
     if (numHits.length) fails.push(`number-typed index must stay green:\n${numHits.join('\n')}`);
-    const litDir = join(base, 'm161-source-literal-control');
-    writeFixture(litDir, { 'src/mapping/ok.ts': "const o: Record<string, unknown> = {};\no['kind'];\n" });
+    const litDir = join(base, 'm161-numeric-literal-control');
+    writeFixture(litDir, { 'src/mapping/ok.ts': 'const a: string[] = [];\na[0];\n' });
     const litHits = scanTree(litDir).hits.filter((h) => /rule27-computed-access /.test(h));
-    if (litHits.length) fails.push(`source-literal key must stay green:\n${litHits.join('\n')}`);
+    if (litHits.length) fails.push(`numeric-literal element access must stay green:\n${litHits.join('\n')}`);
+    if (TRACKED_NON_TS_ALLOWED.length !== 0) fails.push('TRACKED_NON_TS_ALLOWED must stay empty in production');
+
+    // G-30: closed-world (unparsed-tracked) fixture — a tracked .ts under src/**/node_modules is walked-skipped.
+    const cw = join(base, 'unparsed-tracked');
+    writeFixture(cw);
+    const hidden = join(cw, 'src/health/node_modules/hidden.ts');
+    mkdirSync(dirname(hidden), { recursive: true });
+    writeFileSync(hidden, 'export const k = 1;\n');
+    if (initGit(cw).status !== 0) fails.push('unparsed-tracked fixture: git init failed');
+    else {
+      const add = spawnSync('git', ['add', '-A', '-f'], { cwd: cw, encoding: 'utf8' });
+      if (add.status !== 0) fails.push(`unparsed-tracked fixture: git add failed: ${add.stderr}`);
+      const cwHits = scanTree(cw).hits;
+      if (!cwHits.some((h) => /rule27-unparsed-tracked /.test(h))) fails.push(`unparsed-tracked fixture was not red:\n${cwHits.join('\n')}`);
+    }
+
+    // G-30: .js under src/
+    const jsDir = join(base, 'js-under-src');
+    writeFixture(jsDir, { 'src/health/plant.js': 'export const k = 1;\n' });
+    const jsHits = scanTree(jsDir).hits;
+    if (!jsHits.some((h) => /rule27-js-under-src /.test(h))) fails.push(`js-under-src fixture was not red:\n${jsHits.join('\n')}`);
+
+    // G-30 NIT: tracked extensionless and .json under src are red (allow-list empty).
+    const nt = join(base, 'tracked-non-ts');
+    writeFixture(nt);
+    mkdirSync(join(nt, 'src/health'), { recursive: true });
+    writeFileSync(join(nt, 'src/health/notes.json'), '{}\n');
+    writeFileSync(join(nt, 'src/health/extensionless'), 'x\n');
+    if (initGit(nt).status !== 0) fails.push('tracked-non-ts fixture: git init failed');
+    else {
+      const add = spawnSync('git', ['add', '-A'], { cwd: nt, encoding: 'utf8' });
+      if (add.status !== 0) fails.push(`tracked-non-ts fixture: git add failed: ${add.stderr}`);
+      const ntHits = scanTree(nt).hits;
+      if (!ntHits.some((h) => h.startsWith('src/health/notes.json') && /rule27-tracked-non-ts /.test(h))) fails.push(`tracked .json was not red:\n${ntHits.join('\n')}`);
+      if (!ntHits.some((h) => h.startsWith('src/health/extensionless') && /rule27-tracked-non-ts /.test(h))) fails.push(`tracked extensionless was not red:\n${ntHits.join('\n')}`);
+    }
 
     // G-20 / MX-12: claims-lint --surface p8-package must lint keys (embedded escaped key-only plant red, clean control green).
     fails.push(...mx12Case(base));

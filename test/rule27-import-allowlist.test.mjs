@@ -98,6 +98,7 @@ test('rule 27 on this repo: 0 findings, exit 0 (check:ph0 green); evidence/ and 
   assert.ok(!existsSync(join(ROOT, 'src/evidence')) && !existsSync(join(ROOT, 'src/identity')));
   assert.doesNotMatch(r.stdout, /missing-pair \(randomFillSync, entropy\//);
   assert.match(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts['check:ph0'], /node tools\/ci\/import-allowlist\.mjs && node tools\/ci\/import-allowlist\.mjs --self-test/);
+  assert.match(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts['check:ph0'], /node --import \.\/tools\/ci\/entropy-backstop\.mjs tools\/ci\/entropy-backstop-check\.mjs/);
 });
 test('(c) --phase-exit on the current tree is red for the two still-missing pairs (evidence/, identity/)', () => {
   const r = run(['--phase-exit']); assert.equal(r.status, 1);
@@ -181,17 +182,17 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
 
-test('HoQ: --self-test carries 137 known-bad fixtures (allow-list, G-12/13/15/16, G-17..G-25, G-26/G-27, M-158..161) plus 4 extra cases', () => {
-  assert.equal(Object.keys(BAD).length, 137);
+test('HoQ: --self-test carries 169 known-bad fixtures (allow-list, G-12..G-28, M-158..165, b1..b6) plus 7 extra cases', () => {
+  assert.equal(Object.keys(BAD).length, 169);
   for (const n of ['gt-self-crypto', 'gt-window-crypto', 'gt-globalThis-crypto', 'gt-Function', 'gt-eval', 'gt-Reflect-get', 'gt-process-getBuiltinModule', 'gt-process-binding', 'process-alias', 'process-destructure', 'process-linkedBinding', 'process-dlopen', 'process-mainModule', 'process-plain-member', 'module-require', 'mainModule-require', 'require-alias', 'require-destructure', 'require-member-call', 'window-alias', 'constructor-call', 'guard-forms-non-guard-path', 'unicode-ident-globalThis', 'unicode-key-constructor', 'import-node-vm-default', 'import-node-vm-named', 'import-node-inspector', 'import-node-worker_threads', 'import-node-child_process', 'dynamic-import-node-vm', 'export-from-node-vm', 'require-node-vm', 'import-bare-fs', 'constructor-element', 'reflect-construct', 'object-getPrototypeOf', 'reflect-getPrototypeOf', 'proto-member', 'm158-concat-reflect-constructor', 'm158-template-key', 'm158-concat-crypto', 'extensionless-relative', 'parse-error', 'import-type-non-relative', 'm161-literal-typed-var', 'm161-string-typed', 'm161-concatenation-defineProperty', 'm161-fromCharCode-__proto__', 'm161-array-join-getPrototypeOf']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
-  assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control']);
+  assert.deepEqual(SELF_TEST_EXTRA_CASES, ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts']);
   for (const n of ['allowlist-FINGERPRINT_BYTES-multi', 'globalThis-destructure', 'globalThis-alias', 'globalThis-Reflect-get', 'globalThis-getOwnPropertyDescriptor', 'Function-return-this', 'require-node-module', 'require-module', 'fips-identifier', 'fips-computed']) assert.ok(BAD_REASON[n] instanceof RegExp && typeof BAD[n] === 'string', n);
   const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
     'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n", 'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
     'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /137 known-bad fixtures red, good fixture green, 4 extra cases ok/);
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /169 known-bad fixtures red, good fixture green, 7 extra cases ok/);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -284,20 +285,21 @@ test('NIT: object-literal keys such as { binding: 1 } are green', () => {
   assert.deepEqual(scanFile('src/mapping/x.ts', 'const o = { binding: 1 };\n').hits, []);
 });
 
-test('G-26: source-literal and number-typed keys are green; non-literal and string-typed keys are red', () => {
-  assert.equal(scanFile('src/mapping/x.ts', "const o: Record<string, unknown> = {};\no['kind'];\n").hits.filter((h) => /computed-access/.test(h)).length, 0);
+test('G-28: element access is green only for a numeric literal or a number-typed identifier', () => {
+  assert.equal(scanFile('src/mapping/x.ts', 'const a: string[] = [];\na[0];\n').hits.filter((h) => /computed-access/.test(h)).length, 0);
   assert.equal(scanFile('src/mapping/x.ts', 'const i: number = 0;\nconst a: string[] = [];\na[i];\n').hits.filter((h) => /computed-access/.test(h)).length, 0);
-  assert.ok(scanFile('src/mapping/x.ts', "const s: string = 'x';\no[s];\n").hits.some((h) => /computed-access/.test(h)));
-  assert.ok(scanFile('src/mapping/x.ts', "const k = 'foo' as const;\no[k];\n").hits.some((h) => /computed-access/.test(h)));
+  assert.ok(scanFile('src/mapping/x.ts', "const o = { kind: 1 };\no['kind'];\n").hits.some((h) => /computed-access/.test(h)));
+  assert.ok(scanFile('src/mapping/x.ts', "const s: string = 'x';\nconst o = { x: 1 };\no[s];\n").hits.some((h) => /computed-access/.test(h)));
+  assert.ok(scanFile('src/mapping/x.ts', "const k = 'foo';\nconst o = { foo: 1 };\no[k];\n").hits.some((h) => /computed-access/.test(h)));
 });
 
-test('G-26: production computed-literal allow-list is empty; test injection greens only listed literals', () => {
+test('G-28: production computed-literal allow-list stays empty; injection must not green a string key', () => {
   assert.deepEqual([...COMPUTED_LITERAL_KEYS_ALLOWED], []);
-  const src = "const k = 'm161-ok' as const;\no[k];\n";
+  const src = "const k = 'm161-ok';\nconst o = { x: 1 };\no[k];\n";
   withTmp((d) => {
     writeFixture(d, { 'src/mapping/x.ts': src });
     assert.ok(scanTree(d).hits.some((h) => /computed-access/.test(h)));
-    assert.equal(scanTree(d, { computedLiteralAllow: ['m161-ok'] }).hits.filter((h) => /computed-access/.test(h)).length, 0);
+    assert.ok(scanTree(d, { computedLiteralAllow: ['m161-ok'] }).hits.some((h) => /computed-access/.test(h)));
   });
 });
 
@@ -371,4 +373,65 @@ test('HoQ 41d5ca7a mutants: new checker kills each; mid-checker (41d5ca7a) verdi
 test('M-162 package.json test script installs the entropy backstop via --import', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.test, /--import\s+\.\/tools\/ci\/entropy-backstop\.mjs/);
+});
+
+const OLD_81 = new URL('./fixtures/rule27-checker-81d1d184.mjs', import.meta.url);
+const G28_MUTANTS = [
+  { id: 'b1', name: 'b1-lookupGetter-gopd', expectOldRed: false },
+  { id: 'b2', name: 'b2-computed-destructure', expectOldRed: false },
+  { id: 'b3', name: 'b3-number-laundered-key', expectOldRed: false },
+  { id: 'b4', name: 'b4-literal-computed-destructure', expectOldRed: false },
+  { id: 'b5', name: 'b5-b1-plus-prototype', expectOldRed: false },
+  { id: 'b6', name: 'b6-b2-plus-randomUUID', expectOldRed: false },
+  { id: 'M-163', name: 'm163-computed-destructure', expectOldRed: false },
+  { id: 'M-163', name: 'm163-literal-computed-destructure', expectOldRed: false },
+  { id: 'M-164', name: 'm164-lookupGetter', expectOldRed: false },
+  { id: 'M-164', name: 'm164-literal-gopd', expectOldRed: false },
+  { id: 'M-165', name: 'm165-number-laundered-key', expectOldRed: false },
+];
+
+test('HoQ 81d1d184: b1-b6 and M-163..M-165 are green on the old checker and red on the new one', async () => {
+  const old = await import(OLD_81);
+  const dir = mkdtempSync(join(tmpdir(), 'r27-81-'));
+  const rows = [];
+  try {
+    for (const m of G28_MUTANTS) {
+      assert.ok(BAD[m.name], `missing BAD fixture ${m.name}`);
+      const file = BAD_PATH[m.name] ?? 'src/mapping/bad.ts';
+      const d = join(dir, m.name); writeFixture(d, { [file]: BAD[m.name], ...(BAD_EXTRA[m.name] ?? {}) });
+      const oldHits = old.scanTree(d).hits;
+      const newHits = scanTree(d).hits;
+      const row = { id: m.id, name: m.name, old81: oldHits.length ? 'RED' : 'GREEN', neu: newHits.length ? 'RED' : 'GREEN' };
+      rows.push({ ...row, oldHits: oldHits.join(' | '), newHits: newHits.join(' | ') });
+      assert.equal(row.neu, 'RED', `${m.id} ${m.name} must be red on the new checker:\n${newHits.join('\n')}`);
+      if (BAD_REASON[m.name]) assert.ok(newHits.some((h) => BAD_REASON[m.name].test(h)), `${m.id} ${m.name} wrong reason:\n${newHits.join('\n')}`);
+      assert.equal(row.old81, m.expectOldRed ? 'RED' : 'GREEN', `${m.id} ${m.name} old 81d1d184 expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${row.old81}:\n${oldHits.join('\n')}`);
+    }
+    console.log('RULE27_81D1D184_VERDICTS', JSON.stringify(rows.map((r) => ({ id: r.id, name: r.name, old81: r.old81, new: r.neu })), null, 2));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('G-30 / M-167: disabling unparsed-tracked or js-under-src is killed by the self-test fixtures', () => {
+  const src = readFileSync(join(ROOT, 'tools/ci/import-allowlist.mjs'), 'utf8');
+  assert.match(src, /rule27-unparsed-tracked/);
+  assert.match(src, /rule27-js-under-src/);
+  const dropCw = src.replace('hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);', '/* mutant: unparsed-tracked dropped */');
+  const dropJs = src.replace(/hits\.push\(`\$\{rel\}:1: rule27-js-under-src /g, 'void (`${rel}:1: rule27-js-under-src ');
+  const dir = join(ROOT, 'tools/ci');
+  const cwFile = join(dir, '_scratch-m167-drop-cw.mjs');
+  const jsFile = join(dir, '_scratch-m167-drop-js.mjs');
+  try {
+    writeFileSync(cwFile, dropCw);
+    writeFileSync(jsFile, dropJs);
+    const run = (file) => spawnSync(process.execPath, [file, '--self-test'], { encoding: 'utf8', timeout: 60_000, cwd: ROOT });
+    const cw = run(cwFile);
+    assert.notEqual(cw.status, 0, `dropping unparsed-tracked must fail self-test:\n${cw.stdout}\n${cw.stderr}`);
+    assert.match(`${cw.stdout}\n${cw.stderr}`, /unparsed-tracked/);
+    const js = run(jsFile);
+    assert.notEqual(js.status, 0, `dropping js-under-src must fail self-test:\n${js.stdout}\n${js.stderr}`);
+    assert.match(`${js.stdout}\n${js.stderr}`, /js-under-src/);
+  } finally {
+    try { rmSync(cwFile, { force: true }); } catch {}
+    try { rmSync(jsFile, { force: true }); } catch {}
+  }
 });
