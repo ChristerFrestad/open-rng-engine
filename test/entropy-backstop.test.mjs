@@ -100,25 +100,21 @@ test('M-162: a planted src module (outside src/entropy) calling getRandomValues 
     writeFileSync(allowed, 'export {}\n');
     const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+      env: { ...process.env },
     });
     assert.notEqual(r.status, 0, `planted src module must fail:\n${r.stdout}\n${r.stderr}`);
     assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop: .*getRandomValues/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('M-162: the same call from src/entropy (exact allowed file) passes', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'm162-ok-'));
-  try {
-    const ok = join(dir, 'src', 'entropy', 'ok.mjs');
-    mkdirSync(dirname(ok), { recursive: true });
-    writeFileSync(ok, readFileSync(join(FIX, 'call-getRandomValues.mjs')));
-    const r = spawnSync(process.execPath, ['--import', BACKSTOP, ok], {
-      cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: ok },
-    });
-    assert.equal(r.status, 0, `call from src/entropy must pass:\n${r.stdout}\n${r.stderr}`);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+test('NIT: ENTROPY_BACKSTOP_ALLOWED is removed; setting it makes the backstop refuse to run', () => {
+  const r = spawnSync(process.execPath, ['--import', BACKSTOP, '-e', 'console.log("should-not-run")'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: '/tmp/should-not-allow' },
+  });
+  assert.notEqual(r.status, 0, `override must refuse:\n${r.stdout}\n${r.stderr}`);
+  assert.match(`${r.stderr}\n${r.stdout}`, /ENTROPY_BACKSTOP_ALLOWED is set/);
+  assert.doesNotMatch(`${r.stderr}\n${r.stdout}`, /should-not-run/);
 });
 
 test('G-29: hooks are frozen; an unwrap attempt does not let a planted call through', () => {
@@ -132,7 +128,7 @@ test('G-29: hooks are frozen; an unwrap attempt does not let a planted call thro
     writeFileSync(planted, readFileSync(join(FIX, 'unwrap-getRandomValues.mjs')));
     const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+      env: { ...process.env },
     });
     assert.notEqual(r.status, 0, `unwrap + planted call must fail:\n${r.stdout}\n${r.stderr}`);
     assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop:/);
@@ -155,7 +151,7 @@ test('M-162: prefix-shaped path src/entropy.evil is rejected under exact matchin
     writeFileSync(allowedFile, 'export {}\n');
     const r = spawnSync(process.execPath, ['--import', BACKSTOP, evil], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: `${allowedFile}:${allowedDir}` },
+      env: { ...process.env },
     });
     assert.notEqual(r.status, 0, `src/entropy.evil must fail exact match:\n${r.stdout}\n${r.stderr}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -210,7 +206,7 @@ for (const id of ENTRY_POINT_IDS) {
       writeFileSync(allowed, 'export {}\n');
       const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
         cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-        env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+        env: { ...process.env },
       });
       assert.notEqual(r.status, 0, `planted ${id} must fail:\n${r.stdout}\n${r.stderr}`);
       assert.match(`${r.stderr}\n${r.stdout}`, /entropy-backstop:/);
@@ -245,7 +241,7 @@ require('node:crypto').randomBytes(1);
 `);
     const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+      env: { ...process.env },
     });
     assert.notEqual(r.status, 0, `prepareStackTrace spoof must fail:\n${r.stdout}\n${r.stderr}`);
     assert.match(`${r.stderr}\n${r.stdout}`, /prepareStackTrace|entropy-backstop:/);

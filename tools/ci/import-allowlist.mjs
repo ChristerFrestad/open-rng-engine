@@ -88,7 +88,7 @@
 //          .constructor() and the MX-12 case: claims-lint --surface p8-package on an embedded key-only plant must be red).
 // PENDING: the dist/ grep half (no packed core yet).
 // Usage: node tools/ci/import-allowlist.mjs [root] [--phase-exit]   --self-test runs the known-bad fixtures.
-import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, relative, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -126,6 +126,37 @@ function walk(d, out = []) {
   let names; try { names = readdirSync(d); } catch { return out; }
   for (const n of names.sort()) { if (n === 'node_modules') continue; const p = join(d, n); const s = statSync(p); if (s.isDirectory()) walk(p, out); else if (EXT.test(n)) out.push(p); }
   return out;
+}
+
+function walkSymlinks(d, out = []) {
+  let names; try { names = readdirSync(d); } catch { return out; }
+  for (const n of names.sort()) {
+    if (n === 'node_modules' || n === '.git') continue;
+    const p = join(d, n);
+    let st;
+    try { st = lstatSync(p); } catch { continue; }
+    if (st.isSymbolicLink()) out.push(p);
+    else if (st.isDirectory()) walkSymlinks(p, out);
+  }
+  return out;
+}
+
+export function untrackedSymlinkHits(root) {
+  const hits = [];
+  const tracked = new Set();
+  if (existsSync(join(root, '.git'))) {
+    const ls = spawnSync('git', ['ls-files', '-z', ...SCAN_ROOTS], { cwd: root, encoding: 'buffer' });
+    if (ls.status === 0) {
+      for (const f of ls.stdout.toString('utf8').split('\0').filter(Boolean)) tracked.add(posixRel(root, join(root, f)));
+    }
+  }
+  for (const r of SCAN_ROOTS) {
+    for (const abs of walkSymlinks(join(root, r))) {
+      const rel = posixRel(root, abs);
+      if (!tracked.has(rel)) hits.push(`${rel}:1: rule27-untracked-symlink untracked symlink under a scan root is red`);
+    }
+  }
+  return hits;
 }
 
 // Returns [noComments, noCommentsNoStrings]; both keep length and newlines so offsets map to lines.
@@ -1120,6 +1151,7 @@ export function entropyTriggers(root, { phaseExit = false } = {}) {
 
 export function scanTree(root, { phaseExit = false, computedLiteralAllow, treatStringAsSafe, reflectiveBases, skipChecker } = {}) {
   const hits = []; const pairs = []; const reports = [];
+  hits.push(...untrackedSymlinkHits(root));
   const absFiles = SCAN_ROOTS.flatMap((r) => walk(join(root, r)));
   const files = [];
   for (const f of absFiles) {
@@ -1309,7 +1341,10 @@ export const BAD = {
   'import-bare-child_process': "import { spawn } from 'child_process';\n",
   'import-data-url': "import x from 'data:text/javascript,export default 1';\n",
   'import-blob-url': "import x from 'blob:https://example.com/id';\n",
+  'process-argv': 'process.argv;\n',
+  'process-execArgv': 'process.execArgv;\n',
 };
+
 
 function m161KeyForms(target) {
   const mid = Math.ceil(target.length / 2);
@@ -1439,6 +1474,8 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   'import-bare-child_process': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
   'import-data-url': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
   'import-blob-url': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'process-argv': /^src\/mapping\/bad\.ts:\d+: rule27-process-reach /,
+  'process-execArgv': /^src\/mapping\/bad\.ts:\d+: rule27-process-reach /,
 };
 const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf|object-api|banned-string-literal|type-assertion|computed-key) /;
 for (const name of Object.keys(BAD)) {
@@ -1463,7 +1500,7 @@ export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
 }
 
-export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control'];
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control', 'untracked-symlink'];
 function mx12Case(base) {
   const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
   const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
@@ -1589,6 +1626,16 @@ export function selfTest() {
       if (!ntHits.some((h) => h.startsWith('src/health/notes.json') && /rule27-tracked-non-ts /.test(h))) fails.push(`tracked .json was not red:\n${ntHits.join('\n')}`);
       if (!ntHits.some((h) => h.startsWith('src/health/extensionless') && /rule27-tracked-non-ts /.test(h))) fails.push(`tracked extensionless was not red:\n${ntHits.join('\n')}`);
     }
+
+    // NIT: an untracked symlink under a scan root is red.
+    const sl = join(base, 'untracked-symlink');
+    writeFixture(sl);
+    mkdirSync(join(sl, 'src/health'), { recursive: true });
+    writeFileSync(join(sl, 'src/health/target.ts'), 'export const k = 1;\n');
+    const link = join(sl, 'src/health/link.ts');
+    spawnSync('ln', ['-s', 'target.ts', link], { cwd: sl });
+    const slHits = scanTree(sl).hits;
+    if (!slHits.some((h) => /rule27-untracked-symlink /.test(h))) fails.push(`untracked-symlink fixture was not red:\n${slHits.join('\n')}`);
 
     // G-20 / MX-12: claims-lint --surface p8-package must lint keys (embedded escaped key-only plant red, clean control green).
     fails.push(...mx12Case(base));

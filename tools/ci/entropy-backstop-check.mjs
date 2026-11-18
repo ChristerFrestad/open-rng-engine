@@ -93,6 +93,16 @@ try {
 
 const dir = mkdtempSync(join(tmpdir(), 'bs-check-'));
 let failed = 0;
+{
+  const r = spawnSync(process.execPath, ['--import', BACKSTOP, '-e', 'console.log("should-not-run")'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: '/tmp/should-not-allow' },
+  });
+  if (r.status === 0 || !/ENTROPY_BACKSTOP_ALLOWED is set/.test(`${r.stderr}\n${r.stdout}`)) {
+    console.error(`entropy-backstop-check: ENTROPY_BACKSTOP_ALLOWED did not make the backstop refuse to run (status ${r.status})\n${r.stdout}\n${r.stderr}`);
+    failed += 1;
+  }
+}
 try {
   const planted = join(dir, 'src', 'health', 'planted.mjs');
   const allowed = join(dir, 'src', 'entropy', 'ok.mjs');
@@ -103,7 +113,7 @@ try {
     writeFileSync(planted, plantedScript(id));
     const r = spawnSync(process.execPath, ['--import', BACKSTOP, planted], {
       cwd: ROOT, encoding: 'utf8', timeout: 20_000,
-      env: { ...process.env, ENTROPY_BACKSTOP_ALLOWED: allowed },
+      env: { ...process.env },
     });
     if (r.status === 0) {
       console.error(`entropy-backstop-check: planted call of ${id} was not rejected\n${r.stdout}\n${r.stderr}`);

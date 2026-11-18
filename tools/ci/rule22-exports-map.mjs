@@ -1,25 +1,57 @@
 #!/usr/bin/env node
 // Rule 22 — core exports allowlist (LIVE, in check:ph0).
 // Spec (read-only): PLAN r4.9 L136 R-28, L537, L825 item (22); quality v5.5.7 L278 QR-33, L584 CI 15.
-// The core package.json `exports` keys must be exactly {".", "./audited", "./package.json"}:
-// 0 keys outside that set, 0 wildcards, 0 ./drbg; no export path reaches -testing,
-// -edge-experimental, packages/drbg, packages/mapping or packages/capability internals.
+// The core package.json `exports` keys must be exactly {".", "./audited", "./package.json"}
+// and each key is pinned to exactly one target (EXPORT_TARGET_PINS). Targets that are
+// absolute, '../', or under node_modules are red. `imports`, `browser` and `typesVersions`
+// are red; `main` is red unless it equals the pinned '.' target.
 //
-// PENDING (not guessed):
-// - L825(22) / QR-33 "core API report" and "game-pattern symbol" in the exports map or API report:
-//   what artifact is the core API report, and what is the exact QR-33 game-pattern list to scan?
-// - L825(22) "import edge to labkit or docs/examples": is that in scope of rule 22 (exports map)
-//   or of the import-graph / rule 24 check? (Not implemented here.)
+// Interim exported-name scan (Q1, until api-report.md exists at the first packed build):
+// follow '.' and './audited' through every export target, `export *` and re-export.
+// Red on any export originating in src/entropy, on any raw-bytes API, and on any QR-33
+// term appearing as a camelCase/_ name segment of a core export. The labkit and
+// docs/examples import edge is in this rule. A 'card' identifier in docs/examples
+// stays green when the core does not import or re-export it.
+//
+// PENDING: the api-extractor api-report.md half starts at the first packed build (PH3).
+// The `files` field and `npm audit signatures` in CI are backlog preconditions for that
+// first packed build; they are not added to package.json while the current G4 holds.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve, sep, isAbsolute, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 export const REQUIRED_EXPORT_KEYS = Object.freeze(['.', './audited', './package.json']);
+export const EXPORT_TARGET_PINS = Object.freeze({
+  '.': './src/index.ts',
+  './audited': './src/audited/index.ts',
+  './package.json': './package.json',
+});
 export const FORBIDDEN_EXPORT_SEGMENTS = Object.freeze([
   '-testing', '-edge-experimental', 'packages/drbg', 'packages/mapping', 'packages/capability',
 ]);
+export const QR33_TERM_ESCAPES = Object.freeze([
+  '\\u0064\\u0065\\u0063\\u006b',
+  '\\u0063\\u0061\\u0072\\u0064',
+  '\\u0073\\u0068\\u006f\\u0065',
+  '\\u0072\\u0065\\u0065\\u006c',
+  '\\u0073\\u0074\\u0072\\u0069\\u0070',
+  '\\u0070\\u0061\\u0079\\u006c\\u0069\\u006e\\u0065',
+  '\\u0070\\u0061\\u0079\\u0074\\u0061\\u0062\\u006c\\u0065',
+  '\\u0072\\u0074\\u0070',
+  '\\u0072\\u006f\\u0075\\u006c\\u0065\\u0074\\u0074\\u0065',
+  '\\u0070\\u006f\\u0063\\u006b\\u0065\\u0074',
+  '\\u0070\\u006f\\u006b\\u0065\\u0072',
+  '\\u0068\\u006f\\u006c\\u0064\\u0065\\u006d',
+  '\\u0068\\u0061\\u006e\\u0064',
+  '\\u0062\\u0075\\u0072\\u006e',
+]);
+export const RAW_BYTES_APIS = Object.freeze([
+  'randomFillSync', 'randomBytes', 'randomFill', 'getRandomValues', 'randomUUID', 'randomInt',
+]);
+export const PUBLIC_ENTRY_KEYS = Object.freeze(['.', './audited']);
 
 export function uEscape(s) {
   return [...String(s)].map((c) => {
@@ -32,6 +64,7 @@ export function uEscape(s) {
 export function uUnescape(s) {
   return String(s).replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
+export const QR33_TERMS = Object.freeze(QR33_TERM_ESCAPES.map(uUnescape));
 
 function collectStrings(v, out = []) {
   if (typeof v === 'string') out.push(v);
@@ -51,6 +84,168 @@ function pathReachesForbidden(p) {
     } else if (n.includes(seg)) return seg;
   }
   return null;
+}
+
+
+function posix(p) { return String(p).split(sep).join('/'); }
+
+export function nameSegments(id) {
+  return String(id)
+    .split(/_+/g)
+    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
+    .map((s) => s.toLowerCase())
+    .filter(Boolean);
+}
+
+export function qr33Hit(name) {
+  const segs = new Set(nameSegments(name));
+  for (const t of QR33_TERMS) if (segs.has(t)) return t;
+  return null;
+}
+
+function isPinnedScalar(val) {
+  return typeof val === 'string';
+}
+
+export function targetIsBannedShape(t) {
+  if (typeof t !== 'string' || t.length === 0) return 'empty or non-string';
+  const n = t.split('\\').join('/');
+  if (isAbsolute(n) || /^[A-Za-z]:\//.test(n) || n.startsWith('/')) return 'absolute';
+  if (n === '..' || n.startsWith('../') || n.includes('/../')) return "'../'";
+  if (n.split('/').includes('node_modules')) return 'node_modules';
+  return null;
+}
+
+function resolveRel(fromRel, spec) {
+  const base = posix(fromRel).split('/').slice(0, -1).join('/');
+  return posix(join(base || '.', spec)).replace(/^\.\//, '');
+}
+
+function isLabkitOrExamplesSpec(fromRel, spec) {
+  const n = posix(spec);
+  if (n === 'labkit' || n.startsWith('labkit/') || n.split('/').includes('labkit')) return 'labkit';
+  if (n.includes('docs/examples') || n.startsWith('docs/examples')) return 'docs/examples';
+  if (n.startsWith('.')) {
+    const dest = resolveRel(fromRel, n);
+    if (dest === 'docs/examples' || dest.startsWith('docs/examples/')) return 'docs/examples';
+    if (dest === 'labkit' || dest.startsWith('labkit/') || dest.split('/').includes('labkit')) return 'labkit';
+  }
+  return null;
+}
+
+function isSourceFile(rel) {
+  return /\.(ts|mts|cts|js|mjs|cjs)$/.test(rel);
+}
+
+function exportedBindings(sf) {
+  const out = [];
+  for (const st of sf.statements) {
+    if (ts.isExportDeclaration(st)) {
+      const spec = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
+      if (st.exportClause && ts.isNamedExports(st.exportClause)) {
+        for (const el of st.exportClause.elements) {
+          out.push({ name: el.name.text, local: (el.propertyName ?? el.name).text, from: spec, star: false, typ: !!st.isTypeOnly });
+        }
+      } else if (st.exportClause && ts.isNamespaceExport(st.exportClause)) {
+        out.push({ name: st.exportClause.name.text, local: st.exportClause.name.text, from: spec, star: false, ns: true });
+      } else if (!st.exportClause && spec) {
+        out.push({ name: '*', local: '*', from: spec, star: true });
+      }
+    }
+    if (ts.isExportAssignment(st) && !st.isExportEquals) out.push({ name: 'default', local: 'default', from: null, star: false });
+    const mods = st.modifiers ?? [];
+    const exported = mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    if (!exported) continue;
+    if (ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st) || ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st) || ts.isEnumDeclaration(st)) {
+      if (st.name) out.push({ name: st.name.text, local: st.name.text, from: null, star: false });
+    }
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) out.push({ name: d.name.text, local: d.name.text, from: null, star: false });
+      }
+    }
+  }
+  return out;
+}
+
+function specifiersOf(sf) {
+  const out = [];
+  const take = (spec) => { if (spec && ts.isStringLiteral(spec)) out.push(spec.text); };
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) take(node.moduleSpecifier);
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) take(node.arguments[0]);
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') take(node.arguments[0]);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+export function walkPublicExports(root, entries) {
+  const hits = [];
+  const seen = new Set();
+  const todo = entries.map((rel) => ({ rel: posix(rel), fromPublic: true }));
+  const emit = (rel, name, originRel) => {
+    if (RAW_BYTES_APIS.includes(name)) hits.push(`${rel}:1: rule22-exports raw-bytes API '${name}' is in the public core API`);
+    const q = qr33Hit(name);
+    if (q) hits.push(`${rel}:1: rule22-exports core export '${name}' contains QR-33 term '${q}'`);
+    if (originRel && posix(originRel).startsWith('src/entropy/')) {
+      hits.push(`${rel}:1: rule22-exports public API re-exports '${name}' originating in ${originRel}`);
+    }
+  };
+  const visitFile = (rel, followExports) => {
+    const abs = join(root, rel);
+    if (!existsSync(abs)) return;
+    if (!isSourceFile(rel)) return;
+    const src = readFileSync(abs, 'utf8');
+    const sf = ts.createSourceFile(rel, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    for (const spec of specifiersOf(sf)) {
+      const edge = isLabkitOrExamplesSpec(rel, spec);
+      if (edge) hits.push(`${rel}:1: rule22-exports core import edge to ${edge} ('${spec}')`);
+      if (typeof spec === 'string' && spec.startsWith('.')) {
+        const dest = resolveRel(rel, spec);
+        const key = `walk:${dest}`;
+        if (!seen.has(key)) { seen.add(key); visitFile(dest, false); }
+      }
+    }
+    if (!followExports) return;
+    for (const b of exportedBindings(sf)) {
+      if (b.star && b.from && b.from.startsWith('.')) {
+        const dest = resolveRel(rel, b.from);
+        const destAbs = join(root, dest);
+        if (existsSync(destAbs) && isSourceFile(dest)) {
+          const destSf = ts.createSourceFile(dest, readFileSync(destAbs, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+          for (const inner of exportedBindings(destSf)) {
+            if (inner.star) {
+              const key = `star:${dest}:${inner.from}`;
+              if (!seen.has(key) && inner.from && inner.from.startsWith('.')) {
+                seen.add(key);
+                visitFile(resolveRel(dest, inner.from), true);
+              }
+            } else {
+              emit(rel, inner.name, dest);
+              if (inner.from && inner.from.startsWith('.')) visitFile(resolveRel(dest, inner.from), true);
+            }
+          }
+        }
+        continue;
+      }
+      if (b.from && b.from.startsWith('.')) {
+        const dest = resolveRel(rel, b.from);
+        emit(rel, b.name, dest);
+        visitFile(dest, true);
+      } else {
+        emit(rel, b.name, rel);
+      }
+    }
+  };
+  for (const { rel } of todo) {
+    const key = `entry:${rel}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    visitFile(rel, true);
+  }
+  return hits;
 }
 
 export function scanExports(pkg, { path = 'package.json' } = {}) {
@@ -79,23 +274,53 @@ export function scanExports(pkg, { path = 'package.json' } = {}) {
   for (const k of keys) {
     if (k.includes('*')) hits.push(`${path}:1: rule22-exports key '${k}' is a wildcard`);
     if (k === './drbg' || k.startsWith('./drbg/')) hits.push(`${path}:1: rule22-exports key '${k}' is ./drbg`);
-    for (const val of collectStrings(exp[k])) {
-      if (typeof val === 'string' && val.includes('*')) hits.push(`${path}:1: rule22-exports target '${val}' of key '${k}' is a wildcard`);
-      const bad = pathReachesForbidden(val);
-      if (bad) hits.push(`${path}:1: rule22-exports key '${k}' reaches ${bad} (${val})`);
+    const val = exp[k];
+    const pin = EXPORT_TARGET_PINS[k];
+    if (pin !== undefined) {
+      if (!isPinnedScalar(val) || val !== pin) {
+        hits.push(`${path}:1: rule22-exports key '${k}' must be pinned to exactly '${pin}' (got ${JSON.stringify(val)})`);
+      }
+    }
+    for (const t of collectStrings(val)) {
+      if (typeof t === 'string' && t.includes('*')) hits.push(`${path}:1: rule22-exports target '${t}' of key '${k}' is a wildcard`);
+      const bad = pathReachesForbidden(t);
+      if (bad) hits.push(`${path}:1: rule22-exports key '${k}' reaches ${bad} (${t})`);
+      const shape = targetIsBannedShape(t);
+      if (shape) hits.push(`${path}:1: rule22-exports key '${k}' target '${t}' is ${shape}`);
     }
   }
+  for (const field of ['imports', 'browser', 'typesVersions']) {
+    if (pkg[field] !== undefined) hits.push(`${path}:1: rule22-exports '${field}' is red`);
+  }
+  if (pkg.main !== undefined && pkg.main !== EXPORT_TARGET_PINS['.']) {
+    hits.push(`${path}:1: rule22-exports 'main' must be absent or exactly the pinned '.' target '${EXPORT_TARGET_PINS['.']}'; found ${JSON.stringify(pkg.main)}`);
+  }
   return hits;
+}
+
+export function publicEntryRels(pkg) {
+  const exp = pkg && pkg.exports;
+  const rels = [];
+  if (exp && typeof exp === 'object' && !Array.isArray(exp)) {
+    for (const key of PUBLIC_ENTRY_KEYS) {
+      const val = exp[key];
+      const pin = EXPORT_TARGET_PINS[key];
+      const t = (typeof val === 'string' ? val : pin) ?? pin;
+      if (typeof t === 'string' && t.startsWith('.')) rels.push(posix(t.replace(/^\.\//, '')));
+    }
+  }
+  return [...new Set(rels)];
 }
 
 export function scanRoot(root) {
   const file = join(root, 'package.json');
   if (!existsSync(file)) return [`package.json:1: rule22-exports missing package.json`];
-  try {
-    return scanExports(JSON.parse(readFileSync(file, 'utf8')), { path: 'package.json' });
-  } catch (e) {
-    return [`package.json:1: rule22-exports unreadable package.json (${e.message})`];
-  }
+  let pkg;
+  try { pkg = JSON.parse(readFileSync(file, 'utf8')); }
+  catch (e) { return [`package.json:1: rule22-exports unreadable package.json (${e.message})`]; }
+  const hits = scanExports(pkg, { path: 'package.json' });
+  hits.push(...walkPublicExports(root, publicEntryRels(pkg)));
+  return hits;
 }
 
 // Known-bad fixtures stored \u-escaped (CTO addendum 07:45), materialised only in scratch.
@@ -109,6 +334,15 @@ export const BAD_FIXTURES = {
   'extra-drbg-key': { pkg: { ...GOOD_PKG, exports: { '.': './src/index.ts', './audited': './src/audited/index.ts', './package.json': './package.json', './drbg': './packages/drbg/src/index.ts' } }, reason: /rule22-exports/ },
   'wildcard-key': { pkg: { ...GOOD_PKG, exports: { '.': './src/index.ts', './audited': './src/audited/index.ts', './package.json': './package.json', './*': './src/*' } }, reason: /wildcard/ },
   'mapping-target': { pkg: { ...GOOD_PKG, exports: { '.': './packages/mapping/src/index.ts', './audited': './src/audited/index.ts', './package.json': './package.json' } }, reason: /packages\/mapping/ },
+  'plain-extra-key': { pkg: { ...GOOD_PKG, exports: { '.': './src/index.ts', './audited': './src/audited/index.ts', './package.json': './package.json', './internal': './src/health/index.ts' } }, reason: /extra \.\/internal/ },
+  'absolute-target': { pkg: { ...GOOD_PKG, exports: { '.': '/tmp/evil.ts', './audited': './src/audited/index.ts', './package.json': './package.json' } }, reason: /is absolute/ },
+  'dotdot-target': { pkg: { ...GOOD_PKG, exports: { '.': '../evil.ts', './audited': './src/audited/index.ts', './package.json': './package.json' } }, reason: /is '\.\.\/'/ },
+  'node-modules-target': { pkg: { ...GOOD_PKG, exports: { '.': './node_modules/typescript/lib/typescript.js', './audited': './src/audited/index.ts', './package.json': './package.json' } }, reason: /is node_modules/ },
+  'imports-field': { pkg: { ...GOOD_PKG, imports: { '#x': './src/index.ts' } }, reason: /'imports' is red/ },
+  'browser-field': { pkg: { ...GOOD_PKG, browser: './src/index.ts' }, reason: /'browser' is red/ },
+  'typesVersions-field': { pkg: { ...GOOD_PKG, typesVersions: { '*': { '*': ['./src/index.ts'] } } }, reason: /'typesVersions' is red/ },
+  'main-not-pinned': { pkg: { ...GOOD_PKG, main: './src/verify/index.ts' }, reason: /'main' must be absent or exactly the pinned/ },
+  'wrong-pin-package-json': { pkg: { ...GOOD_PKG, exports: { '.': './src/index.ts', './audited': './src/audited/index.ts', './package.json': './src/verify/index.ts' } }, reason: /key '\.\/package\.json' must be pinned to exactly '\.\/package\.json'/ },
 };
 
 function writeJson(dir, rel, obj) {
@@ -126,6 +360,35 @@ export function selfTest() {
     writeFileSync(join(ctl, 'src/audited/index.ts'), 'export {};\n');
     const ch = scanRoot(ctl);
     if (ch.length) fails.push(`control not green:\n${ch.join('\n')}`);
+    // 'card' in docs/examples stays green when the core does not import or re-export it.
+    const cardName = uUnescape(QR33_TERM_ESCAPES[1]);
+    const examples = join(ctl, 'docs/examples');
+    mkdirSync(examples, { recursive: true });
+    writeFileSync(join(examples, 'demo.ts'), `export const ${cardName} = 1;\n`);
+    const exHits = scanRoot(ctl);
+    if (exHits.length) fails.push(`docs/examples ${cardName} control not green:\n${exHits.join('\n')}`);
+    const graphCases = [
+      {
+        name: 'export-star-entropy',
+        files: { 'src/index.ts': "export * from './entropy/index.ts';\n", 'src/entropy/index.ts': 'export const randomFillSync = 1;\n', 'src/audited/index.ts': 'export {};\n' },
+        reason: /originating in src\/entropy\//,
+      },
+      {
+        name: 'qr33-export-name',
+        files: { 'src/index.ts': `export const ${cardName} = 1;\n`, 'src/audited/index.ts': 'export {};\n' },
+        reason: /QR-33 term/,
+      },
+      {
+        name: 'labkit-import-edge',
+        files: { 'src/index.ts': "import x from 'labkit';\nexport const n = 1;\n", 'src/audited/index.ts': 'export {};\n' },
+        reason: /import edge to labkit/,
+      },
+      {
+        name: 'docs-examples-import-edge',
+        files: { 'src/index.ts': "import x from '../docs/examples/demo.ts';\nexport const n = 1;\n", 'src/audited/index.ts': 'export {};\n' },
+        reason: /import edge to docs\/examples/,
+      },
+    ];
     for (const [name, { pkg, reason }] of Object.entries(BAD_FIXTURES)) {
       // Materialise from a \u-escaped form; the escaped source is what we keep in-repo as the fixture text.
       const escaped = uEscape(JSON.stringify(pkg));
@@ -134,12 +397,21 @@ export function selfTest() {
       const hits = scanRoot(d);
       if (!hits.some((h) => reason.test(h))) fails.push(`${name} did not turn rule 22 red:\n${hits.join('\n')}`);
     }
+    for (const c of graphCases) {
+      const d = join(base, c.name);
+      writeJson(d, 'package.json', GOOD_PKG);
+      for (const [rel, src] of Object.entries(c.files)) {
+        const fp = join(d, rel); mkdirSync(dirname(fp), { recursive: true }); writeFileSync(fp, src);
+      }
+      const hits = scanRoot(d);
+      if (!hits.some((h) => c.reason.test(h))) fails.push(`${c.name} did not turn rule 22 red:\n${hits.join('\n')}`);
+    }
   } finally { rmSync(base, { recursive: true, force: true }); }
   if (fails.length) {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length} known-bad fixtures red, control green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 4} known-bad fixtures red, control green`);
 }
 
 const here = fileURLToPath(import.meta.url);

@@ -2,32 +2,31 @@
 // Rule 24 — production module-graph / RQ-FC-8 reachability (LIVE, in check:ph0).
 // Spec (read-only): PLAN r4.9 L146 R-38, L198 R-88, L496, L825 item (24);
 // quality v5.5.7 L593 CI 24, L616 RQ-FC-8; cto-g1-spec L74 P-a.
-// From production entries "." and "./audited" (or src/index.ts, src/audited/index.ts):
-// nothing under a `verify/` path segment is reachable; resetCht is not reachable;
-// the core does not import the proposed cycling-adapter package name.
+// Walk every exports-map target (G-31), including './package.json'. An unresolved
+// import is red (G-35). Nothing under a `verify/` path segment is reachable from
+// '.' or './audited'. The verification-binding symbol set is every export of any
+// module under a verify/ segment, plus resetCht, testMinter and replaySource;
+// reaching any of them from '.' or './audited' is red.
+// The cycling-adapter name `open-rng-engine-cycling` is PROVISIONAL until the G1
+// name freeze (held as a single constant; also forbidden as a future package path).
 //
-// PENDING (not guessed):
-// - Packed-tarball / dist metafile / text-grep backstop of the published artefact:
-//   there is no packed core tarball or bundler metafile yet. When should that half start,
-//   and which exact tarball/metafile path is authoritative?
-// - Official cycling-adapter package name: PLAN L198 / g1-spec L74 say the name is
-//   proposed as `open-rng-engine-cycling` and "named at G1". Is that the frozen
-//   forbidden name, or must the check wait for the G1 name?
-// - Exhaustive all-config-paths fixture (R-30 / RQ-FC-8): the core has no config;
-//   what is the exact closed list of config / env / argument paths to try?
-// - Complete "verification-binding symbol" set beyond the named `resetCht`
-//   (quality L593: "`resetCht` incl."): which other symbols are in the set?
-// - Binding AST / ≤ 40-line cap is PLAN rule 38 (L825(24) says it is not repeated here).
+// PENDING: packed-tarball / dist metafile / text-grep backstop starts at the first
+// packed build (same as rule 27's dist half). Official adapter name is named at G1.
+// all-config-paths fixture (RQ-FC-8): process.env / argv / execArgv are AST-banned
+// in core (PROCESS_MEMBERS_ALLOWED is empty; confirmed with fixtures). Binding AST
+// / <= 40-line cap is PLAN rule 38, not repeated here. `files` and `npm audit
+// signatures` in CI are backlog preconditions for the first packed build.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 export const PRODUCTION_ENTRY_FALLBACK = Object.freeze(['src/index.ts', 'src/audited/index.ts']);
-export const PROPOSED_CYCLING_ADAPTER = 'open-rng-engine-cycling'; // proposed; official name PENDING
-export const RESET_SYMBOLS = Object.freeze(['resetCht']);
+export const PROPOSED_CYCLING_ADAPTER = 'open-rng-engine-cycling'; // PROVISIONAL until the G1 name freeze; not official
+export const BINDING_SYMBOL_ALWAYS = Object.freeze(['resetCht', 'testMinter', 'replaySource']);
+export const RESET_SYMBOLS = BINDING_SYMBOL_ALWAYS; // back-compat alias
 
 export function uEscape(s) {
   return [...String(s)].map((c) => {
@@ -62,7 +61,7 @@ export function productionEntries(root) {
       const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
       const exp = pkg.exports;
       if (exp && typeof exp === 'object' && !Array.isArray(exp)) {
-        for (const key of ['.', './audited']) {
+        for (const key of Object.keys(exp)) {
           if (exp[key] == null) continue;
           for (const t of collectStrings(exp[key])) {
             if (typeof t === 'string' && t.startsWith('.')) entries.push(posix(t.replace(/^\.\//, '')));
@@ -99,6 +98,44 @@ export function specifiersOf(src, rel) {
   return out;
 }
 
+export function collectExportedNames(src, rel) {
+  const sf = ts.createSourceFile(rel, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const names = [];
+  for (const st of sf.statements) {
+    if (ts.isExportDeclaration(st) && st.exportClause && ts.isNamedExports(st.exportClause)) {
+      for (const el of st.exportClause.elements) names.push(el.name.text);
+    }
+    const mods = st.modifiers ?? [];
+    if (!mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) continue;
+    if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st) || ts.isInterfaceDeclaration(st)
+      || ts.isTypeAliasDeclaration(st) || ts.isEnumDeclaration(st)) && st.name) names.push(st.name.text);
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) names.push(d.name.text);
+    }
+  }
+  return names;
+}
+
+export function verificationBindingSymbols(root) {
+  const names = new Set(BINDING_SYMBOL_ALWAYS);
+  const visit = (dirRel) => {
+    const abs = dirRel ? join(root, dirRel) : root;
+    let ents;
+    try { ents = readdirSync(abs, { withFileTypes: true }); } catch { return; }
+    for (const ent of ents) {
+      if (ent.name === 'node_modules' || ent.name === '.git') continue;
+      const rel = posix(dirRel ? join(dirRel, ent.name) : ent.name);
+      if (ent.isDirectory()) visit(rel);
+      else if (/\.(ts|mts|cts)$/.test(ent.name) && rel.split('/').includes('verify')) {
+        const src = readFileSync(join(root, rel), 'utf8');
+        for (const n of collectExportedNames(src, rel)) names.add(n);
+      }
+    }
+  };
+  visit('');
+  return [...names];
+}
+
 export function hasIdentifier(src, rel, names) {
   const set = new Set(names);
   const sf = ts.createSourceFile(rel, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -116,39 +153,81 @@ function isCyclingSpec(spec) {
   return spec === PROPOSED_CYCLING_ADAPTER || spec.startsWith(PROPOSED_CYCLING_ADAPTER + '/');
 }
 
-export function scanGraph(root) {
+function walkFrom(root, startEntries, { checkVerify, checkBinding, checkCycling, failUnresolved, bindingSymbols }) {
   const hits = [];
-  const entries = productionEntries(root);
-  if (!entries.length) {
-    hits.push(`.:1: rule24-graph no production entry ('.' / './audited' or src/index.ts, src/audited/index.ts) was found`);
-    return { hits, entries, reachable: [] };
-  }
   const seen = new Set();
-  const todo = [...entries];
+  const todo = [...startEntries];
   while (todo.length) {
     const rel = posix(todo.pop());
     if (seen.has(rel)) continue;
     const abs = join(root, rel);
-    if (!existsSync(abs)) continue;
+    if (!existsSync(abs)) {
+      if (failUnresolved) hits.push(`${rel}:1: rule24-graph unresolved import or export target '${rel}'`);
+      continue;
+    }
     seen.add(rel);
+    if (!/\.(ts|mts|cts|js|mjs|cjs)$/.test(rel)) continue;
     const src = readFileSync(abs, 'utf8');
-    if (underVerify(rel)) {
+    if (checkVerify && underVerify(rel)) {
       hits.push(`${rel}:1: rule24-graph production entry reaches a module under verify/ (${rel})`);
     }
-    const reset = hasIdentifier(src, rel, RESET_SYMBOLS);
-    if (reset) hits.push(`${rel}:1: rule24-graph verification-binding symbol '${reset}' is reachable from a production entry`);
+    if (checkBinding) {
+      const reset = hasIdentifier(src, rel, bindingSymbols);
+      if (reset) hits.push(`${rel}:1: rule24-graph verification-binding symbol '${reset}' is reachable from a production entry`);
+    }
     for (const { spec } of specifiersOf(src, rel)) {
-      if (isCyclingSpec(spec)) {
+      if (checkCycling && isCyclingSpec(spec)) {
         hits.push(`${rel}:1: rule24-graph core imports the cycling adapter '${spec}'`);
         continue;
       }
       if (typeof spec === 'string' && spec.startsWith('.')) {
         const dest = resolveRel(rel, spec);
+        if (failUnresolved && !existsSync(join(root, dest))) {
+          hits.push(`${rel}:1: rule24-graph unresolved import '${spec}' -> '${dest}'`);
+          continue;
+        }
         todo.push(dest);
       }
     }
   }
-  return { hits, entries, reachable: [...seen] };
+  return { hits, reachable: [...seen] };
+}
+
+function publicEntries(root) {
+  const entries = [];
+  const pkgPath = join(root, 'package.json');
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+      const exp = pkg.exports;
+      if (exp && typeof exp === 'object' && !Array.isArray(exp)) {
+        for (const key of ['.', './audited']) {
+          if (exp[key] == null) continue;
+          for (const t of collectStrings(exp[key])) {
+            if (typeof t === 'string' && t.startsWith('.')) entries.push(posix(t.replace(/^\.\//, '')));
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  if (!entries.length) entries.push(...PRODUCTION_ENTRY_FALLBACK);
+  return [...new Set(entries)].filter((rel) => existsSync(join(root, rel)));
+}
+
+export function scanGraph(root) {
+  const hits = [];
+  const entries = productionEntries(root);
+  if (!entries.length) {
+    hits.push(`.:1: rule24-graph no production entry ('.' / './audited' / every exports target, or src/index.ts, src/audited/index.ts) was found`);
+    return { hits, entries, reachable: [] };
+  }
+  const bindingSymbols = verificationBindingSymbols(root);
+  const all = walkFrom(root, entries, { checkVerify: false, checkBinding: false, checkCycling: true, failUnresolved: true, bindingSymbols });
+  hits.push(...all.hits);
+  const pub = publicEntries(root);
+  const pubWalk = walkFrom(root, pub, { checkVerify: true, checkBinding: true, checkCycling: false, failUnresolved: false, bindingSymbols });
+  hits.push(...pubWalk.hits);
+  return { hits, entries, reachable: [...new Set([...all.reachable, ...pubWalk.reachable])] };
 }
 
 export function scanRoot(root) {
@@ -191,6 +270,29 @@ export const BAD_FIXTURES = {
       'src/audited/index.ts': 'export {};\n',
     },
     reason: /cycling adapter/,
+  },
+  'unresolved-import': {
+    files: {
+      'src/index.ts': "import { k } from './missing.ts';\nexport { k };\n",
+      'src/audited/index.ts': 'export {};\n',
+    },
+    reason: /unresolved import/,
+  },
+  'reaches-testMinter': {
+    files: {
+      'src/index.ts': "export { testMinter } from './h.ts';\n",
+      'src/h.ts': 'export function testMinter() {}\n',
+      'src/audited/index.ts': 'export {};\n',
+    },
+    reason: /verification-binding symbol 'testMinter'/,
+  },
+  'reaches-replaySource': {
+    files: {
+      'src/index.ts': "export { replaySource } from './h.ts';\n",
+      'src/h.ts': 'export function replaySource() {}\n',
+      'src/audited/index.ts': 'export {};\n',
+    },
+    reason: /verification-binding symbol 'replaySource'/,
   },
 };
 

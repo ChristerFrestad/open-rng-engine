@@ -26,7 +26,7 @@ test('rule 22: required keys are exactly ".", "./audited", "./package.json"', ()
 test('rule 22: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /4 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /17 known-bad fixtures red, control green/);
 });
 
 for (const name of Object.keys(BAD_FIXTURES)) {
@@ -61,4 +61,35 @@ test('rule 22: the previous stub exits 2 and does not kill a known-bad fixture',
 test('rule 22 is wired into check:ph0 (live + self-test)', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   assert.match(pkg.scripts['check:ph0'], /node tools\/ci\/rule22-exports-map\.mjs && node tools\/ci\/rule22-exports-map\.mjs --self-test/);
+});
+
+const OLD_R22 = new URL('./fixtures/rule22-checker-475950db.mjs', import.meta.url);
+const R22_OLD_NEW = [
+  { name: 'plain-extra-key', expectOldRed: true },
+  { name: 'absolute-target', expectOldRed: false },
+  { name: 'dotdot-target', expectOldRed: false },
+  { name: 'node-modules-target', expectOldRed: false },
+  { name: 'imports-field', expectOldRed: false },
+  { name: 'browser-field', expectOldRed: false },
+  { name: 'typesVersions-field', expectOldRed: false },
+  { name: 'main-not-pinned', expectOldRed: false },
+  { name: 'wrong-pin-package-json', expectOldRed: false },
+  { name: 'extra-drbg-key', expectOldRed: true },
+];
+test('G-31 / G-34 / G-36: each new fixture is red on the new checker; record the 475950db verdict', async () => {
+  const old = await import(OLD_R22);
+  const { BAD_FIXTURES: FIX, scanExports } = await import('../tools/ci/rule22-exports-map.mjs');
+  const rows = [];
+  for (const m of R22_OLD_NEW) {
+    const fix = FIX[m.name];
+    const oldHits = old.scanExports(fix.pkg);
+    const newHits = scanExports(fix.pkg);
+    const oldRed = oldHits.length > 0;
+    const newRed = newHits.length > 0;
+    rows.push({ name: m.name, old: oldRed ? 'RED' : 'GREEN', new: newRed ? 'RED' : 'GREEN' });
+    assert.equal(newRed, true, `${m.name} must be red:\n${newHits.join('\n')}`);
+    assert.ok(newHits.some((h) => fix.reason.test(h)), `${m.name} wrong reason:\n${newHits.join('\n')}`);
+    assert.equal(oldRed, m.expectOldRed, `${m.name} old expected ${m.expectOldRed ? 'RED' : 'GREEN'}, got ${oldRed ? 'RED' : 'GREEN'}:\n${oldHits.join('\n')}`);
+  }
+  console.log('rule22 old-vs-new table:\n' + rows.map((r) => `${r.name}: old=${r.old} new=${r.new}`).join('\n'));
 });

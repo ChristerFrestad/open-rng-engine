@@ -66,11 +66,21 @@ function normalizePath(p) {
   return resolve(normalize(s));
 }
 
-export function parseAllowedFromEnv(env = process.env) {
-  const raw = env.ENTROPY_BACKSTOP_ALLOWED;
-  if (raw == null || raw === '') return [...defaultAllowedCallers()];
-  return raw.split(':').filter(Boolean).map(normalizePath);
+export function refuseIfBackstopOverride(env = process.env) {
+  if (Object.prototype.hasOwnProperty.call(env, 'ENTROPY_BACKSTOP_ALLOWED')) {
+    const msg = 'entropy-backstop: ENTROPY_BACKSTOP_ALLOWED is set; the override was removed and check:ph0 refuses to run';
+    console.error(msg);
+    // Exit so `node --import` and check:ph0 stop immediately.
+    process.exit(2);
+  }
 }
+
+export function parseAllowedFromEnv(env = process.env) {
+  refuseIfBackstopOverride(env);
+  return [...defaultAllowedCallers()];
+}
+
+refuseIfBackstopOverride();
 
 export function parseCallerFrames(stack, { selfPath = SELF } = {}) {
   const self = normalizePath(selfPath);

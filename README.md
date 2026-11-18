@@ -23,3 +23,7 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 ## Security
 
 See [SECURITY.md](SECURITY.md). Please do not report suspected vulnerabilities in public issues.
+
+## Adapter name (provisional)
+
+A cycling adapter package name `open-rng-engine-cycling` has been proposed. It is provisional until the G1 name freeze. It is not an official name.
