@@ -49,5 +49,20 @@ test('node_modules is gitignored and never scanned as a claims surface, package.
   const files = new Map([...['README.md', 'package.json', 'LICENSE', 'REMOTE-PENDING.md', 'npm-reserved/README.md', '.gitattributes'].map((p) => [p, readFileSync(join(ROOT, p))]),
     ['node_modules/x/README.md', Buffer.from(plant)], ['node_modules/x/package.json', Buffer.from(JSON.stringify({ description: plant }))],
     ['node_modules/x/index.d.ts', Buffer.from(`/** ${plant} */`)], ['packages/a/node_modules/y/package.json', Buffer.from(JSON.stringify({ description: plant }))]]);
-  assert.deepEqual(lintTree(files).hits, []);
+  const hits = lintTree(files).hits;
+  // CPO-R104 G-10: a tracked node_modules/ path is itself red; its content is never linted as a surface or shipped source.
+  assert.equal(hits.length, 4, hits.join('\n'));
+  assert.ok(hits.every((h) => h.includes('G10-node-modules')), hits.join('\n'));
+});
+test('G-10: check:ph0 fails on a tracked node_modules/ path (scratch clone)', () => {
+  const c = join(dir, 'clone');
+  execFileSync('git', ['clone', '-q', '--no-hardlinks', ROOT, c]);
+  for (const p of execFileSync('git', ['ls-files', '-z'], { cwd: ROOT }).toString().split('\0').filter(Boolean)) if (existsSync(join(ROOT, p))) writeFileSync(join(c, p), readFileSync(join(ROOT, p)));
+  execFileSync('git', ['add', '-A'], { cwd: c });
+  const lint = () => spawnSync(process.execPath, [join(c, 'tools/claims-lint.mjs')], { cwd: c, encoding: 'utf8' });
+  assert.equal(lint().status, 0, lint().stdout);
+  execFileSync('mkdir', ['-p', join(c, 'node_modules/x')]); writeFileSync(join(c, 'node_modules/x/index.js'), 'module.exports = 1;\n');
+  execFileSync('git', ['add', '-f', 'node_modules/x/index.js'], { cwd: c });
+  const r = lint(); assert.equal(r.status, 1); assert.match(r.stdout, /node_modules\/x\/index\.js:0: G10-node-modules/);
+  assert.match(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts['check:ph0'], /node tools\/claims-lint\.mjs &&/);
 });

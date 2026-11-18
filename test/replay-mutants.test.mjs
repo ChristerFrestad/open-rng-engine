@@ -45,14 +45,14 @@ test('M-102: width = 0 / count = 0 entries -> R1', () => {
 // M-103: grouped by width
 test('M-103: reads grouped by width (count = number of reads) -> fail (R1/R4/R5)', () => {
   const c = [[131040, [[65536, 2]]], [131040, [[65536, 131072]]], [131041, [[65536, 2], [17, 1]]]];
-  for (const [n, reads] of c) { const e = gold(n); e.reads = reads.map(([width, count]) => ({ width, count })); const r = fail(e, null, `n=${n}`); assert.ok(['R1', 'R4', 'R5'].includes(r.code)); }
+  for (const [n, reads] of c) { const e = gold(n); e.reads = reads.map(([width, count]) => ({ width, count })); const r = fail(e, 'R1', `n=${n}`); assert.deepEqual(r.failures, ['R1']); } // G-1: exact first code
   const e = gold(131040); e.reads = [{ width: 65536, count: 2 }];
   assert.ok(validateReadsOutputSchema(e) !== null); // count 2 is below the schema minimum
 });
 // M-104: data-only counts with bytesFetched = n
 test('M-104: data-only counts (count = width - 16) with bytesFetched = n -> R5 first, R7 in failures', () => {
   const e = gold(65521); e.reads = [{ width: 65536, count: 65520 }, { width: 17, count: 1 }]; e.bytesFetched = 65521;
-  const r = fail(e, null, 'M-104'); assert.ok(['R1', 'R5'].includes(r.code));
+  const r = fail(e, 'R1', 'M-104'); assert.deepEqual(r.failures, ['R1']); // G-1: count 1 < 17 is a schema reject
   const e2 = gold(65521); e2.reads = [{ width: 65536, count: 65520 }, { width: 17, count: 17 }]; e2.bytesFetched = 65537;
   const r2 = fail(e2, 'R5', 'M-104 in-range variant'); assert.ok(r2.failures.includes('R7'));
 });
@@ -152,4 +152,12 @@ test('M-110: replay never touches a CSPRNG (trap on every node:crypto / Web Cryp
     const t = src(p);
     assert.doesNotMatch(t, /from\s+['"]node:|require\(|\bcrypto\b\s*\.|getRandomValues|randomFill|randomBytes\(|Math\.random/, p);
   }
+});
+// E-5 (CPO-R104 G-3): minimum bytesFetched is 17 (n = 1: 1 + 16)
+test('E-5: n = 1 golden has bytesFetched 17 and passes; 16 (or reads summing to 16) fails', () => {
+  const e = gold(1); assert.equal(e.bytesFetched, 17); assert.deepEqual(e.reads, [{ width: 17, count: 17 }]); assert.deepEqual(checkRandomBytesReplay(e), { ok: true });
+  const a = gold(1); a.bytesFetched = 16; const ra = fail(a, 'R6', 'bf 16'); assert.ok(ra.failures.includes('R7'));
+  const b = gold(1); b.reads = [{ width: 16, count: 16 }]; b.bytesFetched = 16; fail(b, 'R1', 'width 16');
+  const z = gold(1); z.reads = []; z.bytesFetched = 0; fail(z, 'R4', 'no reads');
+  assert.equal(blockPlanTotal(1), 17);
 });

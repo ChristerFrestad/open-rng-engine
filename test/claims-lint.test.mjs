@@ -215,12 +215,35 @@ test('LF-6 / F-28: every string VALUE of every package.json at any path is in sc
     }
   }
 });
-test('F-28: package.json KEYS are out of claims scope (X-13 covers exports/bin/scripts keys)', () => {
+test('D-1 (CPO-R104, supersedes F-28): package.json KEYS at every depth are in claims scope', () => {
   const pkg = JSON.parse(read('package.json'));
-  const kb = { ...pkg, scripts: { ...pkg.scripts, ['\u0063ertified-check']: 'node -v' }, exports: { ['./\u0076alidated']: './x.js' } };
-  const hits = lintTree(withFile('package.json', JSON.stringify(kb, null, 2))).hits;
-  assert.deepEqual(hits, []);
-  assert.deepEqual(jsonStrings({ ['\u0063ertified']: 'ok' }), [['/\u0063ertified', 'ok']]); // value linted, key only names the path
+  for (const kb of [{ ...pkg, scripts: { ...pkg.scripts, ['\u0063ertified-check']: 'node -v' } }, { ...pkg, exports: { ['./\u0076alidated']: './x.js' } },
+    { ...pkg, a: { b: [{ ['GLI-\u0061ligned']: 1 }] } }, { ...pkg, ['\u0046IPS']: true }]) {
+    const hits = lintTree(withFile('package.json', JSON.stringify(kb, null, 2))).hits;
+    assert.ok(hits.some((h) => /^package\.json#\/.*\(key\):/.test(h)), JSON.stringify(Object.keys(kb)));
+  }
+  assert.deepEqual(lintTree(withFile('package.json', JSON.stringify({ ...pkg, scripts: { ...pkg.scripts, 'lint:docs': 'node -v' } }, null, 2))).hits, []);
+});
+const PHR = 'schema \u0076alidation';
+test('D-2 (CPO-R104): list entries match by prefix, case-insensitive; left boundary only (no preceding letter/digit)', () => {
+  for (const v of ['BMMTestlabs', 'GLI19', 'ITL21', 'gli_11', 'iTech_Labs', 'UKGCs', 'eCOGRAs', 'NISTIR', 'Trisigma-NL', '_GLI', 'bmm-testlabs']) {
+    assert.ok(lintText('docs/a.md', `${PHR} as ${v} does it`).length > 0, v);
+  }
+  for (const v of ['xGLI', 'aBMM', '9NIST']) assert.deepEqual(lintText('docs/a.md', `${PHR} as ${v} does it`), [], v);
+});
+test('D-2 / D-3: the generic words lab and labs stay whole-word', () => {
+  for (const v of ['lab', 'labs', 'Lab', 'LABS']) assert.ok(lintText('docs/a.md', `${PHR} in the ${v}`).length > 0, v);
+  for (const v of ['labelled', 'collab', 'labsheet']) assert.deepEqual(lintText('docs/a.md', `${PHR} ${v}`), [], v);
+});
+test('G-4 (CPO-R104): certif, complian and align match without a left boundary', () => {
+  for (const w of ['un\u0063ertified', 'non\u0063ompliant', 'mis\u0061ligned', 're\u0063ertification', 'x_\u0061lign', 'pre\u0061ligned']) assert.ok(lintText('docs/a.md', `It is ${w}.`).length > 0, w);
+});
+test('G-6 (CPO-R104): the comparative rule anchors on lab, labs and every list entry (prefix)', () => {
+  for (const t of ['exceeds UKGCs rules', 'beyond BMMTestlabs requirements', 'goes above ISO norms', 'surpasses Lottstift', 'meets the lab bar', 'Kahnawake Gaming Commission rules we exceed',
+    'beyond what AGCO asks', 'above GLI19 thresholds', 'labs we surpass']) {
+    assert.ok(lintText('docs/a.md', t).some((h) => h.includes('R16-comparative')), t);
+  }
+  for (const t of ['above the threshold', 'beyond the end of the buffer', 'meets the deadline']) assert.deepEqual(lintText('docs/a.md', t), [], t);
 });
 test('F-21: adopter-visible error and reason strings in shipped source are linted (escapes decoded)', () => {
   for (const src of [`throw new Error('${VPLANT}');`, 'export const reason = "\\u0063ertified by GLI";', 'return { ok: false, detail: `not ${x} \\u0063ryptographic module` };',

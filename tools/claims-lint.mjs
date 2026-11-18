@@ -114,7 +114,11 @@ function loadNameList(buf, path, pin) {
 // zero-width chars, and hyphen/dash variants (CPO-R100 F-19, CPO-R101 LF-8).
 export const SEP_CLASS = String.raw`[\s\u00ad\u180e\u200b-\u200d\u2060\u2010-\u2015\u2212\-]`;
 const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-export const labNameRe = (n) => new RegExp(String.raw`(?<![A-Za-z0-9_])${n.split(/\s+/).map(escRe).join(String.raw`[\s]+`)}(?![A-Za-z0-9_])`, 'i');
+// CPO-R104 D-2: named entries match by PREFIX, case-insensitive: left boundary = no preceding letter or digit, NO right
+// boundary (BMMTestlabs, GLI19, ITL21, gli_11, iTech_Labs, UKGCs are hits). The generic words lab/labs stay whole-word (D-3).
+export const GENERIC_LAB_WORDS = new Set(['lab', 'labs']);
+const entrySrc = (n) => (GENERIC_LAB_WORDS.has(n.toLowerCase()) ? String.raw`(?<![A-Za-z0-9_])${escRe(n)}(?![A-Za-z0-9_])` : String.raw`(?<![A-Za-z0-9])${n.split(/\s+/).map(escRe).join(String.raw`\s+`)}`);
+export const labNameRe = (n) => new RegExp(entrySrc(n), 'i');
 
 const readMaybe = (p) => { try { return readFileSync(p); } catch { return null; } };
 const A = loadAllowlist(readMaybe(join(ROOT, ALLOWLIST_PATH)));
@@ -128,14 +132,16 @@ export const ALLOW = A.allow;
 const PHRASES = T.phrases;
 const CO_TERMS = [...T.coTerms, ...L.names.map(labNameRe), ...AU.names.map(labNameRe)];
 
-const ANCHOR = `(?:GLI-11|NIST|UKGC|RTS|MGA|lab|${[...L.names].sort((a, b) => b.length - a.length).map((n) => n.split(/\s+/).map(escRe).join('\\s+')).join('|')})`;
+// CPO-R104 G-6: the comparative rule anchors on lab, labs and every lab-names and authority-terms entry (prefix match, D-2).
+const ANCHOR = `(?:${[...new Set(['lab', 'labs', ...L.names, ...AU.names])].sort((a, b) => b.length - a.length).map(entrySrc).join('|')})`;
 const COMPAR = String.raw`(?:exceed\w*|above|beyond|surpass\w*|meets)`;
 const NEAR = String.raw`(?:\W+\w+){0,4}\W+`; // within 5 words
 export const RULES = [
-  ['R16-certif', /\b\u0063ertif\w*/gi],
-  ['R16-complian', /\b\u0063omplian\w*/gi],
-  ['R16-align', /\b\u0061lign\w*/gi],
-  ['R16-comparative', new RegExp(String.raw`\b${COMPAR}${NEAR}${ANCHOR}\b|\b${ANCHOR}${NEAR}${COMPAR}\b`, 'gi')],
+  // CPO-R104 G-4: no left boundary for certif, complian and align (they match like validat: uncertified, misaligned are hits).
+  ['R16-certif', /[A-Za-z0-9_]*\u0063ertif\w*/gi],
+  ['R16-complian', /[A-Za-z0-9_]*\u0063omplian\w*/gi],
+  ['R16-align', /[A-Za-z0-9_]*\u0061lign\w*/gi],
+  ['R16-comparative', new RegExp(String.raw`\b${COMPAR}${NEAR}${ANCHOR}|${ANCHOR}\w*${NEAR}${COMPAR}\b`, 'gi')],
   ['R16-nist-claim', /\bNIST[- ](?:\u0063ertified|\u0061pproved|\u0063ompliant)\b/gi],
   ['R16-approved', /\b\u0061pproved\b/gi],
   ['R16-gold-standard', /\b\u0067old\s+standard\b/gi],
@@ -227,6 +233,12 @@ export function isClaimsSurface(path) {
 // CPO-R101 LF-6: every package.json at any path (node_modules is never tracked/scanned).
 const isPkg = (p) => /(^|\/)package\.json$/.test(p) && !/(^|\/)node_modules\//.test(p);
 /** Every string value in a parsed JSON document, with a JSON-pointer-like path. */
+/** Every object KEY at any depth, with its JSON-pointer-like path (CPO-R104 D-1: keys are in claims scope too). */
+export function jsonKeys(v, at = '') {
+  if (Array.isArray(v)) return v.flatMap((x, i) => jsonKeys(x, `${at}/${i}`));
+  if (v && typeof v === 'object') return Object.entries(v).flatMap(([k, x]) => [[`${at}/${k}`, k], ...jsonKeys(x, `${at}/${k}`)]);
+  return [];
+}
 export function jsonStrings(v, at = '') {
   if (typeof v === 'string') return [[at || '/', v]];
   if (Array.isArray(v)) return v.flatMap((x, i) => jsonStrings(x, `${at}/${i}`));
@@ -362,6 +374,8 @@ export function lintTree(files, built = new Map(), { symlinks = new Set() } = {}
   const hits = [];
   let codeFiles = 0, dtsFiles = 0;
   for (const p of files.keys()) if (nonCanonicalPath(p)) hits.push(`${p}:0: M122-path: non-canonical path (./, .., //, trailing slash or absolute)`);
+  // CPO-R104 G-10: any tracked path under node_modules/ fails (check:ph0 runs this lint on the tracked tree).
+  for (const p of files.keys()) if (/(^|\/)node_modules\//.test(p)) hits.push(`${p}:0: G10-node-modules: tracked path under node_modules/`);
   for (const p of symlinks) hits.push(`${p}:0: M122-symlink: tracked symlink (exempt paths and scanned files must be regular files)`);
   if (files.has('package.json')) {
     const ga = files.get('.gitattributes');
@@ -382,7 +396,8 @@ export function lintTree(files, built = new Map(), { symlinks = new Set() } = {}
       let j;
       try { j = JSON.parse(b.toString('utf8')); } catch { hits.push(`${p}:0: CONFIG: package.json does not parse`); continue; }
       scoped++;
-      for (const [at, v] of jsonStrings(j)) hits.push(...lintText(`${p}#${at}`, v)); // every string field (LF-6)
+      for (const [at, v] of jsonStrings(j)) hits.push(...lintText(`${p}#${at}`, v)); // every string value (LF-6)
+      for (const [at, k] of jsonKeys(j)) hits.push(...lintText(`${p}#${at}(key)`, k)); // every key, any depth (CPO-R104 D-1)
     }
     if (isUnder(p, 'docs/examples/')) { const h = r39Header(p, b.toString('utf8')); if (h) hits.push(h); }
     if (isDts(p)) { dtsFiles++; hits.push(...lintText(p, b.toString('utf8'))); } // shipped .d.ts incl. JSDoc (F-21)
@@ -740,7 +755,7 @@ function main() {
     } else if (kind === 'p8-package') { // published package.json (M-129): every string value linted; description must equal S-P1
       let j = null;
       try { j = JSON.parse(text); } catch { j = null; }
-      hits = j === null ? [`${f}:0: CONFIG: package.json does not parse`] : jsonStrings(j).flatMap(([at, v]) => lintText(`${f}#${at}`, v));
+      hits = j === null ? [`${f}:0: CONFIG: package.json does not parse`] : [...jsonStrings(j).flatMap(([at, v]) => lintText(`${f}#${at}`, v)), ...jsonKeys(j).flatMap(([at, k]) => lintText(`${f}#${at}(key)`, k))];
       if (j && j.description !== SP1()) hits.push(`${f}#/description:0: O67-p1-presence: does not equal S-P1 exactly`);
     } else { console.error('claims-lint: --surface p8|p8-package|repo-description FILE'); process.exit(2); }
     hits.forEach((h) => console.log(h));
