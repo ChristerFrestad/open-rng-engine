@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, entropyTriggers, READ_NAME_ALLOW } from '../tools/ci/import-allowlist.mjs';
+import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, GUARD_OK, selfTest, entropyTriggers, READ_NAME_ALLOW, BAD_REASON } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const EXPECT = {
@@ -33,7 +33,8 @@ for (const [name, src] of Object.entries(BAD)) {
       const file = BAD_PATH[name] ?? 'src/mapping/bad.ts';
       writeFixture(d, { [file]: src });
       const hits = scanTree(d).hits;
-      assert.ok(hits.some((h) => h.startsWith(file) && h.includes(`rule27-${EXPECT[name]} `)), hits.join('\n'));
+      if (BAD_REASON[name]) assert.ok(hits.some((h) => BAD_REASON[name].test(h)), hits.join('\n'));
+      else assert.ok(hits.some((h) => h.startsWith(file) && h.includes(`rule27-${EXPECT[name]} `)), hits.join('\n'));
     } finally { rmSync(d, { recursive: true, force: true }); }
   });
 }
@@ -174,3 +175,13 @@ test('control: blockPlan.ts unchanged stays green; allow-list holds exactly FING
   put(d, 'src/entropy/blockPlan.ts', BP()); assert.deepEqual(scanTree(d).hits, []); assert.deepEqual(entropyTriggers(d), []);
   assert.deepEqual(Object.entries(READ_NAME_ALLOW), [['FINGERPRINT_BYTES', '16']]);
 }));
+
+test('HoQ: --self-test carries 32 known-bad fixtures incl. the five allow-list red cases', () => {
+  assert.equal(Object.keys(BAD).length, 32);
+  const five = { 'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n', 'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
+    'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n", 'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
+    'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n' };
+  for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /32 known-bad fixtures red/);
+});

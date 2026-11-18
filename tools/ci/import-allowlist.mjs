@@ -236,12 +236,26 @@ export const BAD = {
   'entropy-alias': "import { randomFillSync as rf } from 'node:crypto';\n",
   'entropy-other-path': "import { randomFillSync } from '../mapping/x.ts';\n",
   'randomFillSync-outside-entropy': "import { randomFillSync } from '../entropy/a.ts';\n",
+  // HoQ tighten ruling: allow-list red cases (planted over src/entropy/a.ts, so entropy/ has no randomFillSync import).
+  'allowlist-SEED_BYTES': 'export const SEED_BYTES = 32;\n',
+  'allowlist-FINGERPRINT_BYTES-15': 'export const FINGERPRINT_BYTES = 15;\n',
+  'allowlist-FINGERPRINT_BYTES-string': "export const FINGERPRINT_BYTES = '16';\n",
+  'allowlist-FINGERPRINT_BYTES-let': 'export let FINGERPRINT_BYTES = 16;\n',
+  'allowlist-FINGERPRINT_BYTES-reexport': 'const FINGERPRINT_BYTES = 16;\nexport { FINGERPRINT_BYTES };\n',
 };
+// Expected reason for fixtures whose hit is not at the planted file (self-test fails if the reason does not match).
+const ALLOW_REASON = (n) => new RegExp(`^src/entropy/:0: rule27-missing-pair \\(randomFillSync, entropy/\\).*PH1-M1 trigger: \\(i\\) src/entropy/a\\.ts exports ${n}\\b`);
+export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 'allowlist-FINGERPRINT_BYTES-15': ALLOW_REASON('FINGERPRINT_BYTES'),
+  'allowlist-FINGERPRINT_BYTES-string': ALLOW_REASON('FINGERPRINT_BYTES'), 'allowlist-FINGERPRINT_BYTES-let': ALLOW_REASON('FINGERPRINT_BYTES'),
+  'allowlist-FINGERPRINT_BYTES-reexport': ALLOW_REASON('FINGERPRINT_BYTES') };
+// Control planted the same way: the single allow-listed declaration stays green (report-only).
+export const ALLOW_CONTROL = 'export const FINGERPRINT_BYTES = 16;\n';
 // Where each known-bad fixture is planted (default src/mapping/bad.ts).
 export const BAD_PATH = { 'audited-import': 'src/audited/bad.ts', 'createHash-outside-evidence': 'src/entropy/bad.ts',
   'capability-crypto': 'packages/capability/src/bad.ts', 'mapping-namespace': 'packages/mapping/src/bad.ts',
   'verify-drbg': 'src/verify/bad.ts', 'verify-drbg-relative': 'src/verify/bad.ts', 'verify-binding-wrong-path': 'src/verify/testingBinding.ts',
-  'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts' };
+  'entropy-alias': 'src/entropy/bad.ts', 'entropy-other-path': 'src/entropy/bad.ts', 'randomFillSync-outside-entropy': 'src/mapping/bad.ts',
+  ...Object.fromEntries(Object.keys(BAD).filter((n) => n.startsWith('allowlist-')).map((n) => [n, 'src/entropy/a.ts'])) };
 export const GUARD_OK = "const KEY = '__oreCoreGuard';\nexport function install(v) {\n  if (Object.hasOwn(globalThis, KEY)) throw new Error('GUARD_PRESENT');\n  Object.defineProperty(globalThis, '__oreCoreGuard', { value: v, writable: false, configurable: false, enumerable: false });\n}\n";
 
 export function writeFixture(dir, extra = {}) {
@@ -257,8 +271,12 @@ export function selfTest() {
     for (const [name, src] of Object.entries(BAD)) {
       const d = join(base, name); const file = BAD_PATH[name] ?? 'src/mapping/bad.ts';
       writeFixture(d, { [file]: src });
-      if (scanTree(d).hits.length === 0) fails.push(`known-bad fixture ${name} did not turn rule 27 red`);
+      const hits = scanTree(d).hits;
+      if (hits.length === 0) fails.push(`known-bad fixture ${name} did not turn rule 27 red`);
+      else if (BAD_REASON[name] && !hits.some((h) => BAD_REASON[name].test(h))) fails.push(`known-bad fixture ${name} is red for the wrong reason:\n${hits.join('\n')}`);
     }
+    const c = join(base, 'allowlist-control'); writeFixture(c, { 'src/entropy/a.ts': ALLOW_CONTROL });
+    const cr = scanTree(c).hits; if (cr.length) fails.push(`allow-list control (export const FINGERPRINT_BYTES = 16) not green:\n${cr.join('\n')}`);
   } finally { rmSync(base, { recursive: true, force: true }); }
   return fails;
 }
