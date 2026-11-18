@@ -59,3 +59,10 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Tests: `npm test` 183 pass / 0 fail (claims-lint 133, replay 50).
 
 | 2026-11-18 08:06:11 CET | CTO via executor | G1 C-11 (CPO-R98): R-93 randomBytes replay invariant checker (pure) + blockPlan(n), negative tests; fix npm test glob | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## C-9 protected-names list commit (CPO-owned; CTO CONFIRMED)
+
+- tools/protected-names.txt sha256 7f56688ee17193182f47cc7e048b2bc2b25baa7f3c0a1ea678cfa5c77144277b, format open-rng-engine/protected-names/v1, version 1, 38 entries (PN-001..PN-038). Validator g1-tools/pn-validate.py afe76d15… RESULT PASS; format inputs/cto-c9-protected-names-format.md dadae96e. No content change by CTO; file committed byte-identical to CPO's.
+- Interim gate for this and later commits: g1-tools/o55-staged-wrapper.py (sha c99fe0b43af49537a58223e781187309821eb66ddef45b12ea3040507d1fd35b) around o55-scan.py 156340f7 (unmodified). Scans index bytes of every tracked path; the ONLY content exclusion is the exact path tools/protected-names.txt AND staged sha 7f56688e AND pn-validate PASS AND version 1 AND 38 entries; its path is still scanned; LICENSE not excluded. Scratch controls: good list 0; sibling .bak 38 hits; tools/other.txt 38; altered list 39; plant elsewhere 1; same name in another dir 38; worktree-only change ignored (index bytes) 0.
+
+| 2026-11-18 08:09:00 CET | CTO via executor | C-9: add CPO protected-names list v1 (38 entries, sha 7f56688e, CTO CONFIRMED) on its own | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
