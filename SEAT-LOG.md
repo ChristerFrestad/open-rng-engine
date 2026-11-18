@@ -100,3 +100,5 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Tests: npm test (see commit report). Strict tsc still PENDING (no tsc on the box); sources run via Node 24 type stripping only.
 
 | 2026-11-18 08:34:23 CET | CTO via executor | Claims lint: quality v5.5.6 M-124/M-125/M-138/M-139 case sets; validat stem now also matches un-/in-/underscore-prefixed forms (M-124 unvalidated, M-138 schema_validation were green before) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+| 2026-11-18 08:39:48 CET | CTO via executor | Strict tsc (CPO-R103): devDependency typescript 5.9.3 exact (--ignore-scripts, public registry; lock integrity sha512-jl1vZzPD…M5TgSw== verified against the downloaded tarball); dependencies {} kept (npm had dropped the empty key; restored); tsc --noEmit exit 0 on 16 files with no source change; typecheck added to check:ph0; node_modules excluded from claims scope | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |

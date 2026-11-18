@@ -212,6 +212,7 @@ export function lintText(name, text) {
 // ---------- scope, exemptions, surfaces ----------
 const isUnder = (p, d) => p.startsWith(d);
 export function isClaimsSurface(path) {
+  if (/(^|\/)node_modules\//.test(path)) return false; // installed devDependencies are never claims surfaces or shipped source
   if (isUnder(path, 'src/') || isUnder(path, 'test/') || isUnder(path, 'tests/')) return false;
   if (/(^|\/)README[^/]*\.md$/i.test(path)) return true;
   if (isUnder(path, 'docs/')) return true;
@@ -236,7 +237,7 @@ export function jsonStrings(v, at = '') {
 // packages/*/dist/** (no build exists yet: the built-output half is reported PENDING until one does).
 export const isShippedSource = (p) => /^(src|packages\/[^/]+\/src)\/.*\.(m?ts|m?js|cjs|cts)$/.test(p) && !/\.d\.[mc]?ts$/.test(p);
 export const isBuiltOutput = (p) => /^(dist|packages\/[^/]+\/dist)\//.test(p);
-export const isDts = (p) => /\.d\.[mc]?ts$/.test(p) && !/^(test|tests)\//.test(p);
+export const isDts = (p) => /\.d\.[mc]?ts$/.test(p) && !/^(test|tests)\//.test(p) && !/(^|\/)node_modules\//.test(p);
 /**
  * Minimal JS/TS lexer: returns every string literal (decoded, incl. template text) and every JSDoc block (/** ... *\/),
  * each with its 1-based start line. Regex literals are skipped. Used for F-21 (error/reason strings, JSDoc).
