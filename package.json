@@ -19,7 +19,8 @@
     "lint:claims:fixture": "node tools/claims-lint.mjs --self-test",
     "check:qiu05": "node tools/qiu05-check.mjs",
     "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
-    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test"
+    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test",
+    "test": "node --test test/"
   },
   "dependencies": {}
 }

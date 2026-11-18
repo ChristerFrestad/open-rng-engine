@@ -42,3 +42,10 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Proof: decoded fixture literals (taken in a scratch process from the 0750 bundle; 6 patterns) occur 0 times in `git log -p --all` and 0 times in the object store; control count in the 0750 bundle is non-zero. refs/original deleted, reflog expired, `git gc --prune=now --aggressive`, `git fsck --unreachable` empty.
 
 | 2026-11-18 07:58:16 CET | CTO via executor | PH0: SEAT-LOG C-13 record (local history rewrite, old->new sha map) | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## C-10 claims-lint allow-list (CPO-R97; rulings bdde9834…, DECISIONS L75)
+
+- Allow-list S-P1, S-P1-short, S-R39, S-FIPS-1.0 (plain + typographic), S-PACK: \u-escaped, sha256-pinned to the CPO pins (pin mismatch exits 2). Exempts only certif*/complian* hits wholly inside an occurrence that is the whole line apart from comment/markdown wrappers. align* and FIPS never exempt. /drbg reserved sentence (L633) red via C10-drbg-reserved (NIST SP 800-90A / CAVP tokens). ARCHITECTURE.md disclaimer red (C-14).
+- Tests: `node --test test/claims-lint.test.mjs` 133 pass / 0 fail; `--self-test` known-bad red + 127/127 near-miss; scratch removed.
+
+| 2026-11-18 08:04:15 CET | CTO via executor | G1 C-10 (CPO-R97): claims-lint byte-exact allow-list, align/FIPS unconditional, near-miss tests | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
