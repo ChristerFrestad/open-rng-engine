@@ -2,7 +2,7 @@
 // Out of scope here (no producer exists before PH2): M-106 / M-107 / M-117 (a) producer halves, `labkit verify` (PH3).
 // M-110 (CSPRNG non-touch): requires the entropy backstop to be preloaded. Under npm test this is
 // `--import ./tools/ci/entropy-backstop.mjs`. If this file is run alone without that flag, the M-110
-// backstop assertion is skipped loudly rather than failing.
+// test logs a loud message and then FAILS (it is not skipped).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

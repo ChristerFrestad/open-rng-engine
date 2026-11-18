@@ -48,7 +48,12 @@ const BASE_ENTRY_POINT_IDS = [
   'createDiffieHellmanGroup',
   'DiffieHellman.prototype.generateKeys',
   'DiffieHellmanGroup.prototype.generateKeys',
+  // G-39 (HoQ a43a432c): constructors that generate a random prime or key, and the prototype randomUUID.
+  'DiffieHellman',
+  'DiffieHellmanGroup',
+  'Crypto.prototype.randomUUID',
 ];
+const CONSTRUCTOR_IDS = new Set(['DiffieHellman', 'DiffieHellmanGroup']);
 export const ENTRY_POINT_IDS = Object.freeze(
   RANDOMUUIDV7_PRESENT ? [...BASE_ENTRY_POINT_IDS, 'randomUUIDv7'] : BASE_ENTRY_POINT_IDS,
 );
@@ -200,6 +205,8 @@ function wrapFn(id, orig) {
     return orig.apply(this, args);
   };
   try { Object.defineProperty(wrapped, 'name', { value: `backstop_${id}`, configurable: true }); } catch { /* ignore */ }
+  // G-39: a wrapped constructor keeps the original prototype, so instanceof and prototype hooks still hold.
+  if (CONSTRUCTOR_IDS.has(id)) { try { wrapped.prototype = orig.prototype; } catch { /* ignore */ } }
   wrapped._backstopId = id;
   return wrapped;
 }
@@ -326,26 +333,42 @@ function collectTargets(crypto) {
     { id: 'createDiffieHellmanGroup', obj: crypto, key: 'createDiffieHellmanGroup' },
     { id: 'DiffieHellman.prototype.generateKeys', obj: crypto.DiffieHellman ? crypto.DiffieHellman.prototype : null, key: 'generateKeys' },
     { id: 'DiffieHellmanGroup.prototype.generateKeys', obj: crypto.DiffieHellmanGroup ? crypto.DiffieHellmanGroup.prototype : null, key: 'generateKeys' },
+    { id: 'Crypto.prototype.randomUUID', obj: typeof Crypto === 'function' ? Crypto.prototype : null, key: 'randomUUID' },
+    { id: 'DiffieHellman', obj: crypto, key: 'DiffieHellman' },
+    { id: 'DiffieHellmanGroup', obj: crypto, key: 'DiffieHellmanGroup' },
   ];
   if (RANDOMUUIDV7_PRESENT) targets.push({ id: 'randomUUIDv7', obj: crypto, key: 'randomUUIDv7' });
   return targets;
 }
 
+// G-39b (HoQ a43a432c): only an exact `--import <this file>` counts as the preload. A decoy that merely
+// contains the file name (another path, --title=..., a comment) does not stop injection.
+function isSelfRef(x) {
+  const v = String(x ?? '').replace(/^['"]|['"]$/g, '');
+  if (!v) return false;
+  if (v === pathToFileURL(SELF).href) return true;
+  try { if (v.startsWith('file:')) return resolve(fileURLToPath(v)) === SELF; } catch { return false; }
+  return resolve(v) === SELF;
+}
+
+function hasBackstopImport(list) {
+  const a = (list ?? []).map(String);
+  for (let i = 0; i < a.length; i++) {
+    if ((a[i] === '--import' || a[i] === '--require' || a[i] === '-r') && isSelfRef(a[i + 1])) return true;
+    if (a[i].startsWith('--import=') && isSelfRef(a[i].slice('--import='.length))) return true;
+  }
+  return false;
+}
+
+export function nodeOptionsHasBackstop(str) {
+  return hasBackstopImport(String(str ?? '').trim().split(/\s+/).filter(Boolean));
+}
+
 function installNodeOptions() {
   const flag = `--import ${pathToFileURL(SELF).href}`;
   const cur = process.env.NODE_OPTIONS || '';
-  if (cur.includes('entropy-backstop.mjs') || cur.includes(pathToFileURL(SELF).href) || cur.includes(SELF)) return;
+  if (nodeOptionsHasBackstop(cur)) return;
   process.env.NODE_OPTIONS = cur ? `${flag} ${cur}` : flag;
-}
-
-function hasBackstopImport(execArgv) {
-  const list = execArgv ?? [];
-  for (let i = 0; i < list.length; i++) {
-    const a = String(list[i]);
-    if (a.includes('entropy-backstop.mjs')) return true;
-    if (a === '--import' && String(list[i + 1] ?? '').includes('entropy-backstop.mjs')) return true;
-  }
-  return false;
 }
 
 function installWorkerHook() {
@@ -388,7 +411,7 @@ function injectBackstopEnv(env) {
   const flag = `--import ${IMPORT_HREF}`;
   const next = { ...env };
   const cur = typeof next.NODE_OPTIONS === 'string' ? next.NODE_OPTIONS : '';
-  if (!cur.includes('entropy-backstop.mjs') && !cur.includes(IMPORT_HREF)) {
+  if (!nodeOptionsHasBackstop(cur)) {
     next.NODE_OPTIONS = cur ? `${flag} ${cur}` : flag;
   }
   return next;
@@ -402,7 +425,36 @@ function normalizeChildOptions(options) {
   return opts;
 }
 
+// G-39a (HoQ a43a432c): an intermediate process (env, a shell) can drop NODE_OPTIONS for the node it
+// starts, where this hook cannot follow. Such command lines are refused, fail-closed.
+const STRIP_SHELL = [
+  /\bNODE_OPTIONS\s*=/,
+  /\bunset\s+(?:-v\s+)?NODE_OPTIONS\b/,
+  /\benv\b(?:\s+[^\s;|&]+)*?\s+(?:-[a-zA-Z]*[iu]|--ignore-environment|--unset|-)(?=\s|=|$)/,
+  /\bNODE_OPTIONS\b[^|;&]*\bdelete\b/,
+];
+export function childCommandStripsPreload(args) {
+  const strs = [];
+  if (typeof args[0] === 'string') strs.push(args[0]);
+  if (Array.isArray(args[1])) for (const a of args[1]) strs.push(String(a));
+  const base = typeof args[0] === 'string' ? args[0].split(/[\\/]/).pop() : '';
+  if (base === 'env' && Array.isArray(args[1])) {
+    for (const a of args[1].map(String)) {
+      if (a === '-' || a === '-i' || a === '--ignore-environment' || /^-[a-zA-Z]*[iu]/.test(a) || a.startsWith('--unset') || /^NODE_OPTIONS=/.test(a)) return `env ${a}`;
+    }
+  }
+  const joined = strs.join(' ');
+  for (const re of STRIP_SHELL) if (re.test(joined)) return joined.slice(0, 120);
+  return null;
+}
+
 function mapChildArgs(args) {
+  const strip = childCommandStripsPreload(args);
+  if (strip) {
+    const msg = `entropy-backstop: child command would drop the preload (${strip})`;
+    console.error(msg);
+    throw new NativeError(msg);
+  }
   const out = args.slice();
   let idx = -1;
   for (let i = out.length - 1; i >= 0; i--) {
@@ -533,6 +585,12 @@ export function assertMarkerIdentity(label = 'call') {
     console.error(msg);
     throw new NativeError(msg);
   }
+}
+
+// G-39 (marker no-op mutant): lets check:ph0 prove that a changed marker identity is caught per call
+// and at exit. It can only make the backstop fail, never pass.
+export function breakMarkerIdentityForTestOnly() {
+  installedMarker = Object.freeze({ broken: true });
 }
 
 export function getMarker() {

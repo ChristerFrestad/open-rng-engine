@@ -199,7 +199,7 @@ else if (id === 'ECDH.prototype.generateKeys') {
   const e = c.createECDH('prime256v1');
   Object.getPrototypeOf(e).generateKeys.call(e);
 } else if (id === 'getDiffieHellman') c.getDiffieHellman('modp14');
-else if (id === 'createDiffieHellman') c.createDiffieHellman(256);
+else if (id === 'createDiffieHellman') c.createDiffieHellman(512);
 else if (id === 'createDiffieHellmanGroup') c.createDiffieHellmanGroup('modp14');
 else if (id === 'DiffieHellman.prototype.generateKeys') {
   c.DiffieHellman.prototype.generateKeys.call({});
@@ -207,6 +207,9 @@ else if (id === 'DiffieHellman.prototype.generateKeys') {
   const g = c.createDiffieHellmanGroup('modp14');
   Object.getPrototypeOf(g).generateKeys.call(g);
 } else if (id === 'randomUUIDv7') c.randomUUIDv7();
+else if (id === 'DiffieHellman') new c.DiffieHellman(512).getPrime();
+else if (id === 'DiffieHellmanGroup') new c.DiffieHellmanGroup('modp14').generateKeys();
+else if (id === 'Crypto.prototype.randomUUID') Object.getPrototypeOf(globalThis.crypto).randomUUID.call(globalThis.crypto);
 else throw new Error('unknown id ' + id);
 `;
 

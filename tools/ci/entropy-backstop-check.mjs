@@ -82,7 +82,7 @@ try {
     const e = c.createECDH('prime256v1');
     Object.getPrototypeOf(e).generateKeys.call(e);
   } else if (id === 'getDiffieHellman') c.getDiffieHellman('modp14');
-  else if (id === 'createDiffieHellman') c.createDiffieHellman(256);
+  else if (id === 'createDiffieHellman') c.createDiffieHellman(512);
   else if (id === 'createDiffieHellmanGroup') c.createDiffieHellmanGroup('modp14');
   else if (id === 'DiffieHellman.prototype.generateKeys') {
     c.DiffieHellman.prototype.generateKeys.call({});
@@ -90,6 +90,9 @@ try {
     const g = c.createDiffieHellmanGroup('modp14');
     Object.getPrototypeOf(g).generateKeys.call(g);
   } else if (id === 'randomUUIDv7') c.randomUUIDv7();
+  else if (id === 'DiffieHellman') new c.DiffieHellman(512).getPrime();
+  else if (id === 'DiffieHellmanGroup') new c.DiffieHellmanGroup('modp14').generateKeys();
+  else if (id === 'Crypto.prototype.randomUUID') Object.getPrototypeOf(globalThis.crypto).randomUUID.call(globalThis.crypto);
   else throw new Error('unknown id ' + id);
   console.error('planted call of ' + id + ' was not rejected');
   process.exit(0);
@@ -310,6 +313,65 @@ process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr)+Str
   } finally {
     rmSync(childDir, { recursive: true, force: true });
   }
+}
+
+// G-39 residual (HoQ a43a432c): (a) an intermediate env/shell that strips NODE_OPTIONS is refused;
+// (b) a decoy NODE_OPTIONS that only names the file does not stop injection; (e) a changed marker
+// identity is caught per call and at exit.
+{
+  const d = mkdtempSync(join(tmpdir(), 'bs-g39r-'));
+  try {
+    const childPlant = join(d, 'src', 'health', 'child.mjs');
+    mkdirSync(dirname(childPlant), { recursive: true });
+    writeFileSync(childPlant, plantedScript('randomBytes'));
+    const decoyDir = join(d, 'decoy');
+    mkdirSync(decoyDir, { recursive: true });
+    const decoy = join(decoyDir, 'entropy-backstop.mjs');
+    writeFileSync(decoy, 'export {};\n');
+    const node = JSON.stringify(process.execPath);
+    const cp = JSON.stringify(childPlant);
+    const cases = [
+      ['sh-env-u', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('sh', ['-c', 'env -u NODE_OPTIONS ' + ${node} + ' ' + ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['env-i', `import { spawnSync } from 'node:child_process';
+const r = spawnSync('env', ['-i', ${node}, ${cp}], { encoding: 'utf8' });
+process.stderr.write(String(r.stderr || '')); process.exit(r.status === 0 ? 0 : 2);`],
+      ['exec-node-options-empty', `import { execSync } from 'node:child_process';
+execSync('NODE_OPTIONS= ' + ${node} + ' ' + ${cp}, { encoding: 'utf8', stdio: 'pipe' });
+process.exit(0);`],
+      ['decoy-title', `import { spawnSync } from 'node:child_process';
+const r = spawnSync(${node}, [${cp}], { encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '--title=entropy-backstop.mjs' } });
+process.stderr.write(String(r.stderr || '')); process.stdout.write(String(r.stdout || ''));
+process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr) + String(r.stdout)) ? 1 : 2));`],
+      ['decoy-import', `import { spawnSync } from 'node:child_process';
+const r = spawnSync(${node}, [${cp}], { encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '--import ' + ${JSON.stringify(decoy)} } });
+process.stderr.write(String(r.stderr || '')); process.stdout.write(String(r.stdout || ''));
+process.exit(r.status === 0 ? 0 : (/entropy-backstop:/.test(String(r.stderr) + String(r.stdout)) ? 1 : 2));`],
+      ['marker-break-call', `import { breakMarkerIdentityForTestOnly } from ${JSON.stringify(pathToFileURL(BACKSTOP).href)};
+import { createRequire } from 'node:module';
+breakMarkerIdentityForTestOnly();
+try { createRequire(import.meta.url)('node:crypto').randomUUID(); console.error('G39-MARKER-CALL-OK'); process.exit(0); }
+catch (e) { const m = String(e && e.message); console.error(m); process.exit(/marker identity changed/.test(m) ? 1 : 2); }`],
+      ['marker-break-exit', `import { breakMarkerIdentityForTestOnly } from ${JSON.stringify(pathToFileURL(BACKSTOP).href)};
+breakMarkerIdentityForTestOnly();`],
+    ];
+    for (const [label, src] of cases) {
+      const file = label.startsWith('marker-') ? join(ROOT, 'src/entropy', `_g39_${label}.mjs`) : join(d, `launch-${label}.mjs`);
+      writeFileSync(file, src);
+      try {
+        const r = spawnSync(process.execPath, ['--import', BACKSTOP, file], { cwd: ROOT, encoding: 'utf8', timeout: 20_000, env: { ...process.env } });
+        const out = `${r.stdout}\n${r.stderr}`;
+        if (r.status === 0 || /G39-MARKER-CALL-OK/.test(out)) {
+          console.error(`entropy-backstop-check: G-39 ${label} was not rejected\n${out}`);
+          failed += 1;
+        } else if (!/entropy-backstop:/.test(out)) {
+          console.error(`entropy-backstop-check: G-39 ${label} failed without a backstop message (status ${r.status})\n${out}`);
+          failed += 1;
+        }
+      } finally { if (label.startsWith('marker-')) { try { unlinkSync(file); } catch { /* ignore */ } } }
+    }
+  } finally { rmSync(d, { recursive: true, force: true }); }
 }
 
 if (failed) process.exit(1);

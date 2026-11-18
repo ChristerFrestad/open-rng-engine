@@ -82,6 +82,13 @@ export function parseG4Verdicts(text) {
   const cf = /\p{Cf}/u.test(raw);
   const divHidden = /<div\s+hidden/i.test(raw);
   const linkRef = /\[\/\/\]:\s*#/.test(raw);
+  // G-44b (HoQ a43a432c): content inside these blocks may not carry the top-level PASS.
+  const BLOCK_OPEN = /<(details|style|script|template|textarea|noscript)\b/gi;
+  const BLOCK_CLOSE = /<\/(details|style|script|template|textarea|noscript)\s*>/gi;
+  let blockDepth = 0;
+  // G-44b: FAIL lexicon and label set for the contradicting-line check.
+  const FAIL_WORD = /\bFAIL\w*|\bREJECT\w*|\bNOT\s+PASS/i;
+  const FAIL_LABEL = /verdict|result|status|outcome|conclusion|decision/i;
 
   const applyHtml = (vis, startComment, startPre) => {
     let inC = startComment, inP = startPre;
@@ -134,11 +141,18 @@ export function parseG4Verdicts(text) {
     const htmlPartial = html.hid.length > 0 && html.hid.some((x) => x === 1);
     const inIndented = !fence && !isFenceMarker && /^(?:    |\t)/.test(vis);
     const inQuote = !fence && !isFenceMarker && /^\s{0,3}>/.test(vis);
-    const lineHidden = !!(fence || isFenceMarker || inIndented || inQuote || htmlHidden || (inComment || inPre || htmlPartial) && htmlPartial);
+    const opens = (vis.match(BLOCK_OPEN) || []).length;
+    const closes = (vis.match(BLOCK_CLOSE) || []).length;
+    const inBlock = !fence && !isFenceMarker && (blockDepth > 0 || opens > 0);
+    blockDepth = Math.max(0, blockDepth + opens - closes);
+    const codeOrHtmlHidden = !!(fence || isFenceMarker || htmlHidden || (inComment || inPre || htmlPartial) && htmlPartial);
+    const lineHidden = !!(codeOrHtmlHidden || inIndented || inQuote || inBlock);
 
-    const stripped = vis.replace(/^(?:    |\t)+/, '').replace(/^\s{0,3}>\s?/, '');
+    const stripped = vis.replace(/^(?:    |\t)+/, '').replace(/^(?:\s{0,3}>\s?)+/, '');
     const isDirective = /^\s*verdict\s*:/i.test(stripped);
-    if (!lineHidden && /\bFAIL\b/i.test(vis) && /verdict|result|status/i.test(vis)) failConj.push(line);
+    // G-44b: blockquoted and indented lines render visibly, so they count for the FAIL check; only fenced
+    // code and HTML comment / <pre> content is exempt.
+    if (!codeOrHtmlHidden && FAIL_WORD.test(vis) && FAIL_LABEL.test(vis)) failConj.push(line);
     if (isDirective) {
       if (!lineHidden && /^VERDICT:\s+PASS\s*$/.test(stripped)) topPass.push(line);
       else if (!lineHidden) topOther.push(line);
@@ -392,8 +406,11 @@ export function scanLockfile(root, rootPkg) {
   return hits;
 }
 
-export function checkG4PinsFileSha(root, hits = [], { force = false } = {}) {
-  if (!force && resolve(root) !== ENGINE_ROOT) return hits;
+// G-44a (HoQ a43a432c): the gate compares against `pinsRoot` (default ENGINE_ROOT) so the self-test can
+// drive the real call path (scanRoot -> scanG4 -> checkG4PinsFileSha) on a scratch root and prove that
+// removing the call site or breaking the gate turns the self-test red.
+export function checkG4PinsFileSha(root, hits = [], { force = false, pinsRoot = ENGINE_ROOT } = {}) {
+  if (!force && resolve(root) !== resolve(pinsRoot)) return hits;
   const pinsAbs = join(root, G4_PINS_REL);
   if (!existsSync(pinsAbs)) {
     hits.push(`${G4_PINS_REL}:1: b8-g4 G4-PINS.json is missing`);
@@ -406,9 +423,9 @@ export function checkG4PinsFileSha(root, hits = [], { force = false } = {}) {
   return hits;
 }
 
-export function scanG4(root, rootPkg) {
+export function scanG4(root, rootPkg, { pinsRoot = ENGINE_ROOT } = {}) {
   const hits = [];
-  checkG4PinsFileSha(root, hits);
+  checkG4PinsFileSha(root, hits, { pinsRoot });
   const pins = loadG4Pins(root);
   hits.push(...pins.issues);
   const g4s = loadG4Files(root);
@@ -464,7 +481,7 @@ export function scanG4(root, rootPkg) {
   return hits;
 }
 
-export function scanRoot(root) {
+export function scanRoot(root, { pinsRoot = ENGINE_ROOT } = {}) {
   const hits = [];
   let rootPkg = null;
   for (const rel of packageJsonPaths(root)) {
@@ -478,7 +495,7 @@ export function scanRoot(root) {
     }
   }
   hits.push(...scanLockfile(root, rootPkg));
-  hits.push(...scanG4(root, rootPkg));
+  hits.push(...scanG4(root, rootPkg, { pinsRoot }));
   return hits;
 }
 
@@ -491,6 +508,25 @@ const GOOD_LOCK = {
     '': { name: 'open-rng-engine', devDependencies: { typescript: '5.9.3' } },
     'node_modules/typescript': { version: '5.9.3', dev: true, integrity: 'sha512-fixture', resolved: 'https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz' },
   },
+};
+
+// G-44b (HoQ a43a432c): [build(mdPass) -> G4 text, expected reason].
+const G44B_FAIL = /contradicting FAIL\/result\/status line/;
+const G44B_HIDDEN_PASS = /not a single top-level VERDICT: PASS/;
+const G44B_REWORD = (md) => md.replace('VERDICT: PASS', 'The reviewer rejected this dependency.');
+export const G44B_SPECIALS = {
+  'g44b-bq2-fail': [(md) => md + '\n> > VERDICT: FAIL\n', G44B_FAIL],
+  'g44b-bq-status-fail': [(md) => md + '\n> Status: FAIL\n', G44B_FAIL],
+  'g44b-bq-prose-fail': [(md) => md + '\n> The verdict is FAIL.\n', G44B_FAIL],
+  'g44b-indented-fail': [(md) => md + '\n    Result: FAIL\n', G44B_FAIL],
+  'g44b-outcome-fail': [(md) => md + '\nOutcome: FAIL\n', G44B_FAIL],
+  'g44b-table-outcome-fail': [(md) => md + '\n| Outcome | FAIL |\n', G44B_FAIL],
+  'g44b-failed-word': [(md) => md + '\n**Verdict** FAILED\n', G44B_FAIL],
+  'g44b-rejected-word': [(md) => md + '\nStatus: REJECTED\n', G44B_FAIL],
+  'g44b-details-pass': [(md) => G44B_REWORD(md) + '\n<details>\nVERDICT: PASS\n</details>\n', G44B_HIDDEN_PASS],
+  'g44b-style-pass': [(md) => G44B_REWORD(md) + '\n<style>\nVERDICT: PASS\n</style>\n', G44B_HIDDEN_PASS],
+  'g44b-script-pass': [(md) => G44B_REWORD(md) + '\n<script>\nVERDICT: PASS\n</script>\n', G44B_HIDDEN_PASS],
+  'g44b-template-pass': [(md) => G44B_REWORD(md) + '\n<template>\nVERDICT: PASS\n</template>\n', G44B_HIDDEN_PASS],
 };
 
 export const BAD_FIXTURES = {
@@ -725,6 +761,12 @@ export const BAD_FIXTURES = {
     reason: /Unicode Cf character/,
     g4Special: 'unicode-cf',
   },
+  // G-44b residual (HoQ a43a432c, section 3): each case is red for the reason given.
+  ...Object.fromEntries(Object.keys(G44B_SPECIALS).map((k) => [k, {
+    pkg: GOOD_PKG, lock: GOOD_LOCK,
+    reason: G44B_SPECIALS[k][1],
+    g4Special: k,
+  }])),
 };
 
 function writeJson(dir, rel, obj) {
@@ -826,6 +868,9 @@ export function writeSpecialG4(d, name, pkg, lock) {
   } else if (name === 'link-ref-comment') {
     writeFileSync(g4path, mdPass + '\n[//]: # (VERDICT: FAIL)\n');
     writeG4PinsForTree(d);
+  } else if (Object.hasOwn(G44B_SPECIALS, name)) {
+    writeFileSync(g4path, G44B_SPECIALS[name][0](mdPass));
+    writeG4PinsForTree(d);
   } else if (name === 'unicode-cf') {
     writeFileSync(g4path, mdPass + '\nVER' + '\u200B' + 'DICT: FAIL\n');
     writeG4PinsForTree(d);
@@ -846,6 +891,19 @@ export function selfTest() {
     const pinsNeedle = 'if (psha !== G4_PINS_JSON_SHA256)';
     const toolSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8');
     if (!toolSrc.includes(pinsNeedle)) fails.push('G-44a: pins-sha comparison needle missing from scanG4/checkG4PinsFileSha');
+    // G-44a: through the full scan path with the scratch root treated as the engine root, a non-official
+    // G4-PINS.json must be red (kills call-site-removed and gate-always-skips), and the scratch root
+    // under the default gate must not run the pins check (kills gate-always-runs).
+    const viaScan = scanRoot(ctl, { pinsRoot: ctl });
+    if (!viaScan.some((h) => /does not match the pinned digest/.test(h))) {
+      fails.push(`G-44a: scanRoot(pinsRoot=root) must reach checkG4PinsFileSha and red a non-official G4-PINS.json:\n${viaScan.join('\n')}`);
+    }
+    if (scanRoot(ctl).some((h) => /does not match the pinned digest/.test(h))) {
+      fails.push('G-44a: default gate ran the pins check on a scratch root');
+    }
+    if (fileSha256(join(ENGINE_ROOT, G4_PINS_REL)) !== '5f5922b280a7b2aec4fccb44d0bbf4d01a403f11c7dad2175a62b2f07895d2d0') {
+      fails.push('G-44a: real G4-PINS.json does not match the self-test digest literal');
+    }
     const pinsHits = checkG4PinsFileSha(ctl, [], { force: true });
     if (!pinsHits.some((h) => /does not match the pinned digest/.test(h))) {
       fails.push(`G-44a: pins-sha check must red a non-official G4-PINS.json (kills the pins-sha-check-disabled mutant):\n${pinsHits.join('\n')}`);

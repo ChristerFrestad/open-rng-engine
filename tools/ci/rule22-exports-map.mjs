@@ -21,6 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync
 import { join, dirname, resolve, sep, isAbsolute, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import ts from 'typescript';
 
 export const REQUIRED_EXPORT_KEYS = Object.freeze(['.', './audited', './package.json']);
@@ -104,14 +105,56 @@ function segmentMatchesTerm(seg, term) {
   return s === t || s === t + 's' || s === t + 'es';
 }
 
+// G-42 (HoQ a43a432c): Cyrillic/Greek look-alikes fold to Latin before matching; any other non-ASCII
+// character in an export or member name is red on its own (exportNameNonAscii).
+const QR33_CONFUSABLES = Object.freeze({
+  '\u0430': 'a', '\u0441': 'c', '\u0435': 'e', '\u043e': 'o', '\u0440': 'p', '\u0445': 'x', '\u0443': 'y',
+  '\u043a': 'k', '\u043c': 'm', '\u0442': 't', '\u043d': 'h', '\u0432': 'b', '\u0455': 's', '\u0456': 'i',
+  '\u0458': 'j', '\u0501': 'd', '\u04bb': 'h', '\u04cf': 'l', '\u0410': 'A', '\u0421': 'C', '\u0415': 'E',
+  '\u041e': 'O', '\u0420': 'P', '\u0425': 'X', '\u041a': 'K', '\u041c': 'M', '\u0422': 'T', '\u041d': 'H',
+  '\u0412': 'B', '\u0405': 'S', '\u0406': 'I', '\u0408': 'J', '\u03bf': 'o', '\u03b1': 'a', '\u03c1': 'p',
+  '\u0391': 'A', '\u0392': 'B', '\u0395': 'E', '\u0397': 'H', '\u0399': 'I', '\u039a': 'K', '\u039c': 'M',
+  '\u039d': 'N', '\u039f': 'O', '\u03a1': 'P', '\u03a4': 'T', '\u03a7': 'X', '\u03a5': 'Y', '\u0396': 'Z',
+});
+export function foldConfusables(name) {
+  return [...String(name).normalize('NFKC')].map((c) => QR33_CONFUSABLES[c] ?? c).join('');
+}
+export function exportNameNonAscii(name) {
+  return /[^\x00-\x7f]/.test(String(name));
+}
+
 export function qr33Hit(name) {
-  const lower = String(name).toLowerCase();
-  const segs = nameSegments(name);
+  const folded = foldConfusables(name);
+  const lower = folded.toLowerCase();
+  const joined = lower.replace(/[^a-z]/g, '');
+  const segs = nameSegments(folded);
   for (const t of QR33_TERMS) {
     if (segs.some((s) => segmentMatchesTerm(s, t))) return t;
     if (lower.includes(t)) return t;
+    if (joined.includes(t)) return t; // G-42: a term split by '_' or digits
   }
   return null;
+}
+
+const G42_GRAPH_BASE = 9;
+// G-42 residual cases; term text is built from the escaped term list, never written literally.
+export function g42Cases(cardName) {
+  const Card = cardName[0].toUpperCase() + cardName.slice(1);
+  const deal = `deal${Card}`;
+  const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
+  const aud = { 'src/audited/index.ts': 'export {};\n' };
+  const homoglyph = [...cardName].map((c) => ({ a: '\u0430', c: '\u0441' }[c] ?? c)).join('');
+  return [
+    { name: 'g42-split-term', files: { 'src/index.ts': `export const ${t11.slice(0, 4)}_${t11.slice(4)} = 1;\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-static-string', files: { 'src/index.ts': `export class C { static '${deal}' = 1; }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-static-computed', files: { 'src/index.ts': `export class C { static ['${deal}'] = 1; }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-static-private', files: { 'src/index.ts': `export class C { static #${deal} = 1; }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-enum-member', files: { 'src/index.ts': `export enum Suit { ${Card} }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-interface-member', files: { 'src/index.ts': `export interface I { ${deal}: number }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-instance-method', files: { 'src/index.ts': `export class C { ${deal}() { return 1; } }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-homoglyph', files: { 'src/index.ts': `export const ${homoglyph} = 1;\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-non-ascii', files: { 'src/index.ts': 'export const caf\u00e9 = 1;\n', ...aud }, reason: /non-ASCII character/ },
+  ];
 }
 
 export const QR33_ALLOW_REL = 'tools/qr33-allow.json';
@@ -197,6 +240,14 @@ function exportedBindings(sf) {
     }
     if (ts.isClassDeclaration(st)) {
       for (const name of classStaticNames(st)) out.push({ name, local: name, from: null, star: false, staticMember: true });
+      // G-42: instance members, string/computed-literal and #private names count too.
+      for (const name of classMemberNames(st, false)) out.push({ name, local: name, from: null, star: false, member: true });
+    }
+    if (ts.isEnumDeclaration(st)) {
+      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) out.push({ name: n, local: n, from: null, star: false, member: true }); }
+    }
+    if (ts.isInterfaceDeclaration(st)) {
+      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) out.push({ name: n, local: n, from: null, star: false, member: true }); }
     }
   }
   return out;
@@ -221,13 +272,27 @@ function bindingNames(name) {
   return out;
 }
 
+function memberNameText(n) {
+  if (!n) return null;
+  if (ts.isIdentifier(n) || ts.isPrivateIdentifier(n) || ts.isStringLiteral(n) || ts.isNumericLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return n.text.replace(/^#/, '');
+  if (ts.isComputedPropertyName(n)) {
+    const e = n.expression;
+    if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e)) return e.text;
+  }
+  return null;
+}
+
 function classStaticNames(cls) {
+  return classMemberNames(cls, true);
+}
+
+function classMemberNames(cls, isStatic) {
   const out = [];
   for (const m of cls.members) {
     const mods = m.modifiers ?? [];
-    if (!mods.some((x) => x.kind === ts.SyntaxKind.StaticKeyword)) continue;
-    const n = m.name;
-    if (n && ts.isIdentifier(n)) out.push(n.text);
+    if (mods.some((x) => x.kind === ts.SyntaxKind.StaticKeyword) !== isStatic) continue;
+    const n = memberNameText(m.name);
+    if (n !== null) out.push(n);
   }
   return out;
 }
@@ -252,6 +317,7 @@ export function walkPublicExports(root, entries, { qr33Allow = [] } = {}) {
   const todo = entries.map((rel) => ({ rel: posix(rel), fromPublic: true }));
   const emit = (rel, name, originRel) => {
     if (RAW_BYTES_APIS.includes(name)) hits.push(`${rel}:1: rule22-exports raw-bytes API '${name}' is in the public core API`);
+    if (exportNameNonAscii(name)) hits.push(`${rel}:1: rule22-exports core export '${name}' has a non-ASCII character (G-42)`);
     const q = qr33Hit(name);
     if (q && !allowed.has(name)) hits.push(`${rel}:1: rule22-exports core export '${name}' contains QR-33 term '${q}'`);
     if (originRel && posix(originRel).startsWith('src/entropy/')) {
@@ -388,6 +454,11 @@ export function scanRoot(root, opts = {}) {
   if (qr33Allow === undefined) {
     const allowPath = join(root, QR33_ALLOW_REL);
     qr33Allow = existsSync(allowPath) ? loadQr33Allow(allowPath) : [];
+    // G-42: the allow-list file is pinned; any edit is red in check:ph0, not only in npm test.
+    if (existsSync(allowPath)) {
+      const asha = createHash('sha256').update(readFileSync(allowPath)).digest('hex');
+      if (asha !== QR33_ALLOW_SHA256) hits.push(`${QR33_ALLOW_REL}:1: rule22-exports qr33-allow.json sha256 ${asha} does not match the pinned ${QR33_ALLOW_SHA256}`);
+    }
   }
   hits.push(...walkPublicExports(root, publicEntryRels(pkg), { qr33Allow }));
   return hits;
@@ -483,6 +554,8 @@ export function selfTest() {
         files: { 'src/index.ts': `export class C { static ${cardName}${uUnescape(QR33_TERM_ESCAPES[0])} = 1; }\n`, 'src/audited/index.ts': 'export {};\n' },
         reason: /QR-33 term/,
       },
+      // G-42 residual (HoQ a43a432c, section 4).
+      ...g42Cases(cardName),
     ];
     for (const [name, { pkg, reason }] of Object.entries(BAD_FIXTURES)) {
       // Materialise from a \u-escaped form; the escaped source is what we keep in-repo as the fixture text.
@@ -501,6 +574,15 @@ export function selfTest() {
       const hits = scanRoot(d);
       if (!hits.some((h) => c.reason.test(h))) fails.push(`${c.name} did not turn rule 22 red:\n${hits.join('\n')}`);
     }
+    // G-42: an edited allow-list file in the tree is red through scanRoot (sha compare), not only in npm test.
+    const pinCase = join(base, 'qr33-allow-pin');
+    writeJson(pinCase, 'package.json', GOOD_PKG);
+    mkdirSync(join(pinCase, 'src/audited'), { recursive: true });
+    writeFileSync(join(pinCase, 'src/index.ts'), 'export const n = 1;\n');
+    writeFileSync(join(pinCase, 'src/audited/index.ts'), 'export {};\n');
+    writeJson(pinCase, QR33_ALLOW_REL, { schema: 'qr33-allow/v1', entries: [{ entry: 'n', hoqRulingRef: 'scratch', fixture: 'qr33-allow-pin' }] });
+    const pinHits = scanRoot(pinCase);
+    if (!pinHits.some((h) => /qr33-allow\.json sha256 .* does not match the pinned/.test(h))) fails.push(`qr33-allow-pin: edited allow-list must be red:\n${pinHits.join('\n')}`);
     // Allow-list mechanism uses a scratch config, never the production file.
     const deal = `deal${cardName[0].toUpperCase()}${cardName.slice(1)}s`;
     const scratch = join(base, 'qr33-allow-scratch');
@@ -517,7 +599,7 @@ export function selfTest() {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + 9} known-bad fixtures red, control green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + G42_GRAPH_BASE + g42Cases('x').length + 1} known-bad fixtures red, control green`);
 }
 
 const here = fileURLToPath(import.meta.url);
