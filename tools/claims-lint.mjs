@@ -13,7 +13,9 @@
 //     case-sensitive occurrence of an allowlisted string that is the whole line apart from wrappers (see allowedSpans);
 //   - align* is unconditional; there is no allowlisted sentence containing it;
 //   - the FIPS exception set is empty in 1.0 (the allowed S-FIPS-1.0 sentence has no FIPS token): every FIPS token is a hit;
-//   - the /drbg sentence reserved by PLAN L633 is not allowlisted in 1.0; its NIST SP 800-90A / CAVP claim tokens are hits;
+//   - the /drbg sentence reserved by PLAN L633 is not allowlisted in 1.0; any 800-90A citation and CAVP are hits (CPO-R97b);
+//     SP 800-90B inside the exact S-FIPS-1.0 sentence stays green;
+//   - strict whole-line reading confirmed by CPO-R97b: a sentence wrapped across lines is not honoured;
 //   - allowlist strings are \u-escaped like the banned patterns and pinned by sha256; a pin mismatch is a config error (exit 2),
 //     so a list change without a CPO verdict cannot go green silently.
 import { readFileSync, readdirSync, statSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -36,7 +38,7 @@ export const RULES = [
   ['R16-gold-standard', /\b\u0067old\s+standard\b/gi],
   ['R16-fips', /\b\u0046IPS\b/gi],
   ['R16-badge', /!\[[^\]]*(?:GLI|NIST)[^\]]*\]\([^)]*\)|!\[[^\]]*\]\([^)]*(?:GLI|NIST)[^)]*\)|<img\b[^>]*(?:GLI|NIST)[^>]*>/gi],
-  ['C10-drbg-reserved', /\bNIST\s+SP\s*800-90A\b|\b\u0043AVP\b/gi],
+  ['C10-drbg-reserved', /(?<![0-9])800-90A\b|\b\u0043AVP\b/gi], // CPO-R97b: any 800-90A citation (with or without NIST SP) and CAVP
 ];
 // Only these rule ids can be exempted by an allowlisted occurrence (CPO-R97: certif* and complian*).
 // R16-align and R16-fips are never exempt.
@@ -192,6 +194,33 @@ export function nearMissCases() {
   add('drbg reserved sentence (L633)', 'Implements HMAC_DRBG (SHA-256) as specified in NIST SP 800-90A Rev. 1, verified against NIST \u0043AVP known-answer test vectors. Not a validated module.', 'red');
   // C-14: the ARCHITECTURE.md disclaimer on the remote is not an allowlisted sentence.
   add('C-14: ARCHITECTURE.md disclaimer', '\u0043ertification applies to an operator\'s or supplier\'s complete system, never to this library.', 'red');
+  // CPO-R97b (1): strict whole-line reading. A stem-bearing allowlisted sentence wrapped across lines is a hit,
+  // at every space. Single exception, by construction: S-P1 split exactly before its last two sentences leaves
+  // line 2 == S-P1-short (itself allowlisted, whole line) and line 1 with no stem token, so there is nothing to flag.
+  for (const [id, s] of ALLOW.filter(([, t]) => t.includes(STEM))) {
+    const short = ALLOW.find(([i]) => i === 'S-P1-short')[1];
+    for (let j = 0; j < s.length; j++) {
+      if (s[j] !== ' ') continue;
+      const wrapped = `${s.slice(0, j)}\n${s.slice(j + 1)}`;
+      const benign = id === 'S-P1' && s.slice(j + 1) === short;
+      add(`${id}: wrapped across lines at col ${j}${benign ? ' (line 2 is S-P1-short alone)' : ''}`, wrapped, benign ? 'clean' : 'red');
+    }
+  }
+  const p1 = ALLOW.find(([i]) => i === 'S-P1')[1];
+  add('S-P1: must sit on one line (markdown soft wrap mid-sentence)', p1.replace(' evaluation.', '\nevaluation.').replace('Not \u0063ertified.', 'Not\n\u0063ertified.'), 'red');
+  add('S-P1: indented continuation line', p1.replace(' Not \u0063ertified.', '\n  Not \u0063ertified.').replace(' Not a validated', ' Not a\n  validated'), 'red');
+  // CPO-R97b (2): S-FIPS-1.0 cites SP 800-90B and stays green; 800-90A and CAVP are hits.
+  for (const id of ['S-FIPS-1.0', 'S-FIPS-1.0-typographic']) {
+    const f = ALLOW.find(([i]) => i === id)[1];
+    add(`${id}: SP 800-90B citation stays green`, f, 'clean');
+    add(`${id}: 800-90B -> 800-90A is a hit`, f.replace('800-90B', '800-90A'), 'red');
+    add(`${id}: 800-90B -> NIST SP 800-90A is a hit`, f.replace('SP 800-90B', 'NIST SP 800-90A'), 'red');
+    add(`${id}: plus CAVP claim is a hit`, `${f} Tested with \u0043AVP vectors.`, 'red');
+  }
+  add('800-90A: bare', 'Implements SP800-90A.', 'red');
+  add('800-90A: lower case', 'see sp 800-90a', 'red');
+  add('CAVP: bare', '\u0043AVP', 'red');
+  add('800-90B alone (no claim token) stays green', 'The library performs no SP 800-90B entropy-source validation.', 'clean');
   // Known-bad shape stays red.
   add('known-bad fixture', KNOWN_BAD_README, 'red');
   return c;

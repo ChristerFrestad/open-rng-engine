@@ -66,3 +66,11 @@ One line per commit, written before the commit by the committing seat. Columns: 
 - Interim gate for this and later commits: g1-tools/o55-staged-wrapper.py (sha c99fe0b43af49537a58223e781187309821eb66ddef45b12ea3040507d1fd35b) around o55-scan.py 156340f7 (unmodified). Scans index bytes of every tracked path; the ONLY content exclusion is the exact path tools/protected-names.txt AND staged sha 7f56688e AND pn-validate PASS AND version 1 AND 38 entries; its path is still scanned; LICENSE not excluded. Scratch controls: good list 0; sibling .bak 38 hits; tools/other.txt 38; altered list 39; plant elsewhere 1; same name in another dir 38; worktree-only change ignored (index bytes) 0.
 
 | 2026-11-18 08:09:00 CET | CTO via executor | C-9: add CPO protected-names list v1 (38 entries, sha 7f56688e, CTO CONFIRMED) on its own | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
+
+## CPO-R97b tests (strict whole-line confirmed; C10-drbg-reserved confirmed; LICENSE exact-path+sha accepted)
+
+- Added near-miss cases: every stem-bearing allowlisted sentence wrapped at every space is red; S-P1 soft-wrapped / indented continuation red. One case is green by construction and recorded as such: S-P1 split exactly before "Not c…ified. Not a validated module." leaves line 2 == S-P1-short (allowlisted alone) and line 1 with no stem token.
+- S-FIPS-1.0 (plain + typographic) with SP 800-90B stays green; 800-90B->800-90A, ->NIST SP 800-90A, +CAVP are red. Rule C10-drbg-reserved widened from `NIST SP 800-90A` to any `800-90A` citation (bare "SP 800-90A" previously passed) plus CAVP. No relaxation of any lint decision.
+- Tests: npm test 242 pass / 0 fail; --self-test known-bad red + 186/186 near-miss; scratch removed.
+
+| 2026-11-18 08:09:39 CET | CTO via executor | C-10 tests (CPO-R97b): wrapped-sentence and one-line S-P1 hits; S-FIPS-1.0 800-90B green, 800-90A/CAVP red | 0 | 156340f762ea1cdfff5866d8638e9cc82c75bcc53e531237b38cabb68d489882 | 0 | 0 |
