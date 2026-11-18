@@ -20,12 +20,11 @@
 //    red, as are Reflect.construct, Object/Reflect.getPrototypeOf, and `__proto__`.
 //  G-25: the M-152c fixture is hasOwn(globalThis,'k') at a non-guard path and is red (globalThis-alias). The exact
 //    coreGuard forms are allowed only at packages/capability/src/coreGuard.ts.
-//  G-26: any `Reflect` identifier in scanned source is red. Any element-access key that is not a string or numeric
-//    literal (incl. template-with-substitution and concatenation) is red, unless the type checker types it as
-//    `number`, or as a union of literals none of which is on the banned-name list and all of which are on
-//    COMPUTED_LITERAL_KEYS_ALLOWED (empty in production; tests may inject an allow-list). The same key rule applies
-//    at reflective bases (Reflect.*, Object.getOwnPropertyDescriptor/defineProperty, Object[getPrototypeOf],
-//    indexed constructor, indexed __proto__).
+//  G-26: any `Reflect` identifier in scanned source is red. S-1: element-access and o[k]= keys are decided from the
+//    AST and scope, never the type checker (no typed-as-number path, no typed-array fallback). Reflective-base keys
+//    are green only as a source literal or a syntactically numeric form; a type-checker `number` is not enough.
+//    COMPUTED_LITERAL_KEYS_ALLOWED stays empty in production. S-1 also reds the `Proxy` identifier, `.crypto` as a
+//    member name on any base, and treats no-substitution templates like string literals everywhere (incl. keys).
 //  G-27: every relative specifier must have an explicit allowed extension (.ts/.mts/.cts) and resolve to exactly one
 //    file this scan parsed; unresolved, extensionless, outside the scanned set, or via node_modules is red. Every
 //    git-tracked source file under SCAN_ROOTS must be parsed (`git ls-files`). `.js`/`.mjs`/`.cjs` under src/ is red.
@@ -34,8 +33,10 @@
 //    __defineSetter__ are red as identifiers or member names. Object.getOwnPropertyDescriptor(s), getPrototypeOf,
 //    setPrototypeOf and defineProperty are red outside coreGuard's exact forms. Computed keys in destructuring
 //    patterns or object literals are red unless the key is a numeric literal. Element access is green only with a
-//    numeric literal key, or an identifier the TS checker types as number (string keys are AST-only, never from the
-//    TS type). Type assertions (as, <T>), any/unknown in type positions, the non-null !, @ts-ignore and @ts-nocheck
+//    numeric literal key, or (S-1, no type checker) a syntactically numeric runtime key: a numeric literal; unary +/-
+//    or ~ applied to anything; a binary operator that always yields a number (- * / % ** | & ^ << >> >>>, not + or +=);
+//    or a let/const declared in the same function whose every write (initialiser and assignments) is one of those forms or ++/--.
+//    Parameters, destructuring, imports, module-level bindings, closures written from another function, and += writes are red. Type assertions (as, <T>), any/unknown in type positions, the non-null !, @ts-ignore and @ts-nocheck
 //    are red; @ts-expect-error is allowed only at the single pinned entropy import line. Error.prepareStackTrace,
 //    captureStackTrace and stackTraceLimit are red.
 //  G-30: closed-world (unparsed-tracked) and js-under-src have their own fixtures. Tracked extensionless and .json
@@ -459,11 +460,212 @@ function isInsideAllowedGuardDefineProperty(node, rel) {
   return false;
 }
 
-function isGreenElementKey(expr, checker) {
-  if (!expr) return false;
-  if (ts.isNumericLiteral(expr)) return true;
-  if (ts.isIdentifier(expr) && checker && isNumberType(checker.getTypeAtLocation(expr))) return true;
+const NUMERIC_BINARY = new Set([
+  ts.SyntaxKind.MinusToken, ts.SyntaxKind.AsteriskToken, ts.SyntaxKind.SlashToken, ts.SyntaxKind.PercentToken,
+  ts.SyntaxKind.AsteriskAsteriskToken, ts.SyntaxKind.BarToken, ts.SyntaxKind.AmpersandToken, ts.SyntaxKind.CaretToken,
+  ts.SyntaxKind.LessThanLessThanToken, ts.SyntaxKind.GreaterThanGreaterThanToken, ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
+]);
+const NUMERIC_COMPOUND = new Set([
+  ts.SyntaxKind.MinusEqualsToken, ts.SyntaxKind.AsteriskEqualsToken, ts.SyntaxKind.SlashEqualsToken, ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken, ts.SyntaxKind.BarEqualsToken, ts.SyntaxKind.AmpersandEqualsToken, ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken, ts.SyntaxKind.GreaterThanGreaterThanEqualsToken, ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+]);
+
+function isFunctionLike(node) {
+  return !!(node && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
+    || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node)
+    || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)
+    || ts.isClassStaticBlockDeclaration(node)));
+}
+
+function containingFunction(node) {
+  let n = node && node.parent;
+  while (n) {
+    if (isFunctionLike(n)) return n;
+    n = n.parent;
+  }
+  return null;
+}
+
+function unwrapParens(expr) {
+  let e = expr;
+  while (e && ts.isParenthesizedExpression(e)) e = e.expression;
+  return e;
+}
+
+function isIncDec(node) {
+  const e = unwrapParens(node);
+  if (!e) return false;
+  if (ts.isPrefixUnaryExpression(e) || ts.isPostfixUnaryExpression(e)) {
+    return e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken;
+  }
   return false;
+}
+
+function isFunctionLikeParamName(decl) {
+  const p = decl && decl.parent;
+  return p && ts.isParameter(p) && p.name === decl;
+}
+
+function patternBindsName(pat, name) {
+  if (!pat) return false;
+  if (ts.isIdentifier(pat)) return idText(pat) === name;
+  if (ts.isBindingElement(pat)) return patternBindsName(pat.name, name);
+  if (ts.isObjectBindingPattern(pat) || ts.isArrayBindingPattern(pat)) {
+    return pat.elements.some((el) => !ts.isOmittedExpression(el) && patternBindsName(el, name));
+  }
+  return false;
+}
+
+function declarationsIntroducedBy(node) {
+  const out = [];
+  const takeList = (list) => {
+    if (list && ts.isVariableDeclarationList(list)) out.push(...list.declarations);
+  };
+  if (ts.isVariableStatement(node)) takeList(node.declarationList);
+  if (ts.isForStatement(node) && node.initializer) takeList(node.initializer);
+  if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && node.initializer) takeList(node.initializer);
+  if (ts.isBlock(node) || ts.isModuleBlock(node) || ts.isSourceFile(node) || ts.isCaseClause(node) || ts.isDefaultClause(node)) {
+    for (const st of node.statements ?? []) {
+      if (ts.isVariableStatement(st)) takeList(st.declarationList);
+    }
+  }
+  if (ts.isCatchClause(node) && node.variableDeclaration) out.push(node.variableDeclaration);
+  return out;
+}
+
+function matchBindingAt(cur, name) {
+  if (isFunctionLike(cur)) {
+    for (const p of cur.parameters ?? []) {
+      if (ts.isIdentifier(p.name) && idText(p.name) === name) return { kind: 'param', decl: p };
+      if (!ts.isIdentifier(p.name) && patternBindsName(p.name, name)) return { kind: 'destructure', decl: p };
+    }
+  }
+  for (const d of declarationsIntroducedBy(cur)) {
+    if (ts.isIdentifier(d.name) && idText(d.name) === name) return { kind: 'var', decl: d };
+    if (!ts.isIdentifier(d.name) && patternBindsName(d.name, name)) return { kind: 'destructure', decl: d };
+  }
+  return null;
+}
+
+function resolveLocalBinding(ident) {
+  const name = idText(ident);
+  let cur = ident.parent;
+  while (cur) {
+    const found = matchBindingAt(cur, name);
+    if (found) return found;
+    if (isFunctionLike(cur)) return null;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+// Walk through nested functions so a write in a closure can be attributed to an outer binding.
+function resolveBindingIncludingOuter(ident) {
+  const name = idText(ident);
+  let cur = ident.parent;
+  while (cur) {
+    const found = matchBindingAt(cur, name);
+    if (found) return found;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+function isNumericWriteValue(expr, useFn, seen) {
+  if (isIncDec(expr)) return true;
+  const e = unwrapParens(expr);
+  if (e && ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) return false;
+  if (e && ts.isBinaryExpression(e) && NUMERIC_COMPOUND.has(e.operatorToken.kind)) return true;
+  if (e && ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.EqualsToken) return isNumericKeyExpr(e.right, seen);
+  return isNumericKeyExpr(expr, seen);
+}
+
+function identifierIsAssignedIn(node, decl, name) {
+  if (!node || !ts.isIdentifier(node)) return false;
+  if (idText(node) !== name) return false;
+  const resolved = resolveBindingIncludingOuter(node);
+  return !!(resolved && resolved.decl === decl);
+}
+
+function collectWrites(fn, decl, name) {
+  const writes = [];
+  const walkW = (node) => {
+    if (ts.isVariableDeclaration(node) && node === decl && node.initializer) writes.push({ kind: 'init', expr: node.initializer, at: node });
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && identifierIsAssignedIn(node.left, decl, name)) {
+      writes.push({ kind: 'assign', expr: node.right, at: node });
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind !== ts.SyntaxKind.EqualsToken && ts.isAssignmentOperator(node.operatorToken.kind)
+      && identifierIsAssignedIn(node.left, decl, name)) {
+      writes.push({ kind: 'compound', expr: node, at: node });
+    }
+    if (isIncDec(node)) {
+      const inner = unwrapParens(node);
+      const opnd = inner.operand;
+      if (identifierIsAssignedIn(opnd, decl, name)) writes.push({ kind: 'incdec', expr: node, at: node });
+    }
+    if ((ts.isForInStatement(node) || ts.isForOfStatement(node)) && identifierIsAssignedIn(node.initializer, decl, name)) {
+      writes.push({ kind: 'for-in-of', expr: node.initializer, at: node });
+    }
+    if (ts.isSpreadAssignment(node)) { /* skip */ }
+    ts.forEachChild(node, walkW);
+  };
+  walkW(fn);
+  return writes;
+}
+
+function isNumericLocalIdentifier(ident, seen) {
+  const resolved = resolveLocalBinding(ident);
+  if (!resolved || resolved.kind !== 'var') return false;
+  const decl = resolved.decl;
+  if (!ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name)) return false;
+  const list = decl.parent;
+  if (!ts.isVariableDeclarationList(list)) return false;
+  if (!(list.flags & ts.NodeFlags.Let) && !(list.flags & ts.NodeFlags.Const)) return false;
+  if (!decl.initializer) return false;
+  const useFn = containingFunction(ident);
+  const declFn = containingFunction(decl);
+  if (!useFn || useFn !== declFn) return false;
+  const name = idText(decl.name);
+  const writes = collectWrites(useFn, decl, name);
+  // A write whose containing function is not useFn means a nested function wrote it.
+  for (const w of writes) {
+    const wFn = containingFunction(w.at);
+    if (wFn !== useFn) return false;
+    if (w.kind === 'for-in-of') return false;
+    if (w.kind === 'compound') {
+      if (w.expr.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) return false;
+      if (!NUMERIC_COMPOUND.has(w.expr.operatorToken.kind)) return false;
+      continue;
+    }
+    if (w.kind === 'incdec') continue;
+    if (!isNumericKeyExpr(w.expr, seen)) return false;
+  }
+  return true;
+}
+
+export function isNumericKeyExpr(expr, seen = new Set()) {
+  if (!expr) return false;
+  const e = unwrapParens(expr);
+  if (!e) return false;
+  if (seen.has(e)) return false;
+  const next = new Set(seen);
+  next.add(e);
+  if (ts.isNumericLiteral(e)) return true;
+  if (ts.isPrefixUnaryExpression(e)) {
+    const op = e.operator;
+    if (op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.TildeToken) return true;
+    return false;
+  }
+  if (ts.isBinaryExpression(e)) {
+    return NUMERIC_BINARY.has(e.operatorToken.kind);
+  }
+  if (ts.isIdentifier(e)) return isNumericLocalIdentifier(e, next);
+  return false;
+}
+
+function isGreenElementKey(expr) {
+  return isNumericKeyExpr(expr);
 }
 
 function isComputedKeyContext(nameNode) {
@@ -633,6 +835,9 @@ export function scanFile(rel, src, opts = {}) {
     if (ts.isIdentifier(node) && idText(node) === 'Reflect') {
       addNode(node, 'reflect-identifier', 'Reflect identifier is red in scanned source (G-26)');
     }
+    if (ts.isIdentifier(node) && idText(node) === 'Proxy') {
+      addNode(node, 'proxy-identifier', 'Proxy identifier is red in scanned source (S-1)');
+    }
     // G-28: banned string literals / no-substitution templates, any position, AST value.
     if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && BANNED_STRING_LITERALS.includes(node.text)) {
       addNode(node, 'banned-string-literal', `string literal or no-substitution template '${node.text}' is red in any position (G-28)`);
@@ -663,8 +868,8 @@ export function scanFile(rel, src, opts = {}) {
     if (ts.isNonNullExpression(node)) addNode(node, 'non-null-assertion', 'non-null assertion is red in core src (G-28)');
     if (ts.isElementAccessExpression(node)) {
       const key = node.argumentExpression;
-      if (!isGreenElementKey(key, checker)) {
-        addNode(node, 'computed-access', `element access key is not a numeric literal or a number-typed identifier: ${key.getText()}`);
+      if (!isGreenElementKey(key)) {
+        addNode(node, 'computed-access', `element access key is not a syntactically numeric form (S-1): ${key.getText()}`);
       }
     }
     if (ts.isCallExpression(node)) {
@@ -674,8 +879,8 @@ export function scanFile(rel, src, opts = {}) {
         if (idx >= 0 && node.arguments[idx]) {
           const key = node.arguments[idx];
           const v = computedKeyVerdict(key, checker, keyOpts);
-          if (v !== 'source-literal' && v !== 'number' && v !== 'allowed' && v !== 'string-treated-safe') {
-            addNode(key, 'reflective-key', `computed key at reflective base ${base} is not a source literal or allowed typed key (${v}): ${key.getText()}`);
+          if (!isGreenElementKey(key) && v !== 'source-literal' && v !== 'allowed' && v !== 'string-treated-safe') {
+            addNode(key, 'reflective-key', `computed key at reflective base ${base} is not a source literal or a syntactically numeric form (${v}): ${key.getText()}`);
           }
         }
       }
@@ -716,6 +921,7 @@ export function scanFile(rel, src, opts = {}) {
       if (mem === 'constructor') addNode(node, 'constructor-reach', 'member access named constructor');
       if (mem === '__proto__') addNode(node, 'proto-member', 'member access named __proto__');
       if (PROCESS_ALWAYS_BANNED.includes(mem)) addNode(node, 'process-banned-member', mem === undefined ? 'banned member' : (ts.isElementAccessExpression(node) ? `['${mem}'] (always red, any base)` : `.${mem} (always red, any base)`));
+      if (mem === 'crypto') addNode(node, 'crypto-member', ts.isElementAccessExpression(node) ? "['crypto'] (always red, any base)" : '.crypto (always red, any base)');
       if ((mem === 'binding' || mem === 'getBuiltinModule') && isIdent(node.expression, 'process')) {
         addNode(node, 'process-binding', 'process.binding / process.getBuiltinModule');
       }
@@ -751,6 +957,7 @@ export function scanFile(rel, src, opts = {}) {
       if (key === 'constructor') addNode(node, 'constructor-reach', 'destructured constructor');
       if (key === '__proto__') addNode(node, 'proto-member', 'destructured __proto__');
       if (PROCESS_ALWAYS_BANNED.includes(key)) addNode(node, 'process-banned-member', `destructured ${key} (always red)`);
+      if (key === 'crypto') addNode(node, 'crypto-member', 'destructured crypto (always red, any base)');
     }
 
     if (ts.isIdentifier(node)) {
@@ -1085,7 +1292,25 @@ export const BAD = {
   'computed-object-key': "const k = 'a'+'b';\nconst o = { [k]: 1 };\n",
   'string-element-access': "const o = { kind: 1 };\no['kind'];\n",
   'setPrototypeOf': 'Object.setPrototypeOf(x, y);\n',
+  // S-1: element-access keys are AST/scope only (type-checker number is not enough). Each fixture is killed by check:ph0.
+  's1-overload-lie': "function k(): number;\nfunction k(): string | number { return 'constr' + 'uctor' }\nfunction f() {\n  const i = k();\n  const o = { x: 1 };\n  o[i];\n}\n",
+  's1-type-guard-lie': "function isN(x: string | number): x is number { return true; }\nfunction f(x: string | number) {\n  const o = { x: 1 };\n  if (isN(x)) o[x];\n}\n",
+  's1-asserts-is-number': "function assertN(x: string | number): asserts x is number {}\nfunction f(x: string | number) {\n  assertN(x);\n  const o = { x: 1 };\n  o[x];\n}\n",
+  's1-method-param-bivariance': "type Setter = { set(k: number): void };\nconst o = { x: 1 };\nconst box: Setter = { set(k) { o[k]; } };\n",
+  's1-array-covariance': "function f() {\n  const nums: number[] = [];\n  const mixed: Array<string | number> = nums;\n  mixed.push('constr' + 'uctor');\n  const k = nums[0];\n  const o = { x: 1 };\n  o[k];\n}\n",
+  's1-json-parse-key': "function f() {\n  const k: number = JSON.parse('1');\n  const o = { x: 1 };\n  o[k];\n}\n",
+  's1-plus-concat-key': "function f() {\n  const k = 1 + 0;\n  const o = { x: 1 };\n  o[k];\n}\n",
+  's1-parameter-key': "function f(i: number) {\n  const o = { x: 1 };\n  o[i];\n}\n",
+  's1-closure-written': "function f() {\n  let i = 0;\n  function inc() { i = 1; }\n  const o = { x: 1 };\n  o[i];\n}\n",
+  'crypto-member-any-base': 'obj.crypto;\n',
+  'proxy-get-trap': 'const o = new Proxy({}, { get(t) { return t[0]; } });\n',
+  'template-constructor-key': 'const o = { x: 1 };\no[`constructor`];\n',
+  'import-bare-worker_threads': "import { Worker } from 'worker_threads';\n",
+  'import-bare-child_process': "import { spawn } from 'child_process';\n",
+  'import-data-url': "import x from 'data:text/javascript,export default 1';\n",
+  'import-blob-url': "import x from 'blob:https://example.com/id';\n",
 };
+
 function m161KeyForms(target) {
   const mid = Math.ceil(target.length / 2);
   const a = target.slice(0, mid), b = target.slice(mid);
@@ -1198,6 +1423,22 @@ export const BAD_REASON = { 'allowlist-SEED_BYTES': ALLOW_REASON('SEED_BYTES'), 
   'computed-object-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-key /,
   'string-element-access': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
   'setPrototypeOf': /^src\/mapping\/bad\.ts:\d+: rule27-object-api /,
+  's1-overload-lie': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-type-guard-lie': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-asserts-is-number': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-method-param-bivariance': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-array-covariance': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-json-parse-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-plus-concat-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-parameter-key': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  's1-closure-written': /^src\/mapping\/bad\.ts:\d+: rule27-computed-access /,
+  'crypto-member-any-base': /^src\/mapping\/bad\.ts:\d+: rule27-crypto-member /,
+  'proxy-get-trap': /^src\/mapping\/bad\.ts:\d+: rule27-proxy-identifier /,
+  'template-constructor-key': /^src\/mapping\/bad\.ts:\d+: rule27-banned-string-literal /,
+  'import-bare-worker_threads': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-bare-child_process': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-data-url': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
+  'import-blob-url': /^src\/mapping\/bad\.ts:\d+: rule27-specifier-not-allowed /,
 };
 const M161_REASON = /^(?:src\/mapping\/bad)\.ts:\d+: rule27-(?:reflect-identifier|reflective-key|computed-access|constructor-reach|proto-member|getPrototypeOf|object-api|banned-string-literal|type-assertion|computed-key) /;
 for (const name of Object.keys(BAD)) {
@@ -1222,7 +1463,7 @@ export function writeFixture(dir, extra = {}) {
   for (const [p, s] of Object.entries({ ...GOOD, ...extra })) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), s); }
 }
 
-export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts'];
+export const SELF_TEST_EXTRA_CASES = ['allowlist-control', 'guard-control', 'MX-12 p8-package key plant', 'MX-12 clean control', 'unparsed-tracked', 'js-under-src', 'tracked-non-ts', 's1-numeric-for-loop-control'];
 function mx12Case(base) {
   const out = []; const here = dirname(new URL(import.meta.url).pathname); const lint = join(here, '..', 'claims-lint.mjs');
   const sp1 = JSON.parse(readFileSync(join(here, '..', 'claims-allowlist.json'), 'utf8')).entries.find((e) => e.id === 'S-P1')?.text;
@@ -1298,15 +1539,20 @@ export function selfTest() {
     if (strSafe.some((h) => /rule27-computed-access /.test(h))) {
       // treatStringAsSafe:true is only an API hook used by tests; production self-test requires default red, already checked.
     }
-    // Number-typed index stays green (G-26 exception).
-    const numDir = join(base, 'm161-number-index-control');
-    writeFixture(numDir, { 'src/mapping/ok.ts': 'const i: number = 0;\nconst a: string[] = [];\na[i];\n' });
+    // S-1: a numeric local let/const in the same function, and a numeric literal, stay green. Module-level and
+    // type-only number annotations are not enough. Typical for-loop `for (let i = 0; i < n; i++) buf[i]` stays green.
+    const numDir = join(base, 's1-numeric-local-control');
+    writeFixture(numDir, { 'src/mapping/ok.ts': 'function f() {\n  const i = 0;\n  const a: string[] = [];\n  a[i];\n}\n' });
     const numHits = scanTree(numDir).hits.filter((h) => /rule27-computed-access /.test(h));
-    if (numHits.length) fails.push(`number-typed index must stay green:\n${numHits.join('\n')}`);
+    if (numHits.length) fails.push(`numeric local binding must stay green:\n${numHits.join('\n')}`);
     const litDir = join(base, 'm161-numeric-literal-control');
     writeFixture(litDir, { 'src/mapping/ok.ts': 'const a: string[] = [];\na[0];\n' });
     const litHits = scanTree(litDir).hits.filter((h) => /rule27-computed-access /.test(h));
     if (litHits.length) fails.push(`numeric-literal element access must stay green:\n${litHits.join('\n')}`);
+    const loopDir = join(base, 's1-numeric-for-loop-control');
+    writeFixture(loopDir, { 'src/mapping/ok.ts': 'function f(buf: number[], n: number) {\n  for (let i = 0; i < n; i++) buf[i] = i;\n}\n' });
+    const loopHits = scanTree(loopDir).hits.filter((h) => /rule27-computed-access /.test(h));
+    if (loopHits.length) fails.push(`for-loop numeric index must stay green:\n${loopHits.join('\n')}`);
     if (TRACKED_NON_TS_ALLOWED.length !== 0) fails.push('TRACKED_NON_TS_ALLOWED must stay empty in production');
 
     // G-30: closed-world (unparsed-tracked) fixture — a tracked .ts under src/**/node_modules is walked-skipped.
