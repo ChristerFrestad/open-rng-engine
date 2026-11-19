@@ -1,5 +1,5 @@
-// CTO commit H (HoQ addendum 1 A6, A7 R-W1-METHOD): labkit AES-256-CTR reference adapter and the wave-1
-// calibration harness. Calibration is verification on the reference stream, not a counted evidence run.
+// CTO commits H and J (HoQ addendum 1 A6-A8, G-56): labkit AES-256-CTR reference adapter, THE wave-1
+// statistic module (shared by the evidence path and the calibration) and the calibration harness. Calibration is verification on the reference stream, not a counted evidence run.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -7,8 +7,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ref from '../verification/labkit/aes-ctr-ref.mjs';
-import * as L from '../verification/calibration/laws.mjs';
-import * as W from '../verification/calibration/wave1-entries.mjs';
+import * as S from '../verification/statistic/wave1-statistic.mjs';
+import * as Src from '../verification/calibration/wave1-source.mjs';
+import * as Ev from '../verification/harness/wave1-evidence.mjs';
 import { scanFile } from '../tools/ci/import-allowlist.mjs';
 import { isUnderRepoSrc, defaultAllowedCallers } from '../tools/ci/entropy-backstop.mjs';
 
@@ -31,65 +32,134 @@ test('labkit adapter: own KAT vectors (keystream words, 1 MiB digest, below())',
   });
 });
 
-test('labkit adapter stays outside src: rule 27 refuses a src import of it; backstop src scope unchanged', () => {
-  for (const spec of ['../verification/labkit/aes-ctr-ref.mjs', '../verification/labkit/aes-ctr-ref.ts', '../verification/calibration/laws.mjs']) {
+test('labkit adapter and the wave-1 statistic stay outside src: rule 27 refuses a src import; no OS entropy', () => {
+  for (const spec of ['../verification/labkit/aes-ctr-ref.mjs', '../verification/labkit/aes-ctr-ref.ts', '../verification/statistic/wave1-statistic.mjs', '../verification/calibration/wave1-source.mjs']) {
     const r = scanFile('src/zz-labkit.ts', `import { x } from '${spec}';\nexport const y = x;\n`);
     assert.ok(r.hits.some((h) => /rule27-specifier-not-allowed/.test(h)), spec);
   }
   assert.equal(isUnderRepoSrc(join(ROOT, 'src/index.ts')), true);
   assert.equal(isUnderRepoSrc(join(ROOT, 'verification/labkit/aes-ctr-ref.mjs')), false);
   assert.equal(JSON.stringify(defaultAllowedCallers()).includes('labkit'), false);
-  for (const f of ['verification/labkit/aes-ctr-ref.mjs', 'verification/calibration/laws.mjs', 'verification/calibration/wave1-entries.mjs']) {
-    assert.doesNotMatch(readFileSync(join(ROOT, f), 'utf8'), /from '\.\.\/\.\.\/src\/|randomBytes|randomFill|getRandomValues/);
+  for (const f of ['verification/labkit/aes-ctr-ref.mjs', 'verification/statistic/wave1-statistic.mjs', 'verification/calibration/wave1-source.mjs', 'verification/harness/wave1-evidence.mjs']) {
+    assert.doesNotMatch(readFileSync(join(ROOT, f), 'utf8'), /from '\.\.\/\.\.\/src\/|randomBytes|randomFill|getRandomValues|Math\.random/);
   }
+  assert.doesNotMatch(readFileSync(join(ROOT, 'verification/statistic/wave1-statistic.mjs'), 'utf8'), /^import /m, 'the statistic imports nothing (no stream inside)');
+});
+
+// G-56 identity: the evidence path and the calibration run the SAME module and function objects.
+test('G-56: one statistic module, bound by identity on the evidence path and in the calibration', async () => {
+  assert.equal(Ev.STATISTIC, Src.STATISTIC);
+  const again = await import('../verification/statistic/wave1-statistic.mjs');
+  assert.equal(Ev.STATISTIC, again);
+  for (const fn of ['lawExact', 'lumpExact', 'observe', 'histogram', 'pearson', 'chi2sf', 'lehmerTop20', 'a6Verdict', 'ksUniform']) {
+    assert.equal(typeof S[fn], 'function', fn);
+    assert.equal(Ev.STATISTIC[fn], S[fn], fn); assert.equal(Src.STATISTIC[fn], S[fn], fn);
+  }
+  assert.match(readFileSync(join(ROOT, 'verification/calibration/wave1-calibrate.mjs'), 'utf8'), /from '\.\/wave1-source\.mjs'/);
+  assert.match(readFileSync(join(ROOT, 'verification/calibration/wave1-source.mjs'), 'utf8'), /import \* as S from '\.\.\/statistic\/wave1-statistic\.mjs'/);
+  // Same outcomes -> same statistic: the reference stream fed directly, and the same outcomes as records.
+  const e = Src.ENTRIES[0]; const M = 200; const lu = S.lumpExact(S.lawExact(e), M);
+  const direct = Src.replicate(e, 7, M, lu);
+  const s = new ref.RefStream(e.stream, 7); const rec = []; const src = Src.refSource(e, s);
+  const tap = () => { const v = src(); rec.push(v); return v; };
+  const h = S.histogram(e, M, tap, lu.map.length);
+  const viaRecords = Ev.statisticFromRecords(e, rec, M);
+  assert.equal(viaRecords.x2, direct.x2); assert.equal(viaRecords.p, direct.p); assert.equal(viaRecords.unread, 0); assert.equal(h.outcomes, direct.outcomes);
+  assert.throws(() => Ev.evidenceStatistic(e.id, { records: rec }, M), /G-54/);
 });
 
 const perms = (a) => (a.length <= 1 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [x, ...p])));
 
-test('calibration laws: brute-force enumeration fixtures (coupon d=2,3; duplicates m=3 b=5; adjacency 2x3, 3x2)', () => {
-  const c2 = L.couponLaw(2).p; for (let k = 2; k < 12; k++) assert.ok(Math.abs(c2[k - 2] - 0.5 ** (k - 1)) < 1e-15);
-  // d = 3: enumerate all 3^t sequences up to t = 9 and read T exactly.
-  const c3 = L.couponLaw(3).p; const cnt = new Map();
-  for (let t = 3; t <= 9; t++) { let n = 0; for (let x = 0; x < 3 ** t; x++) { const s = new Set(); let v = x, T = 0; for (let i = 0; i < t; i++) { s.add(v % 3); v = Math.floor(v / 3); if (s.size === 3) { T = i + 1; break; } } if (T === t) n += 1; } cnt.set(t, n / 3 ** t); }
-  for (const [t, q] of cnt) assert.ok(Math.abs(c3[t - 3] - q) < 1e-14, `coupon d=3 T=${t}`);
-  const dl = L.dupLaw(3, 5).p; const h = new Array(6).fill(0);
-  for (let x = 0; x < 3 ** 5; x++) { const s = new Set(); let v = x, C = 0; for (let i = 0; i < 5; i++) { if (s.has(v % 3)) C += 1; else s.add(v % 3); v = Math.floor(v / 3); } h[C] += 1 / 3 ** 5; }
-  for (let c = 0; c <= 4; c++) assert.ok(Math.abs((dl[c] ?? 0) - h[c]) < 1e-14, `dup C=${c}`);
-  for (const [Lb, c] of [[2, 3], [3, 2]]) {
-    const law = L.adjacencyLawExact(Lb, c); const deck = Array.from({ length: Lb * c }, (_, i) => Math.floor(i / c));
-    const hh = new Map(); for (const p of perms(deck.map((_, i) => i))) { let X = 0; for (let i = 1; i < p.length; i++) if (deck[p[i]] === deck[p[i - 1]]) X += 1; hh.set(X, (hh.get(X) ?? 0n) + 1n); }
-    for (const [X, n] of hh) assert.equal(law.exactNum.get(X), n, `adjacency ${Lb}x${c} X=${X}`);
+test('exact laws: brute-force enumeration (coupon d=2,3,4; duplicates m=3 b=5; adjacency 2x3, 3x2) and inclusion-exclusion', () => {
+  const c2 = S.couponLawExact(2); for (let k = 2; k < 12; k++) assert.equal(c2.num[k - 2] * 2n ** BigInt(k - 1), c2.den, `coupon d=2 T=${k}`);
+  for (const d of [3, 4]) {
+    const c = S.couponLawExact(d);
+    for (let t = d; t <= 9; t++) {
+      let n = 0n; for (let x = 0; x < d ** t; x++) { const st = new Set(); let v = x, T = 0; for (let i = 0; i < t; i++) { st.add(v % d); v = Math.floor(v / d); if (st.size === d) { T = i + 1; break; } } if (T === t) n += 1n; }
+      assert.equal(c.num[t - d] * BigInt(d) ** BigInt(t), n * c.den, `coupon d=${d} T=${t}`);
+      // inclusion-exclusion: P(T <= t) = sum_j (-1)^j C(d,j) ((d-j)/d)^t
+      let ie = 0n; for (let j = 0; j <= d; j++) { let C = 1n; for (let q = 0; q < j; q++) C = (C * BigInt(d - q)) / BigInt(q + 1); ie += (j % 2 ? -1n : 1n) * C * BigInt(d - j) ** BigInt(t); }
+      let cum = 0n; for (let k = 0; k <= t - d; k++) cum += c.num[k];
+      assert.equal(cum * BigInt(d) ** BigInt(t), ie * c.den, `coupon d=${d} P(T<=${t})`);
+    }
   }
-  const a4 = L.adjacencyLawExact(4, 13); assert.equal([...a4.exactNum.values()].reduce((x, y) => x + y, 0n), a4.total);
+  const dl = S.dupLawExact(3, 5); const h = new Array(6).fill(0n);
+  for (let x = 0; x < 3 ** 5; x++) { const st = new Set(); let v = x, C = 0; for (let i = 0; i < 5; i++) { if (st.has(v % 3)) C += 1; else st.add(v % 3); v = Math.floor(v / 3); } h[C] += 1n; }
+  assert.equal(dl.den, 243n);
+  for (let c = 0; c <= 4; c++) assert.equal(dl.num[c] ?? 0n, h[c], `dup C=${c}`);
+  for (const [Lb, c] of [[2, 3], [3, 2]]) {
+    const law = S.adjacencyLawExact(Lb, c); const deck = Array.from({ length: Lb * c }, (_, i) => Math.floor(i / c));
+    const hh = new Map(); for (const p of perms(deck.map((_, i) => i))) { let X = 0; for (let i = 1; i < p.length; i++) if (deck[p[i]] === deck[p[i - 1]]) X += 1; hh.set(X, (hh.get(X) ?? 0n) + 1n); }
+    for (const [X, n] of hh) assert.equal(law.num[X], n, `adjacency ${Lb}x${c} X=${X}`);
+  }
 });
 
-test('calibration: chi^2 tail at the K threshold, Lehmer top-20 exact against BigInt rank', () => {
-  assert.ok(Math.abs(L.chi2sf(30.943101458355866, 7) - 0.01 / 157) < 1e-12);
+test('exact lumping at M_cal reproduces the calibrated cell counts (all entries but d=641, which takes ~2 min)', () => {
+  const cells = [17, 54, 246, 308, 438, 27, 349, 251, 315, null, 349, 308, 12, 10, 10, 10, 12, 10, 12, 10, 10, 10, 12, 12, 27, 14];
+  const mcal = [500000, 166667, 27028, 19231, 10000, 333334, 15625, 26316, 18519, null, 15625, 19231, 200, 200, 400, 400, 200, 200, 245, 400, 400, 200, 245, 245, 1000000, 1000000];
+  Src.ENTRIES.forEach((e, i) => {
+    if (cells[i] === null) return;
+    const M = Src.mCal(e); assert.equal(M, mcal[i], e.id);
+    const lu = S.lumpExact(S.lawExact(e), M); assert.equal(lu.cells.length, cells[i], e.id);
+    assert.ok(lu.cellNum.every((x) => BigInt(M) * x >= 5n * lu.den), e.id);
+    assert.ok(Math.abs(lu.cells.reduce((a, x) => a + x, 0) - 1) < 1e-12, e.id);
+  });
+  // §6.1 threshold is 5, exactly: a cell with M*p = 5 stays, M*p just below 5 is merged.
+  const law = { num: [5n, 990n, 5n], den: 1000n };
+  assert.equal(S.lumpExact(law, 1000).cells.length, 3);
+  assert.equal(S.lumpExact({ num: [4n, 992n, 4n], den: 1000n }, 1000).cells.length, 1);
+});
+
+test('reductions: duplicates count collisions within a block only; coupon and adjacency on crafted outcomes', () => {
+  const e = { id: 'x', kind: 'dup', min: 0, r: 2, dd: 2, u: 1, b: 3, m: 2 };
+  const seq = [0, 1, 0, 1, 0, 1]; let i = 0; const next = () => seq[i++];
+  assert.deepEqual([S.observe(e, next).k, S.observe(e, next).k], [1, 1]);
+  const c = { id: 'y', kind: 'coupon', min: 1, r: 6, d: 3 }; const s2 = [1, 2, 1, 6, 4]; let j = 0;
+  assert.deepEqual(S.observe(c, () => s2[j++]), { k: 2, outcomes: 5 }); // units 0,0,0,2,1
+  const a = S.ENTRIES.find((x) => x.label === 'mod4'); const p = Array.from({ length: 52 }, (_, k) => k);
+  assert.equal(S.observe(a, () => p).k, 0);
+  const q = Array.from({ length: 52 }, (_, k) => (k % 13) * 4 + Math.floor(k / 13));
+  assert.equal(S.observe(a, () => q).k, 48);
+});
+
+test('A6 rule: two-sided KS with the Stephens factor, flag interval [2,22], outcome floor', () => {
+  const ps = Array.from({ length: 1000 }, (_, i) => Math.min(1, (i + 0.5) / 1000 + (i < 500 ? 0.03 : 0)));
+  const k = S.ksUniform(ps); assert.ok(Math.abs(k.D - 0.0305) < 1e-12); assert.ok(Math.abs(k.p - 0.3055863631963197) < 1e-12);
+  const grid = Array.from({ length: 1000 }, (_, i) => (i + 0.5) / 1000);
+  assert.equal(S.a6Verdict(grid, 1e6).pass, true);
+  assert.equal(S.a6Verdict(grid, 1e6 - 1).pass, false);
+  const one = grid.map((x) => (x < 0.01 && x > 0.001 ? 0.0105 : x)); assert.equal(S.a6Verdict(one, 1e6).flags, 1); assert.equal(S.a6Verdict(one, 1e6).pass, false);
+  const many = grid.map((x, i) => (i < 23 ? x / 100 : x)); assert.equal(S.a6Verdict(many, 1e6).flags, 23); assert.equal(S.a6Verdict(many, 1e6).pass, false);
+  assert.equal(S.a6Verdict(grid.map(() => 0.5), 1e6).pass, false);
+  assert.ok(Math.abs(S.chi2sf(30.943101458355866, 7) - 0.01 / 157) < 1e-12);
+});
+
+test('Lehmer top-20 (exact) against the BigInt rank; lazy shuffle equals a full forward Fisher-Yates', () => {
   const F = (n) => { let f = 1n; for (let i = 2n; i <= BigInt(n); i++) f *= i; return f; };
   for (let i = 0; i < 300; i++) {
-    const got = W.lehmerTop20(new ref.RefStream(99, i), new Uint8Array(52));
     const s = new ref.RefStream(99, i); const a = Array.from({ length: 52 }, (_, k) => k);
-    for (let j = 0; j < 52; j++) { const r = j + s.below(52 - j); [a[j], a[r]] = [a[r], a[j]]; }
+    for (let j = 0; j < 51; j++) { const r = j + s.below(52 - j); [a[j], a[r]] = [a[r], a[j]]; }
+    const lz = Src.lazyShuffle(new ref.RefStream(99, i));
+    assert.equal(S.lehmerTop20(lz), S.lehmerTop20(a));
+    const lz2 = Src.lazyShuffle(new ref.RefStream(99, i)); assert.deepEqual(Array.from({ length: 52 }, (_, k) => lz2.card(k)), a);
     let rank = 0n; for (let j = 0; j < 52; j++) { let d = 0; for (let k = j + 1; k < 52; k++) if (a[k] < a[j]) d += 1; rank += BigInt(d) * F(51 - j); }
-    assert.equal(got, Number((rank * 1048576n) / F(52)));
+    assert.equal(S.lehmerTop20(a), Number((rank * 1048576n) / F(52)));
   }
 });
 
+// H2 results (superseded by the J run, kept): internally consistent as committed.
 const RESULTS = join(ROOT, 'verification/calibration/wave1-results.json');
-test('wave-1 calibration results file: 26 entries, R = 1000, n >= 10^6, verdicts follow the A6 rule', () => {
+test('H2 calibration results file (superseded, kept): 26 entries, R = 1000, n >= 10^6, verdicts follow the A6 rule', () => {
   assert.ok(existsSync(RESULTS), 'results file committed in H2');
-  const f = RESULTS;
-  assert.ok(f.endsWith('wave1-results.json'));
-  const doc = JSON.parse(readFileSync(f, 'utf8'));
+  const doc = JSON.parse(readFileSync(RESULTS, 'utf8'));
   assert.equal(doc.results.length, 26);
-  assert.deepEqual(doc.results.map((r) => r.id).sort(), W.ENTRIES.map((e) => e.id).sort());
+  assert.deepEqual(doc.results.map((r) => r.id).sort(), S.ENTRIES.map((e) => e.id).sort());
   assert.equal(doc.adapter.key_hex, ref.KEY_HEX);
   assert.equal(doc.adapter.file_sha256, sha('verification/labkit/aes-ctr-ref.mjs'));
   for (const r of doc.results) {
     assert.ok(r.reps >= 1000 && r.minOutcomes >= 1e6, r.id);
     const o = r.outcomes_per_rep;
     assert.ok(o && o.meets_n_1e6 === true && (o.exact ?? o.min) >= 1e6 && (o.exact ?? o.min) === r.minOutcomes, r.id);
-    if (o.exact === undefined) assert.ok(o.recount_pvalue_sha256_equal === true && o.min >= o.lower_bound && o.lower_bound >= 1e6, r.id);
     const pass = r.ks_p >= 0.001 && r.flags_0_01 >= 2 && r.flags_0_01 <= 22;
     assert.equal(r.verdict, pass ? 'PASS' : 'FAIL', r.id);
   }

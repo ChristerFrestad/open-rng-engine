@@ -1,100 +1,87 @@
 #!/usr/bin/env node
-// A6 calibration of the 26 wave-1 EBC entries on the labkit AES-256-CTR reference stream (CTO commit H).
-// This is VERIFICATION, not a counted evidence run: it starts no battery tool and the evidence gate stays
-// closed. Usage: node verification/calibration/wave1-calibrate.mjs [--entries i,j,...] [--reps R] [--out F]
-//   [--run-dir D] (default /workspace/rng-backup/calibration-run; per-entry files, resumable)
-import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+// A6 calibration of the 26 wave-1 EBC entries (CTO batch J, G-56): THE wave-1 statistic module, fed the
+// labkit AES-256-CTR reference stream by wave1-source.mjs. VERIFICATION, not a counted evidence run: no
+// battery tool, evidence gate CLOSED. Resumable per entry (<run-dir>/entry-NN.json, atomic, with digests).
+// Usage: node verification/calibration/wave1-calibrate.mjs [--entries i,j] [--reps R] [--run-dir D] [--out F]
+import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ENTRIES, R_CAL, mCal, lawOf, replicate, lehmerStats } from './wave1-entries.mjs';
-import { lump, pearsonP, ksUniform } from './laws.mjs';
+import { ENTRIES, STATISTIC as S, mCal, replicate, urnsPerRep } from './wave1-source.mjs';
 import { ADAPTER_ID, KEY_HEX } from '../labkit/aes-ctr-ref.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
-const prep = (e) => { const law = lawOf(e); const M = mCal(e); const lu = lump(law.p, M); return { law, M, lu }; };
-
 if (!isMainThread) {
-  const cache = new Map();
-  parentPort.on('message', ({ ei, r0, r1 }) => {
-    const e = ENTRIES[ei];
-    if (!cache.has(ei)) cache.set(ei, prep(e));
-    const { law, M, lu } = cache.get(ei);
+  parentPort.on('message', ({ ei, r0, r1, M, map, cells }) => {
+    const e = ENTRIES[ei]; const lumped = { map, cells };
     const out = [];
-    for (let rep = r0; rep < r1; rep++) {
-      const { h, outcomes, words } = replicate(e, rep, M, law.p.length);
-      const counts = new Float64Array(lu.cells.length);
-      for (let i = 0; i < h.length; i++) counts[lu.map[i]] += h[i];
-      const { x2, p } = pearsonP(counts, lu.cells, M);
-      out.push({ rep, x2, p, outcomes, words });
-    }
-    parentPort.postMessage({ ei, out, fallbacks: lehmerStats.fallbacks });
+    for (let rep = r0; rep < r1; rep++) out.push({ rep, ...replicate(e, rep, M, lumped) });
+    parentPort.postMessage({ ei, out, fallbacks: S.lehmerStats.fallbacks });
   });
 } else {
-  // Resumable per entry: each finished entry is written atomically to <run-dir>/entry-NN.json (with the
-  // harness and adapter digests); a rerun skips entries whose file matches those digests, so an
-  // interruption loses at most the entry in progress. The results file is assembled when all are present.
   const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
-  const R = Number(arg('--reps', R_CAL));
+  const R = Number(arg('--reps', S.A6.R));
   const which = arg('--entries', null);
   const idx = which ? which.split(',').map(Number) : ENTRIES.map((_, i) => i);
-  const outFile = arg('--out', fileURLToPath(new URL('./wave1-results.json', import.meta.url)));
-  const runDir = arg('--run-dir', '/workspace/rng-backup/calibration-run');
+  const outFile = arg('--out', fileURLToPath(new URL('./wave1-results-j.json', import.meta.url)));
+  const runDir = arg('--run-dir', '/workspace/rng-backup/calibration-run-j');
   mkdirSync(runDir, { recursive: true });
   const log = (m) => appendFileSync(join(runDir, 'progress.log'), `${new Date().toISOString()} ${m}\n`);
   const sha = (f) => createHash('sha256').update(readFileSync(new URL(f, import.meta.url))).digest('hex');
-  const digests = { adapter: sha('../labkit/aes-ctr-ref.mjs'), 'laws.mjs': sha('./laws.mjs'), 'wave1-entries.mjs': sha('./wave1-entries.mjs'), 'wave1-calibrate.mjs': sha('./wave1-calibrate.mjs'), R };
+  const digests = { adapter: sha('../labkit/aes-ctr-ref.mjs'), statistic: sha('../statistic/wave1-statistic.mjs'), 'wave1-source.mjs': sha('./wave1-source.mjs'), 'wave1-calibrate.mjs': sha('./wave1-calibrate.mjs'), R };
   const nW = Math.max(1, Math.min(availableParallelism(), 8));
   const CH = 25;
   const workers = Array.from({ length: nW }, () => new Worker(SELF));
-  const runEntry = (ei) => new Promise((done, fail) => {
-    const tasks = []; for (let r = 0; r < R; r += CH) tasks.push({ ei, r0: r, r1: Math.min(R, r + CH) });
+  const runEntry = (ei, M, lumped) => new Promise((done, fail) => {
+    const tasks = []; for (let r = 0; r < R; r += CH) tasks.push({ ei, r0: r, r1: Math.min(R, r + CH), M, map: lumped.map, cells: lumped.cells });
     const out = []; let next = 0, pending = 0, fb = 0;
-    const feed = (wk) => { if (next < tasks.length) { pending += 1; wk.postMessage(tasks[next++]); } else if (pending === 0) { for (const w of workers) { w.removeAllListeners('message'); w.off('error', fail); } done({ out, fb }); } };
+    const finish = () => { for (const w of workers) { w.removeAllListeners('message'); w.off('error', fail); } done({ out, fb }); };
+    const feed = (wk) => { if (next < tasks.length) { pending += 1; wk.postMessage(tasks[next++]); } else if (pending === 0) finish(); };
     for (const wk of workers) {
-      wk.removeAllListeners('message');
-      wk.on('message', (m) => { out.push(...m.out); fb += m.fallbacks; pending -= 1; feed(wk); });
-      wk.once('error', fail); // removed again when the entry completes (H2: was left attached, MaxListenersExceededWarning)
+      wk.on('message', (m) => { out.push(...m.out); fb = Math.max(fb, 0) + m.fallbacks; pending -= 1; feed(wk); });
+      wk.once('error', fail);
     }
     for (const wk of workers) feed(wk);
   });
   const t0 = Date.now();
-  const rows = []; let fallbacks = 0;
+  const rows = [];
   for (const ei of idx) {
     const e = ENTRIES[ei];
     const f = join(runDir, `entry-${String(ei).padStart(2, '0')}.json`);
     if (existsSync(f)) {
       const prev = JSON.parse(readFileSync(f, 'utf8'));
-      if (JSON.stringify(prev.digests) === JSON.stringify(digests)) { rows.push(prev.row); fallbacks += prev.fallbacks; log(`entry ${ei} ${e.id}: reused ${prev.row.verdict}`); continue; }
+      if (JSON.stringify(prev.digests) === JSON.stringify(digests)) { rows.push(prev.row); log(`entry ${ei} ${e.id}: reused ${prev.row.verdict}`); continue; }
       log(`entry ${ei} ${e.id}: stale file (digests differ), recomputing`);
     }
     const te = Date.now(); log(`entry ${ei} ${e.id}: start`);
-    const { M, lu } = prep(e);
-    const { out, fb } = await runEntry(ei);
+    const M = mCal(e); const lumped = S.lumpExact(S.lawExact(e), M);
+    const { out } = await runEntry(ei, M, lumped);
     const reps = out.sort((a, b) => a.rep - b.rep);
-    const ps = reps.map((x) => x.p);
-    const ks = ksUniform(ps); const flags = ps.filter((p) => p < 0.01).length;
-    const minOut = Math.min(...reps.map((x) => x.outcomes));
-    const pass = ks.p >= 0.001 && flags >= 2 && flags <= 22 && reps.length >= 1000 && minOut >= 1e6;
-    const row = { id: e.id, stream: e.stream, reps: reps.length, M_cal: M, cells: lu.cells.length, df: lu.cells.length - 1, minE: +(M * Math.min(...lu.cells)).toFixed(3), minOutcomes: minOut, outcomes_max: Math.max(...reps.map((x) => x.outcomes)), outcomes_total: reps.reduce((a, x) => a + x.outcomes, 0), outcomes_sha256: createHash('sha256').update(JSON.stringify(reps.map((x) => x.outcomes))).digest('hex'), ks_D: +ks.D.toFixed(5), ks_p: +ks.p.toPrecision(4), flags_0_01: flags, verdict: pass ? 'PASS' : 'FAIL', pvalue_sha256: createHash('sha256').update(JSON.stringify(ps)).digest('hex') };
-    writeFileSync(`${f}.tmp`, JSON.stringify({ digests, row, fallbacks: fb, pvalues: ps }) + '\n');
+    const ps = reps.map((x) => x.p); const os = reps.map((x) => x.outcomes);
+    const minOut = Math.min(...os);
+    const v = S.a6Verdict(ps, minOut);
+    const row = { id: e.id, stream: e.stream, reps: reps.length, M_cal: M, blocks_per_rep: e.kind === 'dup' ? M : null, urns_per_rep: urnsPerRep(e, M), cells: lumped.cells.length, df: lumped.cells.length - 1,
+      minE: +(M * Math.min(...lumped.cells)).toFixed(3), outcomes_min: minOut, outcomes_max: Math.max(...os), outcomes_mean: os.reduce((a, x) => a + x, 0) / os.length,
+      ks_D: +v.ks.D.toFixed(5), ks_p_asymptotic_stephens: +v.ks.p.toPrecision(4), flags_0_01: v.flags, verdict: v.pass ? 'PASS' : 'FAIL',
+      pvalue_sha256: createHash('sha256').update(JSON.stringify(ps)).digest('hex'), pvalues: ps };
+    writeFileSync(`${f}.tmp`, JSON.stringify({ digests, row }) + '\n');
     renameSync(`${f}.tmp`, f);
-    rows.push(row); fallbacks += fb;
-    log(`entry ${ei} ${e.id}: done in ${Math.round((Date.now() - te) / 1000)} s: D ${row.ks_D} KS p ${row.ks_p} flags ${flags} ${row.verdict}`);
+    rows.push(row);
+    log(`entry ${ei} ${e.id}: done in ${Math.round((Date.now() - te) / 1000)} s: D ${row.ks_D} KS p ${row.ks_p_asymptotic_stephens} flags ${v.flags} ${row.verdict}`);
   }
   for (const w of workers) await w.terminate();
   const doc = {
-    what: 'A6 calibration of wave-1 EBC entries on the labkit reference stream (verification, NOT a counted evidence run; evidence gate stays CLOSED)',
+    what: 'A6 calibration of the 26 wave-1 EBC entries through THE wave-1 statistic module (G-56) on the labkit reference stream (verification, NOT a counted evidence run; evidence gate stays CLOSED). Supersedes wave1-results.json (H2).',
     date: new Date().toISOString(), node: process.version, openssl: process.versions.openssl,
-    adapter: { id: ADAPTER_ID, key_hex: KEY_HEX, iv: 'BE32(stream) || BE32(rep) || 0^64; stream = entry stream index below, rep = 0..R-1', file_sha256: digests.adapter },
-    harness_sha256: { 'laws.mjs': digests['laws.mjs'], 'wave1-entries.mjs': digests['wave1-entries.mjs'], 'wave1-calibrate.mjs': digests['wave1-calibrate.mjs'] },
-    rule: { R, n_per_rep: '>= 10^6 outcomes: M_cal = max(ceil(10^6 / min outcomes per observation), 200) (adjacency: 10^6 shuffles), doubled until the lumped table has >= 10 cells', ks_alpha: 0.001, D_crit_A6: 0.0617, flag_level: 0.01, flag_interval: [2, 22], ks_p: '[CL-3] asymptotic Kolmogorov series with the (sqrt(R)+0.12+0.11/sqrt(R)) factor' },
-    lehmer_prefix_fallbacks: fallbacks, seconds_this_invocation: Math.round((Date.now() - t0) / 1000), results: rows,
+    statistic: { id: S.STATISTIC_ID, file: 'verification/statistic/wave1-statistic.mjs', sha256: digests.statistic },
+    adapter: { id: ADAPTER_ID, key_hex: KEY_HEX, iv: 'BE32(stream) || BE32(rep) || 0^64; stream = entry index + 1, rep = 0..R-1 (the H2 IV set)', file_sha256: digests.adapter },
+    harness_sha256: { 'wave1-source.mjs': digests['wave1-source.mjs'], 'wave1-calibrate.mjs': digests['wave1-calibrate.mjs'] },
+    rule: { R, n: '>= 10^6 public-call outcomes per replication (R-A6n)', ks_alpha: S.A6.KS_ALPHA, D_crit_exact: 0.061462, flag_level: S.A6.FLAG, flag_interval: S.A6.FLAGS, ks_p: '[CL-3] asymptotic Kolmogorov series with the Stephens factor', laws: 'exact BigInt, exact §6.1 lumping' },
+    seconds_this_invocation: Math.round((Date.now() - t0) / 1000), results: rows,
   };
-  writeFileSync(outFile, JSON.stringify(doc, null, 1) + '\n');
+  writeFileSync(outFile, JSON.stringify(doc) + '\n');
   log(`assembled ${rows.length} entries -> ${outFile}`);
   console.log(`${rows.filter((r) => r.verdict === 'PASS').length}/${rows.length} PASS -> ${outFile}`);
-  for (const r of rows) console.log(`${r.id} | M_cal ${r.M_cal} | cells ${r.cells} | min E ${r.minE} | D ${r.ks_D} | KS p ${r.ks_p} | flags ${r.flags_0_01} | ${r.verdict}`);
 }
