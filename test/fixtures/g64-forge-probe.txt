@@ -1,0 +1,1 @@
+Object.defineProperty(globalThis, Symbol.for('open-rng-engine/entropy-backstop/v1'), { value: {} });

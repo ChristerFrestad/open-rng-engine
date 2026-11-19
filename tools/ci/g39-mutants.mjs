@@ -62,11 +62,28 @@ export const G45_MUTANTS = [
   ['G55-M2 script check off', "  if (bytes.subarray(0, 2).toString('latin1') === '#!') refuseChild", '  if (false) refuseChild', ['RW-pinned-script']],
   ['G55-M3 binary sha check off', "  if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) refuseChild", '  if (false) refuseChild', ['RW-sha-mismatch']],
   ['G55-M4 source pin not compared with tool-pins', '  if (!src || !pin.source || pin.source.name !== src.name || pin.source.sha256 !== src.sha256) refuseChild', '  if (false) refuseChild', ['RW-bad-source-pin']],
+  // G-64 / G-65 (HoQ A9): launcher counting authority and the content-bound stamp.
+  ['G64-M1 launcher counts unauthenticated lines', '      && timingSafeEqual(Buffer.from(o.mac, \'hex\'), Buffer.from(macOf(secret, o), \'hex\'));', ';', ['LW-forged-line'], 'verification/harness/evidence-launcher.mjs'],
+  ['G64-M2 report without the stamp check', "  if (t === null || result.grant !== t) refuseChild('evidence report of a result not stamped", "  if (false) refuseChild('evidence report of a result not stamped", ['LW-unstamped-report']],
+  ['G64-M3 fixed known secret instead of the launcher secret', '  delete process.env.ENTROPY_BACKSTOP_CHANNEL;\n  let s = null;\n  try { s = readFileSync(0); } catch { s = null; }\n  if (s && s.length >= 32) channelSecret = Buffer.from(s);', '  channelSecret = Buffer.alloc(32);', ['LW-green']],
+  ['G64-M4 launcher counts a failed run', '  return { status: r.status, counted: r.status === 0 ? counted : [],', '  return { status: r.status, counted,', ['LW-report-then-fail'], 'verification/harness/evidence-launcher.mjs'],
+  ['G65-M1 stamp lookup ignores the content digest', '  return s && resultContentDigest(result) === s.digest ? s.token : null;', '  return s ? s.token : null;', ['LW-records-swapped']],
   ['G60-M1 grant left open at exit not reported', "process.on('exit', onGrantLeak);", '', ['RW-open-never-closed']],
   ['G45-M10 (HM-21) callers under verification/ exempt', 'function evidenceSpawnCheck(kind, exe, argv, opts) {\n', "function evidenceSpawnCheck(kind, exe, argv, opts) {\n  if (String(process.argv[1] || '').includes('/verification/')) return { node: false, evidence: true };\n", ['verification-dir']],
 ];
 
 // READY world: a copy of the tree whose readiness is forced true, so the grant path can be exercised.
+// G-64/G-65 launcher cases: [label, expected launcher result, runner body inside startEvidenceRun].
+const FORGE_PROBE = readFileSync(join(ROOT, 'test/fixtures/g64-forge-probe.txt'), 'utf8').trim();
+const LW_CASES = [
+  ['LW-green', (r) => r.status === 0 && r.counted.length === 1 && r.counted[0].n === 5 && r.rejected === 0, () => `const res = C.collectCounted(k, () => 1, 5); C.reportCounted(res);`],
+  ['LW-forged-line', (r) => r.counted.length === 0 && r.rejected >= 1, () => `writeSync(3, JSON.stringify({ id: 'x', n: 5, digest: '0'.repeat(64), grant: 'grant-1@1', mac: '0'.repeat(64) }) + '\\n');`],
+  ['LW-unstamped-report', (r) => r.counted.length === 0, () => `C.reportCounted(C.collect(k, () => 1, 5));`],
+  ['LW-records-swapped', (r) => r.counted.length === 0, () => `const res = C.collectCounted(k, () => 1, 5); res.records = [0, 0, 0, 0, 0]; C.reportCounted(res);`],
+  ['LW-secret-read', (r) => r.status === 0 && !r.leaked && r.counted.length === 0, () => `let s = ''; try { s = readFileSync(0).toString('hex'); } catch {} console.log('stdin:' + s + ' env:' + JSON.stringify(process.env));`],
+  ['LW-report-then-fail', (r) => r.status !== 0 && r.counted.length === 0, () => `const res = C.collectCounted(k, () => 1, 5); C.reportCounted(res); process.exitCode = 2;`],
+  ['LW-forge-marker', (r) => r.counted.length === 0, () => FORGE_PROBE], // HoQ A2 forger body, kept under test/ (outside the G-64 static ban's scope)
+];
 const RW_CASES = [
   ['RW-green-dieharder', true, (T) => `const r = launch(${T.DH}, ['-a']); if (r.error || r.status !== 0) process.exit(3);`],
   ['RW-green-rngtest', true, (T) => `const r = launch(${T.PR}, ['stdin32']); if (r.error || r.status !== 0) process.exit(3);`],
@@ -139,6 +156,18 @@ function readyWorld(d) {
       : green ? r.status === 0 && /RW-OK/.test(out) : r.status !== 0 && /\(G-(?:45|54|55)\)|harness NOT-READY/.test(out) && !/RW-OK/.test(out);
     if (!ok) reached.push(label);
   }
+  // G-64/G-65 (HoQ A9): the same READY world, run through the counting authority (evidence-launcher.mjs).
+  const K = "{ id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }";
+  for (const [label, want, body] of LW_CASES) {
+    const f = join(d, `lw-${label}.mjs`);
+    writeFileSync(f, `import { writeSync, readFileSync } from 'node:fs';\nconst C = await import(${T.COL});\nconst k = ${K};\nconst { startEvidenceRun } = await import(${JSON.stringify(pathToFileURL(ee).href)});\nawait startEvidenceRun(async () => { ${body(T)} });\n`);
+    const drv = join(d, `lw-${label}-driver.mjs`);
+    writeFileSync(drv, `const L = await import(${JSON.stringify(pathToFileURL(join(d, 'verification/harness/evidence-launcher.mjs')).href)});\nconst r = L.runCounted(${JSON.stringify(f)}, [], { cwd: ${JSON.stringify(d)} });\nconsole.log('LW-RESULT ' + JSON.stringify({ status: r.status, counted: r.counted, rejected: r.rejected.length, leaked: r.secretLeaked })); if (process.env.G39_DEBUG) console.error(r.stdout.slice(-800), r.stderr.slice(-1500));\n`);
+    const r = spawnSync(process.execPath, [drv], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
+    const m = /LW-RESULT (.*)/.exec(r.stdout || '');
+    const res = m ? JSON.parse(m[1]) : null;
+    if (!res || !want(res)) { reached.push(label); if (process.env.G39_DEBUG) console.error(label, r.stdout, r.stderr.slice(-1500)); }
+  }
   return reached;
 }
 
@@ -203,10 +232,11 @@ function run([label, from, to, expect, file = 'tools/ci/entropy-backstop.mjs']) 
     const missing = (expect || []).filter((x) => !reached.includes(x));
     if (missing.length) return `${label}: killed, but expected bypasses not reached: ${missing.join(', ')}`;
     return `${label}: killed${expect ? ` (reached: ${reached.join(', ')})` : ''}`;
-  } finally { rmSync(d, { recursive: true, force: true }); }
+  } finally { if (process.env.G39_KEEP) console.error('kept', d); else rmSync(d, { recursive: true, force: true }); }
 }
 
-const base = run(['baseline (unmutated tree)', null, null, null]);
+const base = run(["baseline (unmutated tree)", null, null, null]);
+if (process.env.G39_BASE_ONLY) { console.log(base); process.exit(0); }
 console.log(base);
 const np = noPreload();
 console.log(np);

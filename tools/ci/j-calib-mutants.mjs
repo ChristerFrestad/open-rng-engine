@@ -49,6 +49,9 @@ const MUTANTS = [
   ['MC-5 stream reuse across blocks', [[MCF, 'return new RefStream(MC.DOMAIN, ((entry << 11) | block) >>> 0, keyHex);', 'return new RefStream(MC.DOMAIN, ((entry << 11) | 0) >>> 0, keyHex);']], MC_TEST],
   ['MC-6 B drift (1,004,798)', [[MCF, 'B: 1004799,', 'B: 1004798,']], MC_TEST],
   ['MC-7 sampler exact tie path skipped', [[MCF, 'if (l > 0 && hi[l - 1] === a && lo[l - 1] === b) {', 'if (false) {']], MC_TEST],
+  // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
+  ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
+  ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],
 ];
 
 const sha = (d, rel) => createHash('sha256').update(readFileSync(join(d, rel))).digest('hex');

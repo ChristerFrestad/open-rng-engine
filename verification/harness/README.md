@@ -89,3 +89,18 @@ Verification, NOT a counted evidence run: no battery tool is started and the evi
   adapter, test adapter pin), so only behavioural tests can kill it. Exit 0 iff baseline green and all killed.
 - g39 G57-M3 (HM-24): the pin lookup without the real-path compare is killed by RW-symlink-renamed (a symlink
   named like the tool whose real file is a byte-identical unpinned copy named `sh`) and RW-unpinned-path.
+
+## K3a (HoQ A9 fix 1+2: G-64 MAJOR, G-65)
+
+- Counting authority: `verification/harness/evidence-launcher.mjs` `runCounted(runner)`. It starts the runner
+  under the backstop preload with `ENTROPY_BACKSTOP_CHANNEL=1`, writes a fresh 32-byte secret to its stdin and
+  reads fd 3. The backstop consumes the secret at preload (before runner code) and deletes the flag; only
+  `reportEvidenceResult` (collector `reportCounted`) writes HMAC-SHA256 lines over id, n, content digest and grant
+  token, and only for a result stamped inside an open grant. The launcher counts only verified lines and only
+  if the run exits 0. A plain `node runner.mjs`, with or without a forged marker (HoQ A2/A3), counts nothing.
+- Static ban: `tools/ci/marker-ban.mjs` (test/g64-marker-ban.test.mjs) flags any file outside the backstop and
+  test/ that names the marker and defines or assigns a global property.
+- G-65: the stamp stores a sha256 of `[id, n, records]`; every lookup recomputes it (HoQ A7 now refused).
+- Named residual assumption: a runner inside the launched process could read its own memory (/proc/self/mem)
+  to find the secret; out of scope of the JS-level threat model, stated for HoQ.
+- g39: LW-* launcher cases; G64-M1..M4, G65-M1 killed. j-calib-mutants: MB-1, MB-2.
