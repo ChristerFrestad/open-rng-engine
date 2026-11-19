@@ -29,7 +29,7 @@ export async function runChecks(root = ROOT, mods) {
   const kTests = loadKTests(root);
   const kBytes = readFileSync(join(root, K_TESTS));
   const kSha = m.pins.sha256(kBytes);
-  const findings = [...m.pins.checkHarnessPins(root), ...m.pins.checkArchivePinsAgainstFrozen(root), ...m.df.checkDfTable(kTests, { kTestsSha256: kSha }), ...m.ev.runnerContractFindings(root)];
+  const findings = [...m.pins.checkHarnessPins(root), ...m.pins.checkArchivePinsAgainstFrozen(root), ...m.df.checkDfTable(kTests, { kTestsSha256: kSha }), ...m.ev.scriptFileFindings(root)];
   if (kTests.length !== 157) findings.push(`K list has ${kTests.length} entries, expected 157 (rule 8 K′)`);
   const plans = kTests.map((t) => ({ id: t.id, n: m.floor.N_MIN, unit: m.floor.expectedUnit(t), counter: m.floor.COUNTER_PER_PUBLIC_CALL }));
   findings.push(...m.floor.checkRunPlans(plans, kTests));
@@ -203,18 +203,23 @@ export function fixtureCases(m, root = ROOT) {
     ['EG-2 STS 1000 identical sequences', false, () => withC((c) => { c.sts = c.sts.map(() => JSON.parse(JSON.stringify(c.sts[0]))); })],
   ];
   const E = m.ev;
-  const rc = (t) => { const w = E.runnerContractText(t); return w ? [w] : []; };
-  // Tool names are assembled so this file's own text is not a runner under the EG-3 scan.
-  const [DH, TU, AS, PR, CO] = ['die' + 'harder', 'tu01' + '-driver', 'ass' + 'ess', 'RNG' + '_test', 'collector' + '.mjs'];
+  // G-45 static half (HM-19, HM-21): no interpreter scripts anywhere, verification/ included. The runtime
+  // half (spawn layer) is in tools/ci/entropy-backstop-check.mjs and tools/ci/g39-mutants.mjs.
+  const sf = (rel, head) => { const w = E.scriptFileFinding(rel, head); return w ? [w] : []; };
+  const sfs = (files, heads) => E.scriptFileFindings(root, files, (rel) => heads[rel]);
   const egCases3 = [
-    ['EG-3 runner spawning dieharder without the guard is red', false, () => rc(`import { spawnSync } from 'node:child_process';\nspawnSync('${DH}', ['-a', '-Y', '0', '-g', '201']);\n`)],
-    ['EG-3 runner calling the guard after spawning tu01-driver is red', false, () => rc(`execFileSync('./${TU}', ['BigCrush', 'raw', 'o.tsv']);\nassertEvidenceRunReady();\n`)],
-    ['EG-3 runner importing the collector without the guard is red', false, () => rc(`import { collect } from './${CO}';\ncollect(k, f, 1e9);\n`)],
-    ['EG-3 runner with the guard first is green', true, () => rc(`import { assertEvidenceRunReady } from './evidence-entry.mjs';\nassertEvidenceRunReady();\nspawnSync('${AS}', ['1000000']);\n`)],
-    ['EG-3 runner through startEvidenceRun is green', true, () => rc(`startEvidenceRun(() => spawnSync('${PR}', ['stdin64']));\n`)],
-    ['EG-3 tracked tree has no unguarded runner', true, () => E.runnerContractFindings(root)],
-    ['EG-3 startEvidenceRun refuses while NOT-READY', false, () => { try { E.startEvidenceRun(() => 0, root); return []; } catch (e) { return [String(e.message)]; } }],
+    ['G-45 Python runner under verification/harness is red', false, () => sf('verification/harness/run.py', 'import subprocess\n')],
+    ['G-45 shell runner under tools/ is red', false, () => sf('tools/run.sh', 'set -e\n')],
+    ['G-45 extensionless file with a python shebang is red', false, () => sf('verification/run', '#!/usr/bin/env python3\n')],
+    ['G-45 extensionless file with a sh shebang is red', false, () => sf('bin/run', '#!/bin/sh\n')],
+    ['G-45 node shebang is green', true, () => sf('tools/ci/x.mjs', '#!/usr/bin/env node\n')],
+    ['G-45 C source (tu01 driver) is green', true, () => sf('verification/harness/tu01-driver.c', '/* c */\n')],
+    ['G-45 tree walk: a .py file under verification/ is red (no directory exemption)', false, () => sfs(['verification/x.py'], { 'verification/x.py': '' })],
+    ['G-45 tree walk: a .sh file under test/ is red (no directory exemption)', false, () => sfs(['test/fixtures/x.sh'], { 'test/fixtures/x.sh': '' })],
+    ['G-45 tracked tree has no interpreter scripts', true, () => E.scriptFileFindings(root)],
+    ['EG-3 assertEvidenceRunReady refuses while NOT-READY', false, () => { try { E.assertEvidenceRunReady(root); return []; } catch (e) { return [String(e.message)]; } }],
   ];
+
   return [
     ...egCases3,
     ...colCases,
@@ -520,10 +525,10 @@ export const MUTANTS = [
   ['MU-54 STS duplicate-sequence check off', 'code', 'counts.mjs', [['if (seen.has(key)) f.push(', 'if (false) f.push(']]],
   ['MU-55 BigCrush names list edited', 'code', 'counts.mjs', [['"SerialOver, r = 22"', '"SerialOver, r = 21"']]],
   ['MU-56 Dieharder rows list edited', 'code', 'counts.mjs', [['["dab_monobit2", null]', '["dab_monobit2", 12]']]],
-  ['MU-57 EG-3 missing guard not reported', 'code', 'evidence-entry.mjs', [["  if (!g) return 'starts an evidence run without the entry guard';", '']]],
-  ['MU-58 EG-3 guard order not checked', 'code', 'evidence-entry.mjs', [["  if (g.index > first) return 'calls the entry guard only after starting the run';", '']]],
-  ['MU-59 EG-3 collector import not a run start', 'code', 'evidence-entry.mjs', [['const uses = [START.exec(s), IMPORT_COLLECTOR.exec(s)]', 'const uses = [START.exec(s)]']]],
-  ['MU-60 startEvidenceRun skips the guard', 'code', 'evidence-entry.mjs', [['  assertEvidenceRunReady(root);\n  return fn();', '  return fn();']]],
+  ['MU-57 (HM-19) .py not treated as a script', 'code', 'evidence-entry.mjs', [["'fish', 'py', ", "'fish', "]]],
+  ['MU-58 (HM-19) non-node shebang not checked', 'code', 'evidence-entry.mjs', [["if (h.startsWith('#!') && ", "if (false && "]]],
+  ['MU-59 (HM-21) verification/ exempt from the script rule', 'code', 'evidence-entry.mjs', [["    let head = '';\n    try { head = read(rel); }", "    if (rel.startsWith('verification/')) continue;\n    let head = '';\n    try { head = read(rel); }"]]],
+  ['MU-60 (HM-19) test/ exempt from the script rule', 'code', 'evidence-entry.mjs', [["    let head = '';\n    try { head = read(rel); }", "    if (rel.startsWith('test/')) continue;\n    let head = '';\n    try { head = read(rel); }"]]],
   // H-3 / H-4 / H-5 (HoQ 4c7adda0/f575fe1f), HoQ's survivor numbering in the label.
   ['MU-61 (Q01) isP upper bound 1.0000001', 'code', 'counts.mjs', [['x >= 0 && x <= 1;', 'x >= 0 && x <= 1.0000001;']]],
   ['MU-62 (Q08) BigCrush row-order check off', 'code', 'counts.mjs', [["if (row.battery !== 'BigCrush' || row.stream !== s || row.index !== i) f.push", 'if (false) f.push']]],

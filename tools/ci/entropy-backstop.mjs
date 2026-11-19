@@ -482,6 +482,68 @@ export function childCommandStripsPreload(args) {
 //     plain allowlisted command (no quotes, expansions, operators, redirections or VAR= prefixes).
 // (2) Proof of preload: every node child gets a per-call proof path; the backstop in the child writes it at
 //     install. A node child that exits without the proof is red (sync: throws; async: exit code 1).
+// G-45 (HoQ report c9d7c93..dbd4e00, addendum 1 A7): the evidence entry guard is enforced HERE, at the
+// spawn layer, not by source text. A battery tool (named as the executable, or as any argv / shell word) is
+// refused unless it is launched by launchEvidenceTool inside an open grant; a grant exists only after
+// openEvidenceGrant has itself run assertEvidenceRunReady and it returned OK. An interpreter is never
+// spawned. There is no path or directory exemption: the caller's location is never consulted.
+export const EVIDENCE_TOOLS = Object.freeze(['dieharder', 'tu01-driver', 'assess', 'RNG_test']);
+export const INTERPRETER = /^(?:python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|lua[0-9.]*|luajit|tclsh[0-9.]*|wish[0-9.]*|Rscript|R|julia|deno|bun|osascript|pwsh|powershell|bash|sh|dash|zsh|ksh|mksh|csh|tcsh|fish|busybox|toybox|env|xargs|nohup|setsid|timeout|nice|stdbuf|awk|gawk|mawk|nawk|sed|expect|script|su|sudo|doas|chroot|unshare|nsenter|systemd-run|strace|ltrace|gdb|valgrind)$/;
+const evidenceGrants = new WeakSet();
+let activeGrant = null;
+let launching = null;
+let grantEntry = null;
+let grantSeq = 0;
+
+function evidenceNames(exe, argv) {
+  const words = [String(exe), ...(argv || []).map(String)];
+  const out = [];
+  for (const w of words) for (const t of w.split(/[\s;|&()<>`'"=]+/)) if (t && EVIDENCE_TOOLS.includes(basename(t))) out.push(basename(t));
+  return out;
+}
+
+function evidenceSpawnCheck(kind, exe, argv, opts) {
+  const base = basename(String(exe));
+  const names = evidenceNames(exe, argv);
+  if (names.length) {
+    const ok = launching !== null && kind === 'file' && !opts.shell && activeGrant !== null && launching.grant === activeGrant
+      && exe === launching.file && EVIDENCE_TOOLS.includes(base) && names.length === 1;
+    if (!ok) refuseChild(`evidence tool ${names[0]} spawned without an OK entry guard (G-45)`);
+    let real;
+    try { real = realpathSync(isAbsolute(exe) ? exe : resolve(exe)); } catch { refuseChild(`evidence tool ${exe} not found (G-45)`); }
+    if (basename(real) !== base) refuseChild(`evidence tool ${exe} resolves to ${real} (G-45)`);
+    return { node: false, evidence: true };
+  }
+  if (INTERPRETER.test(base)) refuseChild(`interpreter ${base} is never spawned (G-45)`);
+  return null;
+}
+
+// Opens a grant only if the evidence entry guard, run here, returns OK. Root is fixed by this file's URL.
+export async function openEvidenceGrant() {
+  const ev = await import(new URL('../../verification/harness/evidence-entry.mjs', import.meta.url).href);
+  ev.assertEvidenceRunReady();
+  const g = Object.freeze({ grant: ++grantSeq });
+  evidenceGrants.add(g);
+  activeGrant = g;
+  grantEntry = ev;
+  return g;
+}
+
+export function closeEvidenceGrant(g) {
+  if (activeGrant === g) activeGrant = null;
+  evidenceGrants.delete(g);
+}
+
+// The only way to start a battery tool: an open grant, the guard re-run, an absolute path, no shell.
+export function launchEvidenceTool(g, file, args = [], options = {}) {
+  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');
+  grantEntry.assertEvidenceRunReady();
+  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool: ${String(file)} is not an absolute path to an evidence tool (G-45)`);
+  const cp = require('node:child_process');
+  launching = { grant: g, file };
+  try { return cp.spawnSync(file, args, { ...options, shell: false }); } finally { launching = null; }
+}
+
 export const CHILD_EXECUTABLE_ALLOWLIST = Object.freeze(['node', 'git', 'mkdir', 'ln']);
 const TRUSTED_DIRS = Object.freeze([...new Set(['/usr/bin', '/bin', '/usr/local/bin', dirname(process.execPath)].map((d) => { try { return realpathSync(d); } catch { return d; } }))]);
 const PLAIN_WORD = /^[A-Za-z0-9_./:,@%+=-]+$/;
@@ -530,6 +592,8 @@ export function classifyChild(kind, file, argv, options) {
     exe = words[0];
   }
   if (typeof exe !== 'string' || exe === '') refuseChild('no executable');
+  const ev = evidenceSpawnCheck(kind, exe, argv, opts);
+  if (ev) return ev;
   if (exe === process.execPath) return { node: true };
   const base = basename(exe);
   if (!CHILD_EXECUTABLE_ALLOWLIST.includes(base)) refuseChild(`executable ${base} is not on the child allowlist`);
@@ -828,6 +892,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });

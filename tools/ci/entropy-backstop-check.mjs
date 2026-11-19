@@ -10,7 +10,7 @@
 
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, unlinkSync, copyFileSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -455,6 +455,59 @@ breakMarkerIdentityForTestOnly();`],
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 
+// G-45 (HoQ report c9d7c93..dbd4e00, addendum 1 A7): the evidence entry guard is enforced at the spawn
+// layer. HoQ's 8 EG-3 evasions plus the verification/ exemption and HM-17/18 variants: every one must be
+// refused BY THE G-45 RULE (its message), not merely by some other rule. The positive path (a grant opened
+// by an OK guard) can only exist in a READY tree, so it is exercised by tools/ci/g39-mutants.mjs.
+export const G45_CASES = [];
+{
+  const d = mkdtempSync(join(tmpdir(), 'bs-g45-'));
+  try {
+    const bin = join(d, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const TOOLS = ['die' + 'harder', 'tu01' + '-driver', 'ass' + 'ess', 'RNG' + '_test'];
+    for (const t of TOOLS) { copyFileSync(realpathSync('/bin/true'), join(bin, t)); chmodSync(join(bin, t), 0o755); }
+    const [DH, TU, AS, PR] = TOOLS.map((t) => JSON.stringify(join(bin, t)));
+    const EV = JSON.stringify(pathToFileURL(join(ROOT, 'verification/harness/evidence-entry.mjs')).href);
+    const head = `import { spawnSync, execSync, execFileSync, exec } from 'node:child_process';\nimport * as cp from 'node:child_process';\nimport path from 'node:path';\n`;
+    const tail = `\nprocess.exit(0);\n`;
+    const cases = [
+      ['indirect-bin', `const BIN = ${DH};\nspawnSync(BIN, ['-a']);`],
+      ['path-join-arg', `spawnSync(path.join(${JSON.stringify(bin)}), ['${TOOLS[0]}', '-a']);`],
+      ['python-subprocess', `spawnSync('python3', ['-c', "import subprocess; subprocess.run(['${TOOLS[0]}', '-a'])"]);`],
+      ['guard-in-comment', `// assertEvidenceRunReady();\nspawnSync(${DH}, ['-a']);`],
+      ['dead-guard', `const { assertEvidenceRunReady } = await import(${EV});\nif (false) assertEvidenceRunReady();\nspawnSync(${DH}, ['-a']);`],
+      ['swallowed-guard', `const { assertEvidenceRunReady } = await import(${EV});\ntry { assertEvidenceRunReady(); } catch { /* swallowed */ }\nspawnSync(${TU}, ['BigCrush']);`],
+      ['guard-in-string', `const g = 'assertEvidenceRunReady(';\nspawnSync(${DH}, [g]);`],
+      ['bracket-spawn', `cp['spawn'](${DH}, ['-a']);`],
+      ['verification-dir', `spawnSync(${TU}, ['BigCrush', 'raw']);`, 'verification/harness'],
+      ['exec-sync', `execSync(${DH} + ' -a');`],
+      ['exec-async', `exec('${TOOLS[3]} stdin32');`],
+      ['rng-test', `execFileSync(${PR}, ['stdin32']);`],
+      ['assess-relative', `spawnSync('./${TOOLS[2]}', ['1000000'], { cwd: ${JSON.stringify(bin)} });`],
+      ['sh-c-tool', `spawnSync('sh', ['-c', '${TOOLS[0]} -a']);`],
+      ['env-tool', `spawnSync('env', ['${TOOLS[0]}', '-a']);`],
+      ['python-plain', `spawnSync('python3', ['-c', 'print(1)']);`],
+      ['grant-not-ready', `const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;\ntry { await ev.open(); } catch (e) { console.error(String(e.message)); process.exit(1); }`],
+      ['launch-without-grant', `const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;\nev.launch(Object.freeze({ grant: 1 }), ${DH}, ['-a']);`],
+      ['start-run-not-ready', `const { startEvidenceRun } = await import(${EV});\nlet ran = false;\ntry { await startEvidenceRun(async ({ launch }) => { ran = true; launch(${DH}, ['-a']); }); } catch (e) { console.error(String(e.message)); process.exit(ran ? 0 : 1); }`],
+    ];
+    for (const [label, body, sub] of cases) {
+      G45_CASES.push(label);
+      const dir = sub ? join(d, sub) : d;
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, `g45-${label}.mjs`);
+      writeFileSync(file, head + body + tail);
+      const r = spawnSync(process.execPath, ['--import', BACKSTOP, file], { cwd: ROOT, encoding: 'utf8', timeout: 20_000, env: { ...process.env } });
+      const out = `${r.stdout}\n${r.stderr}`;
+      if (r.status === 0 || !/\(G-45\)|harness NOT-READY/.test(out)) {
+        console.error(`entropy-backstop-check: G-45 ${label} was not rejected by the G-45 rule (status ${r.status})\n${out}`);
+        failed += 1;
+      }
+    }
+  } finally { rmSync(d, { recursive: true, force: true }); }
+}
+
 if (failed) process.exit(1);
-console.log(`entropy-backstop-check: ${ENTRY_POINT_IDS.length} entry points hooked, planted calls rejected, NODE_OPTIONS set, G-40 invariants held`);
+console.log(`entropy-backstop-check: ${ENTRY_POINT_IDS.length} entry points hooked, planted calls rejected, NODE_OPTIONS set, G-40 invariants held, ${G45_CASES.length} G-45 evasions refused at the spawn layer`);
 process.exit(0);

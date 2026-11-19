@@ -23,27 +23,44 @@ export function assertEvidenceRunReady(root = ROOT) {
   return r;
 }
 
-// EG-3 (HoQ b15a2ff5 report): the evidence runner must call the entry guard. No runner exists yet, so this
-// is a contract enforced in check:ph0: any tracked source file outside test/ that starts a battery tool
-// (spawn/exec of dieharder, tu01-driver, STS assess or PractRand RNG_test) or imports the collector must
-// call assertEvidenceRunReady( (or startEvidenceRun( ) textually BEFORE the first such use.
-export const RUNNER_CONTRACT_EXEMPT = Object.freeze(['verification/harness/evidence-entry.mjs', 'verification/harness/collector.mjs']);
-const START = /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\(\s*[^)]*?\b(?:dieharder|tu01-driver|assess|RNG_test)\b/;
-const IMPORT_COLLECTOR = /(?:from\s*|import\s*\(\s*)['"][^'"]*collector\.mjs['"]/;
-const GUARD = /\b(?:assertEvidenceRunReady|startEvidenceRun)\s*\(/;
+// EG-3 / G-45 (HoQ report c9d7c93..dbd4e00, addendum 1 A7): the entry guard is enforced STRUCTURALLY at the
+// spawn layer (tools/ci/entropy-backstop.mjs), not by matching source text. The text contract that stood
+// here (runnerContractText / runnerContractFindings, with a directory exemption) is removed:
+//   - every battery tool spawn (dieharder, tu01-driver, assess, RNG_test; as the executable or as any argv
+//     or shell word) is refused by the backstop unless it comes from launchEvidenceTool inside an open grant;
+//   - a grant is opened only by the backstop's openEvidenceGrant, which itself runs assertEvidenceRunReady
+//     (root fixed by its own URL) and opens nothing unless that returned OK; each launch re-runs the guard;
+//   - interpreters (python, perl, sh, env, ...) are never spawned; no path or directory is exempt;
+//   - startEvidenceRun is the guarded entry export: it refuses without the backstop preload, runs the guard,
+//     opens the grant, hands the callback a launcher bound to that grant, and closes the grant afterwards.
+const MARK = Symbol.for('open-rng-engine/entropy-backstop/v1');
 
-export function runnerContractText(text) {
-  const s = String(text);
-  const uses = [START.exec(s), IMPORT_COLLECTOR.exec(s)].filter(Boolean).map((m) => m.index);
-  if (!uses.length) return null;
-  const first = Math.min(...uses);
-  const g = GUARD.exec(s);
-  if (!g) return 'starts an evidence run without the entry guard';
-  if (g.index > first) return 'calls the entry guard only after starting the run';
-  return null;
+function backstopEvidence() {
+  const desc = Object.getOwnPropertyDescriptor(globalThis, MARK);
+  const ev = desc && !desc.writable && !desc.configurable && desc.value && desc.value.evidence;
+  if (!ev || typeof ev.open !== 'function' || typeof ev.launch !== 'function' || typeof ev.close !== 'function') {
+    throw new Error('evidence run refused: start it under the entropy-backstop preload (node --import ./tools/ci/entropy-backstop.mjs), G-45');
+  }
+  return ev;
 }
 
-// Every file under root except .git and node_modules (no git needed, so scratch copies are scanned too).
+// The sanctioned (and only) runner entry. fn receives { launch(file, args, options) } and may be async.
+export async function startEvidenceRun(fn) {
+  const ev = backstopEvidence();
+  assertEvidenceRunReady();
+  const g = await ev.open();
+  try {
+    return await fn(Object.freeze({ launch: (file, args, options) => ev.launch(g, file, args, options) }));
+  } finally {
+    ev.close(g);
+  }
+}
+
+// HM-19 / HM-21 (static, defence in depth; not the enforcement): the repo holds no shell, Python or other
+// interpreter scripts anywhere (no directory exempt), so a battery cannot be driven from a script the
+// backstop never sees. Files are judged by extension and by shebang, not by their text.
+export const SCRIPT_EXTENSIONS = Object.freeze(['sh', 'bash', 'zsh', 'ksh', 'csh', 'fish', 'py', 'pyw', 'pl', 'pm', 'rb', 'php', 'lua', 'tcl', 'r', 'ps1', 'bat', 'cmd', 'awk', 'exp', 'jl']);
+
 function walk(root, rel = '') {
   const out = [];
   for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
@@ -55,22 +72,21 @@ function walk(root, rel = '') {
   return out;
 }
 
-export function runnerContractFindings(root = ROOT, files) {
-  const list = files ?? walk(root);
-  const f = [];
-  for (const rel of list) {
-    if (rel.startsWith('test/') || rel.startsWith('node_modules/') || RUNNER_CONTRACT_EXEMPT.includes(rel)) continue;
-    if (!/\.(?:mjs|cjs|js|ts|mts|cts|sh|py)$/.test(rel)) continue;
-    let text;
-    try { text = readFileSync(join(root, rel), 'utf8'); } catch { continue; }
-    const why = runnerContractText(text);
-    if (why) f.push(`EG-3: ${rel} ${why} (assertEvidenceRunReady)`);
-  }
-  return f;
+export function scriptFileFinding(rel, head) {
+  const ext = (rel.split('/').pop().match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
+  if (SCRIPT_EXTENSIONS.includes(ext)) return `G-45: ${rel} is a .${ext} script (no interpreter scripts in the repo)`;
+  const h = String(head);
+  if (h.startsWith('#!') && !/^#!\s*\/usr\/bin\/env\s+node(?:\s|$)/.test(h)) return `G-45: ${rel} has a non-node shebang`;
+  return null;
 }
 
-// The sanctioned runner entry: guard first, then the run.
-export function startEvidenceRun(fn, root = ROOT) {
-  assertEvidenceRunReady(root);
-  return fn();
+export function scriptFileFindings(root = ROOT, files, read = (rel) => readFileSync(join(root, rel)).subarray(0, 128).toString('latin1')) {
+  const f = [];
+  for (const rel of files ?? walk(root)) {
+    let head = '';
+    try { head = read(rel); } catch { continue; }
+    const why = scriptFileFinding(rel, head);
+    if (why) f.push(why);
+  }
+  return f;
 }

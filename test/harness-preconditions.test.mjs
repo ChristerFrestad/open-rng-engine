@@ -14,7 +14,7 @@ import * as floor from '../verification/harness/n-floor.mjs';
 import * as counts from '../verification/harness/counts.mjs';
 import { runChecks, selfTest, runMutants, loadKTests } from '../verification/harness/check.mjs';
 import * as df from '../verification/harness/df-table.mjs';
-import { harnessReadiness, assertEvidenceRunReady, runnerContractFindings, runnerContractText, startEvidenceRun } from '../verification/harness/evidence-entry.mjs';
+import { harnessReadiness, assertEvidenceRunReady, scriptFileFindings, scriptFileFinding, startEvidenceRun } from '../verification/harness/evidence-entry.mjs';
 import * as col from '../verification/harness/collector.mjs';
 
 const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
@@ -176,11 +176,13 @@ test('EG-1: collector result is accepted only when n = records = witness returns
   assert.notDeepEqual(col.checkCollected(r, k, w.count()), []);
 });
 
-test('EG-3: no unguarded evidence runner in the tree; the contract and startEvidenceRun refuse', () => {
-  assert.deepEqual(runnerContractFindings(), []);
-  assert.match(String(runnerContractText(`spawnSync('${'die' + 'harder'}', ['-a'])`)), /without the entry guard/);
-  assert.equal(runnerContractText(`assertEvidenceRunReady();\nspawnSync('${'die' + 'harder'}', ['-a'])`), null);
-  assert.throws(() => startEvidenceRun(() => 1), /harness NOT-READY/);
+test('EG-3 / G-45: no interpreter scripts in the tree; startEvidenceRun refuses while NOT-READY and opens no grant', async () => {
+  assert.deepEqual(scriptFileFindings(), []);
+  assert.match(String(scriptFileFinding('verification/harness/run.py', '')), /G-45/);
+  assert.equal(scriptFileFinding('tools/ci/x.mjs', '#!/usr/bin/env node\n'), null);
+  let ran = false;
+  await assert.rejects(startEvidenceRun(async () => { ran = true; }), /harness NOT-READY/);
+  assert.equal(ran, false);
 });
 
 // H-5 (HoQ 4c7adda0/f575fe1f): Dieharder and PractRand archive pins and the rule 15 commands, as literals

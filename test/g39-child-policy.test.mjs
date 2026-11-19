@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CHILD_EXECUTABLE_ALLOWLIST, GIT_SUBCOMMANDS, REFUSED_BINDINGS, classifyChild, checkGitChild } from '../tools/ci/entropy-backstop.mjs';
+import { CHILD_EXECUTABLE_ALLOWLIST, GIT_SUBCOMMANDS, REFUSED_BINDINGS, EVIDENCE_TOOLS, INTERPRETER, classifyChild, checkGitChild } from '../tools/ci/entropy-backstop.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -46,4 +46,21 @@ test('G-39 git: global options, unlisted subcommands, program-running options an
   } finally { rmSync(d, { recursive: true, force: true }); }
   checkGitChild(['ls-files'], { cwd: ROOT });
   checkGitChild(['-C', ROOT, 'status'], {});
+});
+
+// G-45 (HoQ report c9d7c93..dbd4e00, addendum 1 A7): the entry guard at the spawn layer. The 19 evasions run
+// in check:ph0 (entropy-backstop-check); the READY-world grant path and G45-M1..M10 in g39-mutants.
+test('G-45 spawn layer: evidence tools need an OK guard grant; interpreters are never spawned', async () => {
+  const T = ['die' + 'harder', 'tu01' + '-driver', 'ass' + 'ess', 'RNG' + '_test'];
+  assert.deepEqual([...EVIDENCE_TOOLS], T);
+  for (const t of T) {
+    assert.throws(() => classifyChild('file', `/opt/lab/${t}`, [], {}), /without an OK entry guard \(G-45\)/);
+    assert.throws(() => classifyChild('shell', `${t} -a`, [], {}), /\(G-45\)/);
+    assert.throws(() => classifyChild('file', '/usr/bin/node', ['-e', `x('${t}')`], {}), /\(G-45\)/);
+  }
+  for (const i of ['python3', 'python', 'perl', 'sh', 'bash', 'env', 'ruby', 'xargs', 'awk']) assert.ok(INTERPRETER.test(i), i);
+  assert.throws(() => classifyChild('file', 'python3', ['-c', '1'], {}), /interpreter python3 is never spawned \(G-45\)/);
+  const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;
+  await assert.rejects(ev.open(), /harness NOT-READY/);
+  assert.throws(() => ev.launch(Object.freeze({ grant: 1 }), `/opt/lab/${T[0]}`, []), /without an open grant \(G-45\)/);
 });
