@@ -49,6 +49,14 @@ const MUTANTS = [
   ['MC-5 stream reuse across blocks', [[MCF, 'return new RefStream(MC.DOMAIN, ((entry << 11) | block) >>> 0, keyHex);', 'return new RefStream(MC.DOMAIN, ((entry << 11) | 0) >>> 0, keyHex);']], MC_TEST],
   ['MC-6 B drift (1,004,798)', [[MCF, 'B: 1004799,', 'B: 1004798,']], MC_TEST],
   ['MC-7 sampler exact tie path skipped', [[MCF, 'if (l > 0 && hi[l - 1] === a && lo[l - 1] === b) {', 'if (false) {']], MC_TEST],
+  // K3b G-67 / G-71 (HoQ A9 / A10), run against test/dt-mc.test.mjs.
+  ['MC-8 observed X² computed differently (not S.pearson)', [[MCF, 'return { x2: S.pearson(h, lumped, man.M).x2, observed_sha256', 'return { x2: c.reduce((a, x, j) => a + (x - man.M * lumped.cells[j]) ** 2 / (man.M * lumped.cells[j] + 1), 0), observed_sha256']], MC_TEST],
+  ['MC-9 scalar observed X² accepted', [[MCF, "export function observedX2(man, lumped, observed) {\n", "export function observedX2(man, lumped, observed) {\n  if (typeof observed === 'number') return { x2: observed, observed_sha256: sha(String(observed)) };\n"]], MC_TEST],
+  ['MC-10 M = sum of counts not checked', [[MCF, "  if (M !== man.M) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
+  ['MC-11 M > 10^9 not refused', [[MCF, "  if (man.M > M_MAX) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
+  ['MC-12 manifest constants not checked', [[MCF, "  checkManifestConstants(man);\n", ""]], MC_TEST],
+  ['MC-13 block #>= not re-verified', [[MCF, "  if (geOf(x.x2, obs.x2) !== x.ge) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
+  ['MC-14 block from another observed vector accepted', [[MCF, "  if (x.observed_sha256 !== obs.observed_sha256 || x.x2obs !== obs.x2) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],

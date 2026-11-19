@@ -70,38 +70,77 @@ export function nullManifest({ entryIndex, e, M, lumped, keyId, keyHex }) {
 }
 export const manifestSha = (m) => sha(JSON.stringify(m));
 
-// One block: block_size replications of the exact null, X² through THE module, #>= against x2obs.
-export function runBlock(man, lumped, keyHex, block, x2obs) {
+// G-71 (HoQ A10): the observed X² is computed HERE from the observed count vector (lumped cell order of THE
+// module), through S.pearson with the same lumping and M; a scalar from outside is refused. M must equal the sum
+// of the observed counts, and M > 10^9 is refused until Quant rechecks KL_safe at that scale.
+export const M_MAX = 1e9;
+export function observedX2(man, lumped, observed) {
+  if (observed === null || typeof observed !== 'object' || !Array.isArray(observed.counts)) throw new Error('R-DT-MC: observed must be { counts: [...] } in lumped cell order; a scalar X² is refused (G-71)');
+  const c = observed.counts; const k = lumped.cellNum.length;
+  if (c.length !== k || !c.every((x) => Number.isSafeInteger(x) && x >= 0)) throw new Error(`R-DT-MC: observed counts must be ${k} non-negative integers (G-71)`);
+  const M = c.reduce((a, x) => a + x, 0);
+  if (M !== man.M) throw new Error(`R-DT-MC: manifest M ${man.M} != sum of observed counts ${M} (G-71)`);
+  if (man.M > M_MAX) throw new Error('R-DT-MC: M > 10^9 refused until Quant rechecks KL_safe (G-71)');
+  const first = new Int32Array(k).fill(-1); for (let i = 0; i < lumped.map.length; i++) if (first[lumped.map[i]] < 0) first[lumped.map[i]] = i;
+  const h = new Float64Array(lumped.map.length); for (let j = 0; j < k; j++) h[first[j]] = c[j];
+  return { x2: S.pearson(h, lumped, man.M).x2, observed_sha256: sha(JSON.stringify(c)) };
+}
+// G-67 (HoQ A9): the manifest's B, B+1, block size and block count must be the R-DT-MC constants.
+export function checkManifestConstants(man) {
+  if (man.B !== MC.B || man.B_plus_1 !== MC.B_PLUS_1 || man.block_size !== MC.BLOCK || man.n_blocks !== nBlocks()) throw new Error(`R-DT-MC: manifest B ${man.B} / B+1 ${man.B_plus_1} / block ${man.block_size} / blocks ${man.n_blocks} differ from the constants (G-67)`);
+}
+const geOf = (x2s, x2obs) => { let ge = 0; for (const x of x2s) if (exceeds(x, x2obs)) ge += 1; return ge; };
+
+// One block: block_size replications of the exact null, X² through THE module, #>= against the observed X².
+export function runBlock(man, lumped, keyHex, block, observed) {
+  const { x2: x2obs, observed_sha256 } = observedX2(man, lumped, observed);
   const reps = blockReps(block, man.B, man.block_size);
   const s = mcStream(keyHex, man.entry_index, block); const u32 = () => s.u32();
   const smp = exactSampler(lumped); const k = smp.k;
   const first = new Int32Array(k).fill(-1); for (let i = 0; i < lumped.map.length; i++) if (first[lumped.map[i]] < 0) first[lumped.map[i]] = i;
-  const h = new Float64Array(lumped.map.length); const x2s = new Float64Array(reps); let ge = 0;
+  const h = new Float64Array(lumped.map.length); const x2s = new Float64Array(reps);
   for (let r = 0; r < reps; r++) {
     const c = new Float64Array(k); for (let o = 0; o < man.M; o++) c[smp.draw(u32)] += 1;
     for (let j = 0; j < k; j++) h[first[j]] = c[j];
-    x2s[r] = S.pearson(h, lumped, man.M).x2; if (exceeds(x2s[r], x2obs)) ge += 1;
+    x2s[r] = S.pearson(h, lumped, man.M).x2;
   }
-  return { block, reps, ge, x2_sha256: sha(Buffer.from(x2s.buffer)), manifest_sha256: manifestSha(man) };
+  return { block, reps, ge: geOf(x2s, x2obs), x2obs, observed_sha256, x2: Array.from(x2s), x2_sha256: sha(Buffer.from(x2s.buffer)), manifest_sha256: manifestSha(man) };
+}
+const blockDigest = (x) => sha(JSON.stringify([x.block, x.reps, x.ge, x.x2obs, x.observed_sha256, x.x2_sha256, x.manifest_sha256]));
+export const chainNext = (prev, x) => sha(`${prev}|${blockDigest(x)}`);
+export const CHAIN_SEED = '0'.repeat(64);
+function verifyBlock(x, b, man, ms, obs) {
+  if (x.manifest_sha256 !== ms || x.block !== b || x.reps !== blockReps(b, man.B, man.block_size)) return 'stale';
+  if (x.observed_sha256 !== obs.observed_sha256 || x.x2obs !== obs.x2) throw new Error(`R-DT-MC: block ${b} was computed for another observed vector (G-67)`);
+  if (!Array.isArray(x.x2) || x.x2.length !== x.reps || sha(Buffer.from(Float64Array.from(x.x2).buffer)) !== x.x2_sha256) throw new Error(`R-DT-MC: block ${b} X² content does not match its digest (G-67)`);
+  if (geOf(x.x2, obs.x2) !== x.ge) throw new Error(`R-DT-MC: block ${b} #>= does not match its stored X² (G-67)`);
+  return 'ok';
 }
 
-// Resumable driver (per entry, per block): digests checked at start; existing valid block files are kept;
-// each block is written atomically (tmp + rename). Returns the assembled p_MC once all blocks exist.
-export function runEntry(man, lumped, keyHex, x2obs, dir, { maxBlocks = Infinity } = {}) {
+// Resumable driver (per entry, per block): constants, digests, key and observed vector checked at start; valid
+// block files are kept; each block is written atomically (tmp + rename) with its chain link. Assembly re-verifies
+// every block and the chain. Returns the assembled p_MC and the chain head once all blocks exist.
+export function runEntry(man, lumped, keyHex, observed, dir, { maxBlocks = Infinity } = {}) {
+  checkManifestConstants(man);
   const d = codeDigests();
   for (const f of ['statistic', 'sampler', 'adapter']) if (d[f] !== man.digests[f]) throw new Error(`R-DT-MC: ${f} digest differs from the null manifest`);
   if (cellOrderDigest(lumped) !== man.cell_order_sha256) throw new Error('R-DT-MC: cell order differs from the null manifest');
   if (sha(Buffer.from(keyHex, 'hex')) !== man.key_sha256) throw new Error('R-DT-MC: key differs from the null manifest');
+  const obs = observedX2(man, lumped, observed);
   mkdirSync(dir, { recursive: true }); const ms = manifestSha(man); let done = 0;
+  const file = (b) => join(dir, `block-${String(b).padStart(4, '0')}.json`);
   for (let b = 0; b < man.n_blocks; b++) {
-    const f = join(dir, `block-${String(b).padStart(4, '0')}.json`);
-    if (existsSync(f)) { const x = JSON.parse(readFileSync(f, 'utf8')); if (x.manifest_sha256 === ms && x.block === b && x.reps === blockReps(b, man.B, man.block_size)) continue; }
+    if (existsSync(file(b)) && verifyBlock(JSON.parse(readFileSync(file(b), 'utf8')), b, man, ms, obs) === 'ok') continue;
     if (done >= maxBlocks) return null;
-    const out = runBlock(man, lumped, keyHex, b, x2obs);
-    writeFileSync(`${f}.tmp`, JSON.stringify(out) + '\n'); renameSync(`${f}.tmp`, f); done += 1;
+    const out = runBlock(man, lumped, keyHex, b, observed);
+    writeFileSync(`${file(b)}.tmp`, JSON.stringify(out) + '\n'); renameSync(`${file(b)}.tmp`, file(b)); done += 1;
   }
-  let ge = 0, reps = 0;
-  for (let b = 0; b < man.n_blocks; b++) { const x = JSON.parse(readFileSync(join(dir, `block-${String(b).padStart(4, '0')}.json`), 'utf8')); ge += x.ge; reps += x.reps; }
+  let ge = 0, reps = 0, chain = CHAIN_SEED;
+  for (let b = 0; b < man.n_blocks; b++) {
+    const x = JSON.parse(readFileSync(file(b), 'utf8'));
+    if (verifyBlock(x, b, man, ms, obs) !== 'ok') throw new Error(`R-DT-MC: block ${b} stale at assembly (G-67)`);
+    ge += x.ge; reps += x.reps; chain = chainNext(chain, x);
+  }
   if (reps !== man.B) throw new Error(`R-DT-MC: ${reps} replications assembled, manifest B ${man.B}`);
-  return { ge, reps, p_mc: (1 + ge) / (man.B + 1), flag: mcFlag(ge) };
+  return { ge, reps, p_mc: (1 + ge) / (man.B + 1), flag: mcFlag(ge), x2obs: obs.x2, observed_sha256: obs.observed_sha256, chain_head: chain };
 }

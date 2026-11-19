@@ -538,3 +538,13 @@ Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DE
   cell order digest and the statistic/sampler/adapter digests; it has NO observed X² (separate later commit).
   Resume re-checks all of these; blocks are written atomically and a recomputed block is digest-identical.
 - Not done here: any MC run, any real key, the coupon/adjacency exact binomial chain (awaiting HoQ).
+
+### 8.3 R-DT-MC integrity (K3b; HoQ A9 G-67, A10 G-71)
+
+- The MC entry takes the OBSERVED count vector in the module's lumped cell order and computes X²_obs itself
+  through `S.pearson` (same lumping, same M); a scalar is refused; manifest M must equal Σcounts; M > 10^9 is
+  refused until Quant rechecks KL_safe at that scale.
+- The manifest's B = 1,004,799, B + 1 = 1,004,800, block size 1,000 and 1,005 blocks must equal the constants.
+- Every block file stores its per-rep X², the observed-vector digest and X²_obs; assembly re-verifies each
+  block's X² digest, recomputes #≥ from the stored X², refuses a block made for another observed vector, and
+  returns the sha256 chain head over all blocks (to be committed with the results).
