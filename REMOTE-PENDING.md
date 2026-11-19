@@ -1,0 +1,37 @@
+# REMOTE-PENDING
+
+Remote-only PH0 items. **Status update 2026-11-18 (C-12):** RP-1 to RP-6 are applied on the remote under CoS C-12 GO (the Principal's own widget answer at 07:52 CET, quoted verbatim in the CoS transcript; not repeated here). RP-7 is applied with the stub wording; its live-channel wording is a local commit that is pending a separate go. The original text below records the pre-C-12 state. Every remote item waits for an explicit CoS go. This local repo has 0 remotes, and no seat working here pushes, publishes or changes repository settings.
+
+Observed state comes from read-only `gh api` GETs on 2026-11-18 at about 07:42 CET, with the remote `main` head at `449acd95`.
+
+| # | Item | Observed on remote | Intended exact value | PH0 DoD hook | Status |
+|---|---|---|---|---|---|
+| RP-1 | GitHub `licenseInfo` | `license.spdx_id` = `NOASSERTION`. The remote `LICENSE` (215 lines, sha256 `9ee5daa52c316d79ddb883c8811ad8b2d0255101a5153bab0e942cba51f3c3d8`) has a 13-line per-file boilerplate header added above the license text, and the appendix copyright line is filled in. GitHub's license detection does not match it. | Replace `LICENSE` with the unmodified Apache-2.0 text from this repo (sha256 `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`, 202 lines, from apache.org/licenses/LICENSE-2.0.txt). Move the copyright line to `NOTICE` (`Copyright 2026 Christer Frestad`). Expected result: `licenseInfo.spdxId` = `Apache-2.0`. | `test -f LICENSE` and `licenseInfo` non-null | APPLIED 2026-11-18 via PR #2 (merge `b019e377`); GET `license.spdx_id` = `Apache-2.0`, GraphQL `licenseInfo.spdxId` = `Apache-2.0` |
+| RP-2 | Private vulnerability reporting (PVR) | `GET /repos/ChristerFrestad/open-rng-engine/private-vulnerability-reporting` returns `{"enabled":false}` | Enabled: `PUT /repos/ChristerFrestad/open-rng-engine/private-vulnerability-reporting`, then a GET returns `{"enabled":true}`. After that, update `SECURITY.md` to say the channel is live. | `SECURITY.md` stub with private reporting enabled | APPLIED 2026-11-18 (PUT 204); GET returns `{"enabled":true}` |
+| RP-3 | Repo description | Already set. It passes the claims lint (0 hits). | The exact value in the scope block below, matching the `package.json` description. | Repo description passes R-16 | APPLIED 2026-11-18 (PATCH); GET description equals the scope-block value |
+| RP-4 | Repo topics | `[]` | The exact list in the scope block below, matching the `package.json` keywords. | none (hygiene) | APPLIED 2026-11-18 (PUT topics); GET returns the 7 scope-block topics (GitHub reorders them) |
+| RP-5 | Remote `README.md` | sha256 `25b8d22145355c3581c3a3ee5875158cf8f1e07ceb0c4937650257a50faf200b`. Line 7 has **1 hit for the R-16 certification-stem pattern**, so it fails PH0 "README passes the claims lint". | Replace it with this repo's `README.md` (0 hits). | README passes R-16 (0 hits); DOD-PH0-QIU07 | APPLIED 2026-11-18 via PR #2; remote README sha256 `f5969137…fe43`, claims lint 0 hits |
+| RP-6 | Remote `package.json` | `"dependencies": {"@noble/hashes": "^1.7.1"}`, `version` `0.1.0`, `main` `dist/index.js` (no build exists) | Replace it with this repo's `package.json`: `dependencies` = `{}` (B8, R-35). | `dependencies` = {} | APPLIED 2026-11-18 via PR #2; remote `dependencies` = `{}` |
+| RP-7 | Remote `SECURITY.md` | It points to the advisories URL, but PVR is disabled (RP-2), so that link is not a live private channel. | This repo's `SECURITY.md` until RP-2 is done, then the live wording. | SECURITY stub | STUB APPLIED 2026-11-18 via PR #2 (sha256 `ed42e491…3510`). Live-channel wording is committed locally, **pending remote**: it needs a separate go, because it is outside the C-12 yes |
+| RP-8 | CPO-R99 / CPO-R100 wording (O-67, O-68, F-17, CPO-R97a) | Repo description and topics as applied under C-12; remote `README.md` bullet "not a validated cryptographic module" (O-68 hit); remote `ARCHITECTURE.md` L20 (O-68 hits plus the C-14 sentence); remote `package.json` description is not S-P1 | Repo description = S-P1 exactly (186 bytes) and topics = the scope-block list below; `README.md` and `package.json` from this repo; `ARCHITECTURE.md` L20 per the held patch. Prepared only (not pushed): `/workspace/rng-backup/remote-r100-bundle/` (patch against remote `main` `1e30b666` plus `settings.json`) | README/description S-P1 (O-67, F-17); claims lint 0 | PENDING: needs an explicit CoS go |
+
+## Release-gate steps and backlog (local; HoQ ruling on G-39 interim, CPO-R114)
+
+This repo has no separate release checklist; this table is where the release-gate steps are kept until one exists.
+
+| # | Item | Exact step | Status |
+|---|---|---|---|
+| G39-1 | Release-gate step (HoQ condition (a)) | Before any release, the RM runs `node tools/ci/g39-mutants.mjs` from the repo root, explicitly and WITHOUT the entropy-backstop preload. **Exit 0 is required** (7/7 mutants killed). A non-zero exit blocks the release. | OPEN (interim; required on every release until G39-2 is done) |
+| G39-2 | Move into CI / check (HoQ condition (b)) | At the first manifest change (package.json / package-lock.json are frozen until then), wire `tools/ci/g39-mutants.mjs` into CI or `check:ph0` so it runs without a manual step; then G39-1 becomes redundant. | OPEN (waits for the first manifest change) |
+| G39-3 | HoQ re-run (HoQ condition (c)) | HoQ re-runs `node tools/ci/g39-mutants.mjs` on every verification and records the exit code. | STANDING |
+| PH2-1 | Transition diagnostic, non-gating (CPO-R114 (2)) | For `shuffle/adjacency-mod4/n-52` and `shuffle/adjacency-div4/n-52`: one adjacent pair per shuffle at a scheduled position, L×L table with exact cells c_a·c_b/(52·51) (a ≠ b) and c_a(c_a−1)/(52·51) (a = b); 16 cells (mod-4) / 169 cells (div-4). Diagnostic only: not in K′, not in the rule total, not gating. Power figures: verification/df-design-v2.md §6.3. | BACKLOG (PH2) |
+| SRC-1 | Production shuffle draw order vs the calibration harness (CTO batch K) | When `src` gets its shuffle: the spec (rng/inputs/security.md:154) runs top-down, `for i = n-1 down to 1: j = uniformInt(0, i)` (51 draws for n = 52, no `below(1)`), while the calibration harness (`verification/calibration/wave1-source.mjs` lazyShuffle) runs forward Fisher–Yates. Both give uniform permutations, but the reductions read first cards, so pin the production draw order (count and direction) against the harness with a test before any evidence run. | OPEN |
+
+Intended values that the claims lint checks (`tools/claims-lint.mjs` reads this block):
+
+<!-- CLAIMS-LINT-SCOPE:BEGIN -->
+description: Open-source TypeScript RNG and mapping library for Node.js, intended to be submitted as part of a licensee's system for independent lab evaluation. Not certified. Not a validated module.
+topics: random, csprng, random-integer, shuffle, sampling, weighted-random, nodejs, unbiased-random, general-purpose, pre-alpha
+<!-- CLAIMS-LINT-SCOPE:END -->
+
+How these are applied, after the CoS go only: one PR from a seat that holds the remote, carrying `LICENSE`, `NOTICE`, `README.md`, `package.json` and `SECURITY.md` from this repo, followed by the RP-2, RP-3 and RP-4 settings calls. This file does not authorise any of it. C-12 (applied 2026-11-18): PR https://github.com/ChristerFrestad/open-rng-engine/pull/2, head `92c36916ac6b72cc457bec960de48e1d45d37bff`, merged as `b019e37756269607a0724c6d7bffb1455033e131` with `--merge --match-head-commit`; no checks are configured on the repo.

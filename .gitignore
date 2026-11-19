@@ -1,0 +1,16 @@
+# dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tgz
+# local evidence runs are never committed from a working tree
+evidence-local/
+# secrets never live in this repo
+.env
+.env.*
+.npmrc
+# editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
