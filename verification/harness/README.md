@@ -55,3 +55,23 @@ Two separate checks:
 - **EG-3 / G-45 (structural, HoQ report c9d7c93..dbd4e00, addendum 1 A7).** The text contract is removed. Enforcement is at the spawn layer in `tools/ci/entropy-backstop.mjs`: a battery tool (dieharder, tu01-driver, STS assess, PractRand RNG_test), named as the executable or as any argv or shell word, is refused unless it is started by `launchEvidenceTool` inside an open grant; a grant is opened only by the backstop's `openEvidenceGrant`, which runs `assertEvidenceRunReady` itself (root fixed by its own URL) and each launch re-runs it. Interpreters (python, perl, sh, env, ...) are never spawned. No path or directory is exempt. `startEvidenceRun(async ({ launch }) => ...)` is the guarded entry export: it refuses without the backstop preload, runs the guard, opens the grant, hands the callback a launcher bound to it and closes it afterwards. Static half (defence in depth): no interpreter scripts anywhere in the repo (`scriptFileFindings`, by extension and shebang). Fixtures: 19 evasions in check:ph0 (entropy-backstop-check), the READY-world grant path and G45-M1..M10 in `node tools/ci/g39-mutants.mjs`.
 
 - **Batch E (HoQ 4c7adda0/f575fe1f H-3, H-4, H-5; b15a2ff5 D16, D17).** Every check HoQ found unproven now has a red fixture and a mutant: p = 1 + ε, BigCrush row order and header ntests, tu01 row width, duplicate plan, frozen-rule and tool-pins digests, rule-text cross-check and tool-pins field compare (each with the tampered file's own digest, so only the check under test sees it), checkArchiveFile and the archive size, upper-case hex, a df-null list over 76 (no hidden cap) and a wrong k-tests sha. The tu01 parser rejects empty, blank, hex, signed and non-decimal index or p fields as malformed (H-4). Self-test 140 fixtures, 81/81 mutants.
+
+## Wave-1 calibration (A6) on the labkit reference stream (CTO commit H; HoQ addendum 1 A7 R-W1-METHOD)
+
+Verification, NOT a counted evidence run: no battery tool is started and the evidence gate stays CLOSED.
+
+- **Adapter** `verification/labkit/aes-ctr-ref.mjs`: AES-256-CTR over zero plaintext, pinned key
+  `KEY_HEX` = sha256("open-rng-engine labkit reference AES-256-CTR key v1"), IV = BE32(stream) || BE32(rep) || 0^64,
+  u32 = little-endian keystream words, `below(r)` by rejection. KATs: NIST SP 800-38A F.5.5 CTR-AES256 (4 blocks)
+  and its own vectors (first words, 1 MiB digest, below()); the file digest is pinned in
+  `test/labkit-calibration.test.mjs`. It is outside `src/` and the engine code path; rule 27 refuses a src import
+  of it and the backstop's src scope is unchanged (same test). It never draws OS entropy.
+- **Harness** `verification/calibration/{laws,wave1-entries,wave1-calibrate}.mjs`: the 26 accepted EBC entries
+  (12 coupon, 12 duplicates with b per §6.2 / A7: [1,53) 8192, [0,54) 8448, [0,2^32+1) 8192, others 4096; adjacency
+  mod-4/div-4), R = 1000 replications, n >= 10^6 outcomes per replication, Pearson X² over the §6.1-lumped exact
+  law at M_cal, KS of the 1000 p-values vs U(0,1) at α = 0.001, flags at 0.01 inside [2, 22] of 1000, KS MDD
+  D_crit = 0.0617 (A6). Laws: coupon/duplicates double DP with positive terms only [CL-1], adjacency EXACT BigInt;
+  brute-force enumeration fixtures in the test.
+- **Run**: `node verification/calibration/wave1-calibrate.mjs` (8 worker threads) writes
+  `verification/calibration/wave1-results.json` (per entry: stream index, reps, M_cal, cells, df, min E,
+  min outcomes, KS D, KS p, flag count, PASS/FAIL, sha256 of the p-value vector).
