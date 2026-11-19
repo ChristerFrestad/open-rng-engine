@@ -6,7 +6,7 @@
 // load this repo's backstop, so a mutated copy can never load alone. That is the policy working, and also
 // why this is not part of `npm test`. It is not wired into check:ph0 because package.json is frozen.
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -43,11 +43,14 @@ export const G45_MUTANTS = [
   ['G45-M8 raw spawn allowed while a grant is open', '    const ok = launching !== null && ', '    const ok = activeGrant !== null || launching !== null && ', ['RW-raw-in-run', 'RW-shell-in-run']],
   ['G45-M9 grant not closed after the run', '  if (activeGrant === g) activeGrant = null;\n  evidenceGrants.delete(g);\n', '', ['RW-after-run-launch']],
   // G-57 (HoQ HM-22, HM-23, HM-25). HM-24 (realpath-basename check) is subsumed by the G-55 pin: the launch
-  // now refuses any real path that is not pinned (G55-M1 kills that). The spawn hook's remaining compare with
+  // now refuses any real path that is not pinned for that tool name. G57-M3 removes the real-path half of the
+  // pin lookup (what HM-24's basename check guarded); RW-symlink-renamed (a symlink named like the tool whose
+  // real file is a byte-identical, unpinned copy under another name) kills it. The spawn hook's remaining compare with
   // the pinned real path only guards a swap between the pin check and the spawn, which no fixture can force
   // without a race, so a mutant of it is listed as equivalent.
   ['G57-M1 (HM-22) launch does not re-run the guard', '  grantEntry.assertEvidenceRunReady();\n  if (typeof file', '  if (typeof file', ['RW-ready-flips']],
   ['G57-M2 (HM-23) several tool names allowed in one launch', '&& EVIDENCE_TOOLS.includes(base) && names.length === 1;', '&& EVIDENCE_TOOLS.includes(base);', ['RW-two-tools']],
+  ['G57-M3 (HM-24) pin found by tool name only, real path not compared', '  const pin = bins.find((b) => b && b.tool === tool && b.path === real);', '  const pin = bins.find((b) => b && b.tool === tool);', ['RW-unpinned-path', 'RW-symlink-renamed']],
   ['G57-M4 (HM-25) launch does not force shell:false', '{ ...options, shell: false }', '{ shell: false, ...options }', ['RW-shell-forced-off']],
   // G-54 / G-55 / G-60 (HoQ report 505599e..96aaf91).
   ['G54-M1 collector preload check off', "  if (!ev) throw new Error('collector refused: no entropy-backstop preload proof (G-54)');\n", '', ['NP-runner-collect'], 'verification/harness/collector.mjs'],
@@ -76,6 +79,7 @@ const RW_CASES = [
   ['RW-two-tools', false, (T) => `launch(${T.DH}, ['tu01' + '-driver']);`],
   ['RW-shell-forced-off', true, (T) => `const fs = await import('node:fs'); const r = launch(${T.DH}, ['x; touch ' + ${T.MK}], { shell: true }); if (r.error || r.status !== 0 || fs.existsSync(${T.MK})) process.exit(3);`],
   ['RW-unpinned-path', false, (T) => `launch(${T.UP}, ['-a']);`],
+  ['RW-symlink-renamed', false, (T) => `launch(${T.SL}, ['-a']);`],
   ['RW-pinned-script', false, (T) => `launch(${T.SC}, ['-a']);`],
   ['RW-sha-mismatch', false, (T) => `launch(${T.SM}, ['-a']);`],
   ['RW-bad-source-pin', false, (T) => `launch(${T.AS}, ['1000']);`],
@@ -115,6 +119,11 @@ function readyWorld(d) {
   put('SC', 'rw-script', 'die' + 'harder', { body: '#!/bin/sh\nexit 0\n' });
   put('SM', 'rw-shamismatch', 'die' + 'harder', { shaOverride: '0'.repeat(64) });
   put('AS', 'rw-badsrc', 'ass' + 'ess', { srcOverride: { name: 'NIST STS', sha256: 'f'.repeat(64) } });
+  // HM-24's threat: a path named like the tool that resolves to some other file (here a /bin/true copy named 'sh').
+  mkdirSync(join(d, 'rw-symlink'), { recursive: true }); mkdirSync(join(d, 'rw-symtarget'), { recursive: true });
+  copyFileSync(realpathSync('/bin/true'), join(d, 'rw-symtarget', 'sh')); chmodSync(join(d, 'rw-symtarget', 'sh'), 0o755);
+  symlinkSync(join(d, 'rw-symtarget', 'sh'), join(d, 'rw-symlink', 'die' + 'harder'));
+  T.SL = JSON.stringify(join(d, 'rw-symlink', 'die' + 'harder'));
   T.MK = JSON.stringify(join(d, 'rw-shell-mark'));
   T.COL = JSON.stringify(pathToFileURL(join(d, 'verification/harness/collector.mjs')).href);
   writeFileSync(join(d, 'verification/harness/tool-binaries.json'), JSON.stringify({ binaries: pins }, null, 1));

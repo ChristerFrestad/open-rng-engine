@@ -200,3 +200,42 @@ test('J calibration results: statistic and harness digests equal the current fil
     if (e.kind === 'coupon') assert.ok(r.outcomes_min >= r.M_cal * e.d);
   });
 });
+
+const REFSTREAM_3MIB = '3005b6c4e6b191c0729502e5aab3dde8bb39ca6f50496c24e1f8fa88ae0695c0';
+// G-58 (HM-37): RefStream itself across refills, derived independently from aesCtr() over 3 MiB, plus a pinned digest.
+test('labkit RefStream: multi-chunk keystream equals one-shot AES-256-CTR (no restart at 1 MiB refills)', () => {
+  const s = new ref.RefStream(0, 0); const n = (3 << 20) >>> 2; const w = new Uint32Array(n);
+  for (let i = 0; i < n; i++) w[i] = s.u32();
+  const got = createHash('sha256').update(Buffer.from(w.buffer)).digest('hex');
+  const want = createHash('sha256').update(ref.aesCtr(ref.KEY_HEX, ref.ivFor(0, 0), Buffer.alloc(3 << 20))).digest('hex');
+  assert.equal(got, want); assert.equal(s.words, n);
+  assert.equal(got, REFSTREAM_3MIB);
+});
+
+// G-58 (HM-35): below() rejection limits at the boundary, with scripted words.
+test('labkit below(): rejection limit exact (u = lim rejected, lim - 1 accepted) for every range branch', () => {
+  const T = 2 ** 32;
+  const run = (r, words) => { let i = 0; const f = { u32: () => { if (i >= words.length) throw new Error('drew past script'); return words[i++]; } }; const v = ref.RefStream.prototype.below.call(f, r); return [v, i]; };
+  for (const r of [2, 6, 7, 37, 38, 52, 53, 54, 100, 2 ** 31 + 1]) {
+    const lim = T - (T % r);
+    assert.deepEqual(run(r, [lim, lim - 1]), [(lim - 1) % r, 2], `r=${r} u=lim must be rejected`);
+    assert.deepEqual(run(r, [lim - 1]), [(lim - 1) % r, 1], `r=${r} u=lim-1 accepted`);
+    if (T % r !== 0) assert.deepEqual(run(r, [T - 1, 0]), [0, 2], `r=${r} u=2^32-1 rejected`);
+  }
+  assert.deepEqual(run(T, [T - 1]), [T - 1, 1]);
+  assert.deepEqual(run(T + 1, [1, 1, 1, 0]), [T, 4], '2^32+1: x = r rejected, x = 2^32 accepted');
+  assert.deepEqual(run(T + 1, [0xfffffffe, 5]), [5, 2], '2^32+1: low bit of the first word only');
+  assert.deepEqual(run(2 ** 48, [0x12345, 7]), [0x2345 * T + 7, 2]);
+});
+
+// G-58: a small fixed-seed re-run of the calibration path itself (lawExact, lumpExact, the reference source,
+// histogram, pearson): 3 entries x R = 20 reproduce the committed J p-values exactly, then the A6 rule.
+test('calibration fixture: 3 entries x 20 reps re-run reproduce the committed J p-values', () => {
+  const doc = JSON.parse(readFileSync(RJ, 'utf8'));
+  for (const ei of [0, 16, 25]) {
+    const e = Src.ENTRIES[ei]; const M = Src.mCal(e); const lumped = S.lumpExact(S.lawExact(e), M);
+    assert.equal(M, doc.results[ei].M_cal); assert.equal(lumped.cells.length, doc.results[ei].cells);
+    const ps = []; for (let rep = 0; rep < 20; rep++) { const r = Src.replicate(e, rep, M, lumped); ps.push(r.p); assert.equal(r.outcomes >= 1e6, true); }
+    assert.deepEqual(ps, doc.results[ei].pvalues.slice(0, 20), e.id);
+  }
+});

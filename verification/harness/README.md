@@ -81,3 +81,11 @@ Verification, NOT a counted evidence run: no battery tool is started and the evi
 - **Batch J1 (HoQ report eeb0184f G-54, G-55, G-57, G-60).** collector.mjs: `collectCounted` (preload marker + open grant, result stamped by the backstop) and `checkCollected(..., { grant })` rejecting unstamped or forged-stamp results; fixtures G-54 x3, MU-92 (the preload-only stamp and grant paths are mutated in g39: G54-M4/M5). `tool-binaries.json`: built-binary pins (path, sha256, source pin = tool-pins-v1.1.json), empty until a binary is built. Self-test 160 fixtures, 92/92 mutants.
 
 - **Batch J2 (HoQ eeb0184f G-56, Quant OPEN-f1).** `verification/statistic/wave1-statistic.mjs` is THE wave-1 EBC statistic: exact BigInt laws (coupon DP over distinct counts with an exact 1e-12 complement tail, duplicates collision DP over m^b with the exact tail, adjacency generating function), exact §6.1 lumping, reductions that read public-call outcomes through an injected `next()` (no stream inside; the module imports nothing), Pearson X^2 and the A6 rule. `wave1-evidence.mjs` feeds it collector records (stamped, G-54); `verification/calibration/wave1-source.mjs` feeds it the labkit reference stream. The test binds both to the same module and function objects. The old calibration-only laws.mjs / wave1-entries.mjs / wave1-outcomes.mjs are removed (they remain at 93a3a0a).
+
+## J4 (CTO batch J, HoQ G-57/G-58)
+
+- `node tools/ci/j-calib-mutants.mjs`: calibration-harness and labkit-adapter mutants HM-29..35, 37, 39, 40.
+  Each runs on a scratch copy with every binding digest re-pinned (results-j statistic/harness/adapter, H2
+  adapter, test adapter pin), so only behavioural tests can kill it. Exit 0 iff baseline green and all killed.
+- g39 G57-M3 (HM-24): the pin lookup without the real-path compare is killed by RW-symlink-renamed (a symlink
+  named like the tool whose real file is a byte-identical unpinned copy named `sh`) and RW-unpinned-path.
