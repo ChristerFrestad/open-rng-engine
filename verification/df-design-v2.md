@@ -205,3 +205,193 @@ Flag W-1: §A6's wave-1 line says "equal-p coupon collector: R ×11, plus S and 
 "weightedPick coupon". weightedPick (1,3,6) is not equal-p, so it is held for wave 4 here. HoQ may move it.
 
 Total: 26 (wave 1) + 26 (wave 2) + 12 (wave 3) + 3 (wave 4) = 67.
+
+---
+
+## 6. Delta F (appended 2026-11-19; earlier sections unchanged): power/MDD of the wave-1 variants, CPO-R114, HoQ rulings
+
+This section is appended. §0–§5 above stay as committed in 5dffcc06. Where this section changes a parameter, the
+change is stated here and this section governs.
+
+### 6.0 What was ruled (recorded, not re-argued)
+
+- **HoQ:** deal_card as a red fixture is ACCEPTED and the green controls stay. W-1 is confirmed: weightedPick stays in
+  wave 4. `tools/ci/g39-mutants.mjs` is ACCEPTED as interim on three conditions: (a) it is a release-gate step that
+  the RM runs explicitly, with exit 0 required; (b) it moves into CI or `check:ph0` at the first manifest change;
+  (c) HoQ re-runs it on every verification. These are recorded in `REMOTE-PENDING.md` (G39-1..G39-3).
+- **CPO-R114** (DECISIONS.md, file sha256 85a51013…):
+  - D-1 ACCEPTED: the collision count C is the definition of "duplicates". Every duplicates config runs at
+    λ = b²/(2m) ≥ 4.
+  - A-1 ACCEPTED AS NARROWER: X stays, with the report wording in §6.3. K′ = 157, the thresholds and 0.00945 are
+    unchanged.
+
+### 6.1 Method and approximation labels
+
+The helper is `/workspace/rng-backup/dfv2-delta/power.py` (sha256
+`4689c26de8c26b2e5adf0e537d77cddb16fb058ce9fa3593d06a1a70b215233c`). Its full output is
+`/workspace/rng-backup/dfv2-delta/out-F.txt` (sha256 `89644d161e27a71a90675ba605c62bd7c5bcc15097e1d90ad96b465f6dec245f`).
+To reproduce, run `python3 power.py` (about 9 minutes, no dependencies beyond the standard library).
+
+- **Level.** α = 0.01/157 = 6.369427×10⁻⁵, the rule 8 per-test flag threshold of decision rule v1. The χ² critical
+  value is computed for df = cells − 1. Consumption is n ≥ 10⁹ public-call outcomes.
+- **Cells.** Contiguous lumping from both tails, merging while the outer cell or its inner neighbour has an expected
+  count below 5. The laws are unimodal, so every cell is then ≥ 5 expected (asserted). The same index groups are used
+  under the alternative.
+- **Power.** Power = P(χ²′_df(λ_nc) > crit), with λ_nc = M·Σ(q_j − p_j)²/p_j over the lumped cells (p = null,
+  q = alternative). MDD50/MDD80 is the smallest effect at which the power is 50% / 80%.
+- **[A1] approximation.** The null and alternative laws of C and D used for power are computed by the same occupancy
+  DP in double precision. The gated tables remain the exact BigInt DP of §2. The double law sums to 1 to double precision (checked for `[0,2)` at b = 16384: 1 + 3.3×10⁻¹⁵).
+  The cell state above c_max = ⌊λ + 12√λ + 25⌋ is one tail cell.
+- **[A2] approximation.** Power uses the noncentral χ² approximation to Pearson's statistic under a local
+  alternative. For duplicates, λ_nc(δ) is taken as k·δ² with k measured at δ₀ = 0.01. Each solved MDD is then
+  re-evaluated with the DP at that δ, and the achieved power is printed next to it in out-F.txt. All achieved values
+  are 0.493–0.503 (target 0.5) and 0.794–0.805 (target 0.8).
+- **[A3] model.** The duplicates alternative is an effective-m generator: a non-uniform urn distribution summarised
+  by Σp_i² = (1+δ)/m. The collision process is then run with m′ = m/(1+δ). This is a model statement, not a claim
+  about any particular defect.
+- **Adjacency null laws.** These are EXACT (Fractions; the law sums to 1 exactly; E[X] = 12 and 3, as Quant C-11
+  found). Their powers are [A2].
+
+### 6.2 Duplicates: λ ≥ 4 block sizes (CPO-R114 (1)), P-2 and D-1
+
+**Block sizes.** b = 4096 stays for 9 configs; every one of them has b²/(2m) ≥ 4.0231. Three configs change:
+
+- `[1,53)`, m = 52⁴ = 7311616: b = 8192, so b²/(2m) = 67108864/14623232 = 4.5892.
+- `[0,54)`, m = 54⁴ = 8503056: b = 8192 gives 67108864/17006112 = **3.9462 < 4**, which fails the requirement. The
+  minimum is b ≥ ⌈√(8m)⌉ = 8248. The note takes **b = 8448** (= 33·256, the next multiple of 256 above 8248), so
+  b²/(2m) = 71368704/17006112 = 4.1967. HoQ may take any b ≥ 8248.
+- `[0,2^32+1)`, m = 6700417: b = 8192, so b²/(2m) = 67108864/13400834 = 5.0078.
+
+CPO-R114 quoted "λ≈4.4/4.0/5.3" for these three at b = 8192. The exact values are 4.5892, 3.9462 and 5.0078, and the
+second is below 4, hence b = 8448.
+
+**Tractability.** The exact denominators m^b are b·log₂m bits: 186.8 kbit (52⁴, 8192), 194.5 kbit (54⁴, 8448) and
+185.8 kbit (6700417, 8192). This is about 2× §2's 95 kbit bound and still a BigInt DP of b steps over ≤ c_max + 2
+states.
+
+**Re-derived M.** M = ⌈10⁹/(b·u)⌉ gives:
+- `[1,53)`: M = ⌈10⁹/32768⌉ = 30518, consumption 1,000,013,824.
+- `[0,54)`: M = ⌈10⁹/33792⌉ = 29593, consumption 1,000,006,656.
+- `[0,2^32+1)`: M = ⌈10⁹/8192⌉ = 122071, consumption 1,000,005,632.
+
+**Per-config table.** Statistic C. λ is b²/(2m); E[C] = b(b−1)/(2m) is in out-F.txt. v1 = original form
+(b = 2¹⁴ = 16384); w1 = §2 (b = 4096); **F** = governing block size. MDD = δ in Σp² = (1+δ)/m at α = 6.369×10⁻⁵
+[A1][A2][A3].
+
+| Config | m | u | form | b | λ = b²/2m | M | consumption | cells | min E | MDD50 | MDD80 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| [0,2) | 2^20 | 20 | v1 | 16384 | 128.0000 | 3052 | 1,000,079,360 | 57 | 5.59 | 0.01135 | 0.01298 |
+| | | | **F** = w1 | 4096 | 8.0000 | 12208 | 1,000,079,360 | 19 | 7.51 | 0.01849 | 0.02147 |
+| [1,7) | 6^8 | 8 | v1 | 16384 | 79.9098 | 7630 | 1,000,079,360 | 54 | 5.41 | 0.00900 | 0.01030 |
+| | | | **F** = w1 | 4096 | 4.9944 | 30518 | 1,000,013,824 | 16 | 6.55 | 0.01436 | 0.01672 |
+| [1,38) | 37^4 | 4 | v1 | 16384 | 71.6148 | 15259 | 1,000,013,824 | 54 | 6.94 | 0.00672 | 0.00770 |
+| | | | **F** = w1 | 4096 | 4.4759 | 61036 | 1,000,013,824 | 15 | 14.03 | 0.01060 | 0.01236 |
+| [1,53) | 52^4 | 4 | v1 | 16384 | 18.3568 | 15259 | 1,000,013,824 | 29 | 9.25 | 0.01180 | 0.01362 |
+| | | | w1 (superseded) | 4096 | 1.1473 | 61036 | 1,000,013,824 | 8 | 11.57 | 0.01886 | 0.02221 |
+| | | | **F** | 8192 | 4.5892 | 30518 | 1,000,013,824 | 15 | 9.15 | 0.01481 | 0.01727 |
+| [0,100) | 10^6 | 3 | v1 | 16384 | 134.2177 | 20346 | 1,000,046,592 | 74 | 5.57 | 0.00452 | 0.00516 |
+| | | | **F** = w1 | 4096 | 8.3886 | 81381 | 1,000,009,728 | 22 | 13.42 | 0.00718 | 0.00832 |
+| [0,2^31+1) | 3^13 | 13 | v1 | 16384 | 84.1848 | 4696 | 1,000,210,432 | 52 | 5.28 | 0.01109 | 0.01270 |
+| | | | **F** = w1 | 4096 | 5.2615 | 18781 | 1,000,050,688 | 16 | 6.90 | 0.01783 | 0.02076 |
+| [0,2^32) | 2^20 | 1 | v1 | 16384 | 128.0000 | 61036 | 1,000,013,824 | 80 | 5.15 | 0.00272 | 0.00310 |
+| | | | **F** = w1 | 4096 | 8.0000 | 244141 | 1,000,001,536 | 23 | 7.50 | 0.00428 | 0.00496 |
+| [0,38) | 38^4 | 4 | v1 | 16384 | 64.3688 | 15259 | 1,000,013,824 | 52 | 6.12 | 0.00704 | 0.00806 |
+| | | | **F** = w1 | 4096 | 4.0231 | 61036 | 1,000,013,824 | 14 | 17.06 | 0.01105 | 0.01290 |
+| [0,54) | 54^4 | 4 | v1 | 16384 | 15.7846 | 15259 | 1,000,013,824 | 28 | 6.76 | 0.01264 | 0.01460 |
+| | | | w1 (superseded) | 4096 | 0.9865 | 61036 | 1,000,013,824 | 7 | 33.52 | 0.01991 | 0.02350 |
+| | | | **F** | 8448 | 4.1967 | 29593 | 1,000,006,656 | 14 | 12.46 | 0.01554 | 0.01814 |
+| [0,2^32+1) | 6700417 | 1 | v1 | 16384 | 20.0312 | 61036 | 1,000,013,824 | 34 | 6.54 | 0.00582 | 0.00670 |
+| | | | w1 (superseded) | 4096 | 1.2520 | 244141 | 1,000,001,536 | 9 | 11.92 | 0.00920 | 0.01081 |
+| | | | **F** | 8192 | 5.0078 | 122071 | 1,000,005,632 | 17 | 8.37 | 0.00725 | 0.00843 |
+| [0,2^48) | 2^20 | 1 | v1 | 16384 | 128.0000 | 61036 | 1,000,013,824 | 80 | 5.15 | 0.00272 | 0.00310 |
+| | | | **F** = w1 | 4096 | 8.0000 | 244141 | 1,000,001,536 | 23 | 7.50 | 0.00428 | 0.00496 |
+| Lehmer-52 | 2^20 | 1 | v1 | 16384 | 128.0000 | 61036 | 1,000,013,824 | 80 | 5.15 | 0.00272 | 0.00310 |
+| | | | **F** = w1 | 4096 | 8.0000 | 244141 | 1,000,001,536 | 23 | 7.50 | 0.00428 | 0.00496 |
+
+The v1 "min E" values are those of this note's lumping rule. v1 itself left the lumping to Quant (C-3).
+
+**Reading (i), P-2.**
+- Under [A3], the governing form's MDD80 is 1.24× to 1.65× the original v1 form's MDD80. For example, `[0,2)`
+  goes from 0.01298 to 0.02147 (×1.65) and `[1,53)` from 0.01362 to 0.01727 (×1.27); the smallest ratio is `[0,54)` 0.01460 → 0.01814 (×1.24).
+- At w1's b = 4096, the three superseded configs were ×1.61 to ×1.63 (`[0,54)` 0.01460 → 0.02350).
+- So the power loss from smaller blocks is stated. It is bounded by a factor < 1.7 in δ at fixed n = 10⁹ for every
+  config.
+- P-2 is resolved as the λ ≥ 4 requirement (CPO-R114). HoQ still rules on the method.
+
+**Reading (ii), D-1.**
+- The alternative reading of "duplicates" computed here is D = the number of urns hit ≥ 2 times in the block. Its
+  exact law is the 2-D occupancy DP over (c, d), with the double law [A1].
+- Under the same [A3] alternative, at the governing block sizes, C and D have the same lumped cell count for every
+  config. Their MDDs agree to within 2×10⁻⁵ (out-F.txt, D-1 table): for example, `[0,54)` b = 8448 gives C 0.01554 /
+  0.01814 and D 0.01555 / 0.01814.
+- At λ ≈ 4–8, triple hits are rare, so C ≈ D on most blocks. The definition chosen (C, CPO-R114) loses no power
+  against this alternative compared with the D reading.
+- No other reading (for example a spacings-based one) is evaluated, because its source has not been read for this
+  note.
+
+### 6.3 Adjacency: X vs the transition table (A-1, CPO-R114 (2))
+
+**Setup.** M = 10⁹ shuffles (one public-call outcome each, consumption 10⁹), α = 6.369×10⁻⁵.
+
+- **X** (§3): the equal-label adjacent-pair count per shuffle, with an EXACT null law.
+- **T** (the alternative form): one adjacent pair per shuffle at a scheduled position, in an L×L table. Its EXACT
+  cells are c_a·c_b/(52·51) for a ≠ b and c_a(c_a−1)/(52·51) for a = b.
+- **π₀** = P(equal labels at one position) = (c−1)/(Lc−1), EXACT.
+
+| | mod-4 (L = 4, c = 13) | div-4 (L = 13, c = 4) |
+|---|---|---|
+| E[X] (EXACT) | 12 | 3 |
+| π₀ (EXACT) | 4/17 | 1/17 |
+| X: lumped cells / df / min E | 32 / 31 / 12.89 | 17 / 16 / 18.28 |
+| T: cells / df / min E | 16 / 15 / 5.88×10⁷ | 169 / 168 / 4.52×10⁶ |
+| Clustering, X: ε at 50% / 80% power | 5.1×10⁻⁵ / 5.9×10⁻⁵ | 1.00×10⁻⁴ / 1.17×10⁻⁴ |
+| Clustering, T: ε at 50% / 80% power | 3.20×10⁻⁴ / 3.72×10⁻⁴ | 1.134×10⁻³ / 1.282×10⁻³ |
+| Cyclic preference, T: ε at 50% / 80% power | 2.48×10⁻⁴ / 2.89×10⁻⁴ | 7.16×10⁻⁴ / 8.09×10⁻⁴ |
+| Cyclic preference, X | no first-order power (E[X] unchanged, exactly) | same |
+
+**Alternative models** (model statements; powers are [A2]):
+
+- **Clustering.** The per-position equal-label probability rises from π₀ to π₀(1+ε).
+  - For X: the exponentially tilted null law with E[X] = 51·π₀·(1+ε).
+  - For T: the diagonal cells ×(1+ε), with the off-diagonal cells scaled to keep the total at 1.
+- **Cyclic label preference.** q(a, a+1 mod L) = p(1+ε) and q(a, a−1 mod L) = p(1−ε). The diagonal and every other
+  cell are unchanged.
+  - Marginals and every equal-label cell are unchanged, so by linearity E[X] = Σ_i P(equal at i) is EXACTLY
+    unchanged. X has no first-order power against this alternative.
+  - T has λ_nc = M·p_off·2L·ε², with p_off = 169/2652 (mod-4) or 16/2652 (div-4).
+
+**Reading (iii).**
+- Against clustering, X is 6.3× (mod-4) to 11.0× (div-4) more sensitive than T at 80% power.
+- Against a label-to-label preference that keeps equal-label frequencies, X has no first-order power, and T detects
+  ε ≈ 3×10⁻⁴ (mod-4) to 8×10⁻⁴ (div-4).
+- This is the narrowing that CPO-R114 accepted.
+
+**Report wording (exact, for both `shuffle/adjacency-mod4/n-52` and `shuffle/adjacency-div4/n-52`):**
+
+> tests clustering of equal labels; does not test label-to-label transition preference.
+
+**PH2 backlog.** A non-gating one-pair-per-shuffle transition diagnostic (T above; 16 or 169 exact cells) is recorded
+in `REMOTE-PENDING.md` as PH2-1. It is not in K′, not in the rule total, and not gating.
+
+### 6.4 CPO four-point acceptance test for wave 2–3 variants (note only; waves 2–4 not started)
+
+Per CPO-R114 (3), a variant is acceptable if all four hold:
+
+1. The original form is not computable exactly, or not citable under R113.
+2. The variant still tests the property the entry's name promises.
+3. Its power/MDD change against the original is stated, as in §6.2 and §6.3.
+4. The limitation is named in the evidence report.
+
+Expectations, which are not rulings:
+- **Serial correlation** as lag-1 non-overlapping pairs likely passes (2).
+- **Overlaps** should prefer AC, with a source actually read by the checker.
+- **An EBC non-overlapping fallback** for overlaps goes to CPO with its power stated, as a named limitation only.
+
+### 6.5 Totals (unchanged)
+
+- 26 wave-1 entries: 12 coupon, 12 duplicates, 2 adjacency. All are EBC pending the Quant recomputation (now
+  including the three new block sizes), calibration and the HoQ ruling.
+- 41 entries are held OPEN in waves 2–4. The total is 67.
+- K′ = 157, the per-test threshold 6.369×10⁻⁵, the hard FAIL at p < 10⁻¹⁰, n = 10⁹ and the rule total
+  0.00895 + 0.0005 = 0.00945 are unchanged.
+- No code changes. df-table.mjs is unchanged.

@@ -15,6 +15,17 @@ Observed state comes from read-only `gh api` GETs on 2026-11-18 at about 07:42 C
 | RP-7 | Remote `SECURITY.md` | It points to the advisories URL, but PVR is disabled (RP-2), so that link is not a live private channel. | This repo's `SECURITY.md` until RP-2 is done, then the live wording. | SECURITY stub | STUB APPLIED 2026-11-18 via PR #2 (sha256 `ed42e491…3510`). Live-channel wording is committed locally, **pending remote**: it needs a separate go, because it is outside the C-12 yes |
 | RP-8 | CPO-R99 / CPO-R100 wording (O-67, O-68, F-17, CPO-R97a) | Repo description and topics as applied under C-12; remote `README.md` bullet "not a validated cryptographic module" (O-68 hit); remote `ARCHITECTURE.md` L20 (O-68 hits plus the C-14 sentence); remote `package.json` description is not S-P1 | Repo description = S-P1 exactly (186 bytes) and topics = the scope-block list below; `README.md` and `package.json` from this repo; `ARCHITECTURE.md` L20 per the held patch. Prepared only (not pushed): `/workspace/rng-backup/remote-r100-bundle/` (patch against remote `main` `1e30b666` plus `settings.json`) | README/description S-P1 (O-67, F-17); claims lint 0 | PENDING: needs an explicit CoS go |
 
+## Release-gate steps and backlog (local; HoQ ruling on G-39 interim, CPO-R114)
+
+This repo has no separate release checklist; this table is where the release-gate steps are kept until one exists.
+
+| # | Item | Exact step | Status |
+|---|---|---|---|
+| G39-1 | Release-gate step (HoQ condition (a)) | Before any release, the RM runs `node tools/ci/g39-mutants.mjs` from the repo root, explicitly and WITHOUT the entropy-backstop preload. **Exit 0 is required** (7/7 mutants killed). A non-zero exit blocks the release. | OPEN (interim; required on every release until G39-2 is done) |
+| G39-2 | Move into CI / check (HoQ condition (b)) | At the first manifest change (package.json / package-lock.json are frozen until then), wire `tools/ci/g39-mutants.mjs` into CI or `check:ph0` so it runs without a manual step; then G39-1 becomes redundant. | OPEN (waits for the first manifest change) |
+| G39-3 | HoQ re-run (HoQ condition (c)) | HoQ re-runs `node tools/ci/g39-mutants.mjs` on every verification and records the exit code. | STANDING |
+| PH2-1 | Transition diagnostic, non-gating (CPO-R114 (2)) | For `shuffle/adjacency-mod4/n-52` and `shuffle/adjacency-div4/n-52`: one adjacent pair per shuffle at a scheduled position, L×L table with exact cells c_a·c_b/(52·51) (a ≠ b) and c_a(c_a−1)/(52·51) (a = b); 16 cells (mod-4) / 169 cells (div-4). Diagnostic only: not in K′, not in the rule total, not gating. Power figures: verification/df-design-v2.md §6.3. | BACKLOG (PH2) |
+
 Intended values that the claims lint checks (`tools/claims-lint.mjs` reads this block):
 
 <!-- CLAIMS-LINT-SCOPE:BEGIN -->
