@@ -526,3 +526,15 @@ Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DE
 - R-DT-MC item 8 (power of the MC flag at B + 1 = 1,004,800, flag iff #≥ ≤ 62): #≥ ~ Binomial(B, p_true);
   at p_true = α_e (6.369e-5) E[#≥] ≈ 64, so P(flag) ≈ 50 %; at p_true ≤ α_e/2, E[#≥] ≈ 32 and P(flag) is
   essentially 1 (P[Poisson(32) > 62] < 1e-6).
+
+### 8.2 R-DT-MC framework and the duplicates exact sampler (K2; HoQ R-DT-MC / R-DT-SAMPLER)
+
+- `verification/mc/dt-mc.mjs`: p_MC = (1 + #≥)/(B + 1), B + 1 = 1,004,800, ties counted as ≥, flag iff #≥ ≤ 62;
+  no curtailment (1,005 blocks: 1,004 × 1,000 + 799). Exact per-observation categorical sampler for entries
+  12–23 (binary search on 64-bit boundary prefixes, exact BigInt decision on a prefix tie, exact rejection
+  above den); X² through THE module. Streams: labkit AES-256-CTR, IV = BE32(0x4d430001) ‖ BE32(entry·2^11 + block)
+  ‖ 0^64, domain-separated from calibration IVs (BE32(stream 1..26) ‖ BE32(rep) ‖ 0^64).
+- Null manifest (committed before an entry's evidence run) pins domain, IV scheme, key digest, B, block size,
+  cell order digest and the statistic/sampler/adapter digests; it has NO observed X² (separate later commit).
+  Resume re-checks all of these; blocks are written atomically and a recomputed block is digest-identical.
+- Not done here: any MC run, any real key, the coupon/adjacency exact binomial chain (awaiting HoQ).

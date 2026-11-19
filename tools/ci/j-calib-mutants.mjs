@@ -17,6 +17,7 @@ const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibratio
 const TEST = 'test/labkit-calibration.test.mjs', RJ = 'verification/calibration/wave1-results-j.json';
 const DIGEST_TESTS = [/^labkit adapter: pinned digest/, /^J calibration results: statistic and harness digests/];
 const SCREEN_TEST = 'test/dt-screen.test.mjs';
+const MC_TEST = 'test/dt-mc.test.mjs', MCF = 'verification/mc/dt-mc.mjs';
 
 const MUTANTS = [
   ['HM-29 KS D one-sided (D+ only)', [[ST, 'D = Math.max(D, (i + 1) / n - s[i], s[i] - i / n);', 'D = Math.max(D, (i + 1) / n - s[i]);']]],
@@ -40,6 +41,14 @@ const MUTANTS = [
   ['SC-6 < replaced by <=', [[ST, 'export const screenFails = (logBound) => logBound < SCREEN.LOG_THRESHOLD;', 'export const screenFails = (logBound) => logBound <= SCREEN.LOG_THRESHOLD;']], SCREEN_TEST],
   ['SC-7 threshold drift 1e-10 -> 1e-9', [[ST, 'LOG_THRESHOLD: Math.log(1e-10)', 'LOG_THRESHOLD: Math.log(1e-9)']], SCREEN_TEST],
   ['SC-8 rounding direction flipped', [[ST, 'klBernoulli(q, p) * (1 - SCREEN.SAFETY_REL) - SCREEN.SAFETY_ABS', 'klBernoulli(q, p) * (1 + SCREEN.SAFETY_REL) + SCREEN.SAFETY_ABS']], SCREEN_TEST],
+  // K2 R-DT-MC framework and duplicates exact sampler, run against test/dt-mc.test.mjs.
+  ['MC-1 p_MC off by one (#>= / (B+1))', [[MCF, 'export const pMC = (ge) => (1 + ge) / MC.B_PLUS_1;', 'export const pMC = (ge) => ge / MC.B_PLUS_1;']], MC_TEST],
+  ['MC-2 assembled p over B instead of B+1', [[MCF, 'p_mc: (1 + ge) / (man.B + 1)', 'p_mc: (1 + ge) / man.B']], MC_TEST],
+  ['MC-3 ties not counted (> instead of >=)', [[MCF, 'export const exceeds = (x2sim, x2obs) => x2sim >= x2obs;', 'export const exceeds = (x2sim, x2obs) => x2sim > x2obs;']], MC_TEST],
+  ['MC-4 flag boundary 62 -> < 62', [[MCF, 'export const mcFlag = (ge) => ge <= MC.FLAG_MAX_GE;', 'export const mcFlag = (ge) => ge < MC.FLAG_MAX_GE;']], MC_TEST],
+  ['MC-5 stream reuse across blocks', [[MCF, 'return new RefStream(MC.DOMAIN, ((entry << 11) | block) >>> 0, keyHex);', 'return new RefStream(MC.DOMAIN, ((entry << 11) | 0) >>> 0, keyHex);']], MC_TEST],
+  ['MC-6 B drift (1,004,798)', [[MCF, 'B: 1004799,', 'B: 1004798,']], MC_TEST],
+  ['MC-7 sampler exact tie path skipped', [[MCF, 'if (l > 0 && hi[l - 1] === a && lo[l - 1] === b) {', 'if (false) {']], MC_TEST],
 ];
 
 const sha = (d, rel) => createHash('sha256').update(readFileSync(join(d, rel))).digest('hex');
