@@ -164,3 +164,39 @@ test('H2 calibration results file (superseded, kept): 26 entries, R = 1000, n >=
     assert.equal(r.verdict, pass ? 'PASS' : 'FAIL', r.id);
   }
 });
+
+// G-59: the H2 per-replication p-values are committed and authenticate the H2 rows.
+test('H2 per-rep p-values committed (G-59) and match the H2 digests; H2 marked superseded', () => {
+  const h2 = JSON.parse(readFileSync(RESULTS, 'utf8'));
+  const pv = JSON.parse(readFileSync(join(ROOT, 'verification/calibration/wave1-h2-pvalues.json'), 'utf8'));
+  assert.equal(h2.superseded.by, 'verification/calibration/wave1-results-j.json');
+  pv.entries.forEach((x, i) => {
+    assert.equal(x.id, h2.results[i].id);
+    assert.equal(createHash('sha256').update(JSON.stringify(x.pvalues)).digest('hex'), h2.results[i].pvalue_sha256, x.id);
+  });
+});
+
+// J3: the calibration of THE statistic. Digests bound to the current files (G-58), verdicts recomputed from
+// the committed p-values with the module's own A6 rule, outcomes and urns per replication (R-A6n).
+const RJ = join(ROOT, 'verification/calibration/wave1-results-j.json');
+test('J calibration results: statistic and harness digests equal the current files; verdicts recomputed from the committed p-values', () => {
+  const doc = JSON.parse(readFileSync(RJ, 'utf8'));
+  assert.equal(doc.statistic.id, S.STATISTIC_ID);
+  assert.equal(doc.statistic.sha256, sha('verification/statistic/wave1-statistic.mjs'));
+  assert.equal(doc.harness_sha256['wave1-source.mjs'], sha('verification/calibration/wave1-source.mjs'));
+  assert.equal(doc.harness_sha256['wave1-calibrate.mjs'], sha('verification/calibration/wave1-calibrate.mjs'));
+  assert.equal(doc.adapter.file_sha256, sha('verification/labkit/aes-ctr-ref.mjs'));
+  assert.deepEqual(doc.results.map((r) => r.id), Src.ENTRIES.map((e) => e.id));
+  doc.results.forEach((r, i) => {
+    const e = Src.ENTRIES[i];
+    assert.equal(r.stream, e.stream); assert.equal(r.reps, 1000); assert.equal(r.pvalues.length, 1000);
+    assert.equal(createHash('sha256').update(JSON.stringify(r.pvalues)).digest('hex'), r.pvalue_sha256, r.id);
+    const v = S.a6Verdict(r.pvalues, r.outcomes_min);
+    assert.equal(+v.ks.D.toFixed(5), r.ks_D, r.id); assert.equal(+v.ks.p.toPrecision(4), r.ks_p_asymptotic_stephens, r.id);
+    assert.equal(v.flags, r.flags_0_01, r.id); assert.equal(v.pass ? 'PASS' : 'FAIL', r.verdict, r.id);
+    assert.ok(r.outcomes_min >= 1e6, r.id);
+    if (e.kind === 'dup') { assert.equal(r.outcomes_min, r.M_cal * e.b * e.u); assert.equal(r.urns_per_rep, r.M_cal * e.b); assert.equal(r.blocks_per_rep, r.M_cal); }
+    if (e.kind === 'adj') assert.equal(r.outcomes_min, r.M_cal);
+    if (e.kind === 'coupon') assert.ok(r.outcomes_min >= r.M_cal * e.d);
+  });
+});

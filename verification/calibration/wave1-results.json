@@ -648,5 +648,10 @@
    }
   }
  ],
- "outcomes_note": "Per-replication outcomes (CTO 04:37 check): unit as in HoQ (e) consumption (M x b x u). No entry is below 10^6, so none was re-run and none is superseded. Rows were produced by wave1-calibrate.mjs at H1 5995a877 (sha256 in harness_sha256); the H2 runner change (error-listener removal, outcome fields) does not change any computed value, which the coupon recount confirms (equal p-value digests)."
+ "outcomes_note": "Per-replication outcomes (CTO 04:37 check): unit as in HoQ (e) consumption (M x b x u). No entry is below 10^6, so none was re-run and none is superseded. Rows were produced by wave1-calibrate.mjs at H1 5995a877 (sha256 in harness_sha256); the H2 runner change (error-listener removal, outcome fields) does not change any computed value, which the coupon recount confirms (equal p-value digests).",
+ "superseded": {
+  "by": "verification/calibration/wave1-results-j.json",
+  "commit": "J3",
+  "reason": "G-56: calibration re-run through THE wave-1 statistic module (exact BigInt laws, verification/statistic/wave1-statistic.mjs); this H2 file was produced by the calibration-only laws.mjs/wave1-entries.mjs at 5995a877 and is kept, not deleted."
+ }
 }

@@ -404,7 +404,7 @@ Expectations, which are not rulings:
 - Adapter `labkit-ref/aes-256-ctr/v1` (`verification/labkit/aes-ctr-ref.mjs`, sha256 ae7a25d3d2a2529c746a6660af65efb816425786eb92cdcf546c8b793d0cc956), key 4e93c44f26d655731512adfe11534a18a0c25ec729259b092fdbb2228133f737, IV = BE32(stream) ‖ BE32(rep) ‖ 0^64, stream = entry index + 1, rep = 0..999.
 - Harness `verification/calibration/` (laws.mjs 10b43729…, wave1-entries.mjs 5833d964…, wave1-calibrate.mjs 6e9690b4…). Rule: R = 1000 per entry, ≥ 10^6 outcomes per replicate, Pearson χ² over the §6.1-lumped exact law at M_cal, KS of the 1000 p-values against U(0,1) at α = 0.001 (KS MDD D_crit = 0.0617), flags at p < 0.01 required in [2, 22]. Duplicates use [0,54) at b = 8448.
 - Run: one detached resumable invocation, 2026-11-19T03:31:52.889Z UTC end, node v24.22.1, OpenSSL 3.5.9, 2647 s. An earlier non-resumable invocation was stopped before any result was read (replaced by the resumable runner; not result selection). Results file `verification/calibration/wave1-results.json` (per-entry p-value digests included).
-- **Outcome: 26/26 PASS, 0 FAIL.** Smallest KS p 0.07291 (entry 18), flags range 5–18, max D 0.04053 < 0.0617.
+- **Outcome: 26/26 PASS, 0 FAIL.** Smallest KS p 0.07291 (entry 18), flags range 5–18, max D 0.04053 < D_crit = **0.061462** (exact KS critical value at R = 1000, α = 0.001; HoQ A8 C-2; the asymptotic 1.94947/√R is 0.06165). The stored KS p is the **asymptotic Kolmogorov series with the Stephens factor** [CL-3], not the exact KS p (Quant O-2: exact is lower by ≤ 0.0042; minimum exact 0.07278).
 
 | # | entry | stream | M_cal | cells | outcomes per replication | KS D | KS p | flags@0.01 | verdict |
 |---|---|---|---|---|---|---|---|---|---|
@@ -445,4 +445,70 @@ Expectations, which are not rulings:
 ### 7.3 Report limitations (to be named verbatim in the evidence report)
 
 - **A-1 (adjacency mod-4 and div-4), CPO wording:** "tests clustering of equal labels; does not test label-to-label transition preference."
-- **G-52 (all wave-1 reductions):** the reductions use only leading bits or cards, so they are blind to low-bit and late-card defects.
+- **G-52 (all wave-1 reductions):** the reductions use leading bits or cards only (top 6/20 bits; first cards for Lehmer-52), so they are blind to low-bit and late-card defects.
+
+### 7.4 Urns and blocks per replication; calibration-scale MDD (CTO batch J, HoQ A6-n / A8 R-A6n)
+
+R-A6n counts public-call outcomes per replication (randomInt outcomes; shuffles for adjacency); urns and blocks
+are stated for information. **The minimum outcomes per replication across all 26 entries is 1,000,000 (the two
+adjacency entries, one shuffle = one outcome); the duplicates minimum is 1,003,520** (entries 18, 22, 23; HoQ A8 C-3).
+
+Calibration-scale MDD of the duplicates entries: per replication (M = M_cal blocks, α = 0.01, the per-rep flag
+level), δ in Σp² = (1+δ)/m detected with 50 % / 80 % power. Method and approximations as §6.2 [A1][A2][A3]
+(helper /workspace/rng-backup/j-mdd/calib_mdd.py, sha256 8cfaa608…, importing dfv2-delta/power.py 4689c26d).
+
+| Config | m | u | b | blocks/rep | urns/rep | outcomes/rep | cells | MDD50 | MDD80 |
+|---|---|---|---|---|---|---|---|---|---|
+| [0,2) | 2^20 | 20 | 4096 | 200 | 819,200 | 16,384,000 | 12 | 0.0960 | 0.1201 |
+| [1,7) | 6^8 | 8 | 4096 | 200 | 819,200 | 6,553,600 | 10 | 0.1171 | 0.1470 |
+| [1,38) | 37^4 | 4 | 4096 | 400 | 1,638,400 | 6,553,600 | 10 | 0.0873 | 0.1097 |
+| [1,53) | 52^4 | 4 | 8192 | 400 | 3,276,800 | 13,107,200 | 10 | 0.0863 | 0.1083 |
+| [0,100) | 10^6 | 3 | 4096 | 200 | 819,200 | 2,457,600 | 12 | 0.0939 | 0.1174 |
+| [0,2^31+1) | 3^13 | 13 | 4096 | 200 | 819,200 | 10,649,600 | 10 | 0.1142 | 0.1434 |
+| [0,2^32) | 2^20 | 1 | 4096 | 245 | 1,003,520 | 1,003,520 | 12 | 0.0868 | 0.1085 |
+| [0,38) | 38^4 | 4 | 4096 | 400 | 1,638,400 | 6,553,600 | 10 | 0.0921 | 0.1156 |
+| [0,54) | 54^4 | 4 | 8448 | 400 | 3,379,200 | 13,516,800 | 10 | 0.0902 | 0.1133 |
+| [0,2^32+1) | 6700417 | 1 | 8192 | 200 | 1,638,400 | 1,638,400 | 10 | 0.1169 | 0.1469 |
+| [0,2^48) | 2^20 | 1 | 4096 | 245 | 1,003,520 | 1,003,520 | 12 | 0.0868 | 0.1085 |
+| Lehmer-52 | 2^20 | 1 | 4096 | 245 | 1,003,520 | 1,003,520 (shuffles) | 12 | 0.0868 | 0.1085 |
+
+The KS MDD of the A6 rule itself is D_crit = 0.061462 (R = 1000, α = 0.001).
+
+
+## 8. Wave-1 A6 calibration of THE statistic (J3, G-56; supersedes the §7 H2 table)
+
+- Statistic `verification/statistic/wave1-statistic.mjs` (d4021fb7…, exact BigInt laws, exact §6.1 lumping), source `verification/calibration/wave1-source.mjs` (1a1c5573…), runner `wave1-calibrate.mjs` (632cb215…), adapter ae7a25d3…. Digests checked at run start (harness-at-start.sha256) and equal to the J2 commit f3d81687; the results test re-checks them against the current files (G-58).
+- Same IV set as H2 (stream = entry index + 1, reps 0..999), committed before the run (H1). Not a re-roll: the statistic changed (G-56), so the H2 file `wave1-results.json` is kept and marked `superseded`; H2 per-rep p-values committed as `wave1-h2-pvalues.json` (G-59); J per-rep p-values are in the J results file.
+- Rule unchanged: R = 1000, outcomes per replication ≥ 10^6, KS α = 0.001 (D_crit 0.061462 exact), flags at p < 0.01 in [2, 22]. KS p is asymptotic (Stephens).
+- **Outcome: 26/26 PASS.** 25/26 rows reproduce H2 per-rep p-values to ≤ 1.1e-11 (law arithmetic). Entry 23 (Lehmer duplicates) differs in exactly one replication (rep 195, p 0.6423 → 0.0930): H2 completed a fallback shuffle with a 52nd `below(1)` draw, which consumes one stream word; the J source draws only the 51 forward Fisher–Yates draws (as the public shuffle and the adjacency entries do). Rep 195 has the only prefix fallback in that entry with H2 code, verified by replaying it both ways (the no-`below(1)` replay reproduces the J histogram exactly). Not a defect; both are valid null draws.
+
+| # | entry | M_cal | blocks/rep | urns/rep | outcomes/rep min | max | cells | KS D | KS p | flags | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | `randomInt/coupon-collector/min-0-max-2` | 500,000 | – | – | 1,497,297 | 1,503,102 | 17 | 0.03402 | 0.194 | 9 | PASS |
+| 1 | `randomInt/coupon-collector/min-1-max-7` | 166,667 | – | – | 2,443,277 | 2,458,182 | 54 | 0.02681 | 0.4635 | 7 | PASS |
+| 2 | `randomInt/coupon-collector/min-1-max-38` | 27,028 | – | – | 4,177,106 | 4,227,602 | 246 | 0.02647 | 0.4799 | 12 | PASS |
+| 3 | `randomInt/coupon-collector/min-1-max-53` | 19,231 | – | – | 4,509,623 | 4,564,267 | 308 | 0.01962 | 0.8325 | 7 | PASS |
+| 4 | `randomInt/coupon-collector/min-0-max-100` | 10,000 | – | – | 5,147,854 | 5,227,082 | 438 | 0.02572 | 0.5173 | 5 | PASS |
+| 5 | `randomInt/coupon-collector/min-0-max-2147483649` | 333,334 | – | – | 1,828,641 | 1,840,012 | 27 | 0.01896 | 0.8618 | 18 | PASS |
+| 6 | `randomInt/coupon-collector/min-0-max-4294967296` | 15,625 | – | – | 4,710,915 | 4,775,506 | 349 | 0.03263 | 0.2335 | 14 | PASS |
+| 7 | `randomInt/coupon-collector/min-0-max-38` | 26,316 | – | – | 4,203,166 | 4,253,191 | 251 | 0.03442 | 0.1834 | 10 | PASS |
+| 8 | `randomInt/coupon-collector/min-0-max-54` | 18,519 | – | – | 4,546,864 | 4,606,300 | 315 | 0.0269 | 0.4595 | 12 | PASS |
+| 9 | `randomInt/coupon-collector/min-0-max-4294967297` | 12,488 | – | – | 56,066,294 | 56,690,171 | 1115 | 0.01804 | 0.8982 | 12 | PASS |
+| 10 | `randomInt/coupon-collector/min-0-max-281474976710656` | 15,625 | – | – | 4,714,430 | 4,776,517 | 349 | 0.02119 | 0.7559 | 11 | PASS |
+| 11 | `shuffle/coupon-collector/lehmer-52` | 19,231 | – | – | 4,509,359 | 4,567,038 | 308 | 0.01482 | 0.9798 | 14 | PASS |
+| 12 | `randomInt/duplicates/min-0-max-2` | 200 | 200 | 819,200 | 16,384,000 | 16,384,000 | 12 | 0.02831 | 0.3945 | 12 | PASS |
+| 13 | `randomInt/duplicates/min-1-max-7` | 200 | 200 | 819,200 | 6,553,600 | 6,553,600 | 10 | 0.02018 | 0.8063 | 11 | PASS |
+| 14 | `randomInt/duplicates/min-1-max-38` | 400 | 400 | 1,638,400 | 6,553,600 | 6,553,600 | 10 | 0.02275 | 0.6738 | 9 | PASS |
+| 15 | `randomInt/duplicates/min-1-max-53` | 400 | 400 | 3,276,800 | 13,107,200 | 13,107,200 | 10 | 0.03481 | 0.1737 | 10 | PASS |
+| 16 | `randomInt/duplicates/min-0-max-100` | 200 | 200 | 819,200 | 2,457,600 | 2,457,600 | 12 | 0.02438 | 0.587 | 11 | PASS |
+| 17 | `randomInt/duplicates/min-0-max-2147483649` | 200 | 200 | 819,200 | 10,649,600 | 10,649,600 | 10 | 0.01446 | 0.9843 | 14 | PASS |
+| 18 | `randomInt/duplicates/min-0-max-4294967296` | 245 | 245 | 1,003,520 | 1,003,520 | 1,003,520 | 12 | 0.04053 | 0.07291 | 8 | PASS |
+| 19 | `randomInt/duplicates/min-0-max-38` | 400 | 400 | 1,638,400 | 6,553,600 | 6,553,600 | 10 | 0.02739 | 0.4362 | 10 | PASS |
+| 20 | `randomInt/duplicates/min-0-max-54` | 400 | 400 | 3,379,200 | 13,516,800 | 13,516,800 | 10 | 0.02671 | 0.4686 | 9 | PASS |
+| 21 | `randomInt/duplicates/min-0-max-4294967297` | 200 | 200 | 1,638,400 | 1,638,400 | 1,638,400 | 10 | 0.02698 | 0.4554 | 13 | PASS |
+| 22 | `randomInt/duplicates/min-0-max-281474976710656` | 245 | 245 | 1,003,520 | 1,003,520 | 1,003,520 | 12 | 0.03376 | 0.2009 | 12 | PASS |
+| 23 | `shuffle/duplicates/lehmer-52` | 245 | 245 | 1,003,520 | 1,003,520 | 1,003,520 | 12 | 0.01905 | 0.8579 | 13 | PASS |
+| 24 | `shuffle/adjacency-mod4/n-52` | 1,000,000 | – | – | 1,000,000 | 1,000,000 | 27 | 0.03569 | 0.1533 | 6 | PASS |
+| 25 | `shuffle/adjacency-div4/n-52` | 1,000,000 | – | – | 1,000,000 | 1,000,000 | 14 | 0.03498 | 0.1696 | 12 | PASS |
+
+Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DEEP-TAIL (actual size ≤ nominal at α = 6.369e-5 per EBC entry) is NOT established** by this calibration (α = 0.01 / KS 0.001 scale); open item for HoQ/CPO.
