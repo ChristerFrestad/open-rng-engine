@@ -79,7 +79,7 @@ test('rule 17(i): expected counts are the frozen numbers', () => {
 test('self-test: every fixture as expected, all 81 mutants killed, none PATCH-FAILED', async () => {
   const r = await selfTest();
   assert.deepEqual(r.fails, []);
-  assert.equal(r.mutants.length, 91);
+  assert.equal(r.mutants.length, 92);
   assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
 });
 
@@ -99,7 +99,7 @@ test('check:ph0 wiring: b8 step runs the harness checks on this tree', () => {
 
 test('no evidence data in the harness directory', () => {
   const files = execFileSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'verification/harness'], { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
-  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/collector.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
+  assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/collector.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tool-binaries.json', 'verification/harness/tu01-driver.c']);
 });
 
 // The 9 ids HoQ ruled (b15a2ff5), held here on their own so the counts are computed independently of DF_TABLE.
@@ -170,9 +170,9 @@ test('EG-1: collector result is accepted only when n = records = witness returns
   let x = 0;
   const w = col.witness(() => (x = (x + 7) % 38));
   const r = col.collect(k, w.call, 50);
-  assert.deepEqual(col.checkCollected(r, k, w.count(), { floor: false }), []);
-  assert.notDeepEqual(col.checkCollected({ ...r, n: 100 }, k, w.count(), { floor: false }), []);
-  assert.notDeepEqual(col.checkCollected(r, k, w.count() * 2, { floor: false }), []);
+  assert.deepEqual(col.checkCollected(r, k, w.count(), { floor: false, grant: false }), []);
+  assert.notDeepEqual(col.checkCollected({ ...r, n: 100 }, k, w.count(), { floor: false, grant: false }), []);
+  assert.notDeepEqual(col.checkCollected(r, k, w.count() * 2, { floor: false, grant: false }), []);
   assert.notDeepEqual(col.checkCollected(r, k, w.count()), []);
 });
 

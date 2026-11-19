@@ -495,6 +495,8 @@ export const G45_CASES = [];
       ['python-plain', `spawnSync('python3', ['-c', 'print(1)']);`],
       ['grant-not-ready', `const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;\ntry { await ev.open(); } catch (e) { console.error(String(e.message)); process.exit(1); }`],
       ['launch-without-grant', `const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;\nev.launch(Object.freeze({ grant: 1 }), ${DH}, ['-a']);`],
+      ['stamp-outside-grant', `const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;\nev.stamp({ n: 1 });`],
+      ['collect-outside-grant', `const C = await import(${JSON.stringify(pathToFileURL(join(ROOT, 'verification/harness/collector.mjs')).href)});\ntry { C.collectCounted({ id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }, () => 1, 3); } catch (e) { if (e.message.includes('collector refused: no open evidence grant (G-54)')) { console.error(e.message); process.exit(1); } }`],
       ['start-run-not-ready', `const { startEvidenceRun } = await import(${EV});\nlet ran = false;\ntry { await startEvidenceRun(async ({ launch }) => { ran = true; launch(${DH}, ['-a']); }); } catch (e) { console.error(String(e.message)); process.exit(ran ? 0 : 1); }`],
     ];
     for (const [label, body, sub] of cases) {
@@ -505,7 +507,7 @@ export const G45_CASES = [];
       writeFileSync(file, head + body + tail);
       const r = spawnSync(process.execPath, ['--import', BACKSTOP, file], { cwd: ROOT, encoding: 'utf8', timeout: 20_000, env: { ...process.env } });
       const out = `${r.stdout}\n${r.stderr}`;
-      if (r.status === 0 || !/\(G-45\)|harness NOT-READY/.test(out)) {
+      if (r.status === 0 || !/\(G-(?:45|54)\)|harness NOT-READY/.test(out)) {
         console.error(`entropy-backstop-check: G-45 ${label} was not rejected by the G-45 rule (status ${r.status})\n${out}`);
         failed += 1;
       }

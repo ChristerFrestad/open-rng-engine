@@ -7,6 +7,7 @@
 // why this is not part of `npm test`. It is not wired into check:ph0 because package.json is frozen.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -41,6 +42,24 @@ export const G45_MUTANTS = [
   ['G45-M7 launch without an open grant', "  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');\n", '', ['launch-without-grant']],
   ['G45-M8 raw spawn allowed while a grant is open', '    const ok = launching !== null && ', '    const ok = activeGrant !== null || launching !== null && ', ['RW-raw-in-run', 'RW-shell-in-run']],
   ['G45-M9 grant not closed after the run', '  if (activeGrant === g) activeGrant = null;\n  evidenceGrants.delete(g);\n', '', ['RW-after-run-launch']],
+  // G-57 (HoQ HM-22, HM-23, HM-25). HM-24 (realpath-basename check) is subsumed by the G-55 pin: the launch
+  // now refuses any real path that is not pinned (G55-M1 kills that). The spawn hook's remaining compare with
+  // the pinned real path only guards a swap between the pin check and the spawn, which no fixture can force
+  // without a race, so a mutant of it is listed as equivalent.
+  ['G57-M1 (HM-22) launch does not re-run the guard', '  grantEntry.assertEvidenceRunReady();\n  if (typeof file', '  if (typeof file', ['RW-ready-flips']],
+  ['G57-M2 (HM-23) several tool names allowed in one launch', '&& EVIDENCE_TOOLS.includes(base) && names.length === 1;', '&& EVIDENCE_TOOLS.includes(base);', ['RW-two-tools']],
+  ['G57-M4 (HM-25) launch does not force shell:false', '{ ...options, shell: false }', '{ shell: false, ...options }', ['RW-shell-forced-off']],
+  // G-54 / G-55 / G-60 (HoQ report 505599e..96aaf91).
+  ['G54-M1 collector preload check off', "  if (!ev) throw new Error('collector refused: no entropy-backstop preload proof (G-54)');\n", '', ['NP-runner-collect'], 'verification/harness/collector.mjs'],
+  ['G54-M2 checkCollected stamp check off', '  if (grant) { const g = grantStampError(result); if (g) f.push(g); }\n', '', ['NP-runner-collect', 'RW-unstamped-in-run'], 'verification/harness/collector.mjs'],
+  ['G54-M4 collector grant check off', "  if (!ev.active()) throw new Error('collector refused: no open evidence grant (G-54)');\n", '', ['collect-outside-grant'], 'verification/harness/collector.mjs'],
+  ['G54-M5 stamp compared by presence of the field only', 'return t !== null && result.grant === t ? null', "return typeof result.grant === 'string' ? null", ['RW-forged-stamp'], 'verification/harness/collector.mjs'],
+  ['G54-M3 result stamped outside a grant', "  if (activeGrant === null || !evidenceGrants.has(activeGrant)) refuseChild('result stamp outside", "  if (false) refuseChild('result stamp outside", ['stamp-outside-grant']],
+  ['G55-M1 binary pin check off', '  const real = pinnedBinary(file);\n', '  const real = realpathSync(file);\n', ['RW-unpinned-path', 'RW-pinned-script', 'RW-sha-mismatch', 'RW-bad-source-pin']],
+  ['G55-M2 script check off', "  if (bytes.subarray(0, 2).toString('latin1') === '#!') refuseChild", '  if (false) refuseChild', ['RW-pinned-script']],
+  ['G55-M3 binary sha check off', "  if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) refuseChild", '  if (false) refuseChild', ['RW-sha-mismatch']],
+  ['G55-M4 source pin not compared with tool-pins', '  if (!src || !pin.source || pin.source.name !== src.name || pin.source.sha256 !== src.sha256) refuseChild', '  if (false) refuseChild', ['RW-bad-source-pin']],
+  ['G60-M1 grant left open at exit not reported', "process.on('exit', onGrantLeak);", '', ['RW-open-never-closed']],
   ['G45-M10 (HM-21) callers under verification/ exempt', 'function evidenceSpawnCheck(kind, exe, argv, opts) {\n', "function evidenceSpawnCheck(kind, exe, argv, opts) {\n  if (String(process.argv[1] || '').includes('/verification/')) return { node: false, evidence: true };\n", ['verification-dir']],
 ];
 
@@ -53,6 +72,17 @@ const RW_CASES = [
   ['RW-launch-interpreter', false, () => `launch('/usr/bin/python3', ['-c', '1']);`],
   ['RW-after-run-launch', false, (T) => `globalThis.__L = launch;`, (T) => `globalThis.__L(${T.DH}, ['-a']);`],
   ['RW-after-run-raw', false, (T) => `const r = launch(${T.DH}, ['-a']); if (r.error || r.status !== 0) process.exit(3);`, (T) => `spawnSync(${T.DH}, ['-a']);`],
+  ['RW-ready-flips', false, (T) => `globalThis.__g39NotReady = true; launch(${T.DH}, ['-a']);`],
+  ['RW-two-tools', false, (T) => `launch(${T.DH}, ['tu01' + '-driver']);`],
+  ['RW-shell-forced-off', true, (T) => `const fs = await import('node:fs'); const r = launch(${T.DH}, ['x; touch ' + ${T.MK}], { shell: true }); if (r.error || r.status !== 0 || fs.existsSync(${T.MK})) process.exit(3);`],
+  ['RW-unpinned-path', false, (T) => `launch(${T.UP}, ['-a']);`],
+  ['RW-pinned-script', false, (T) => `launch(${T.SC}, ['-a']);`],
+  ['RW-sha-mismatch', false, (T) => `launch(${T.SM}, ['-a']);`],
+  ['RW-bad-source-pin', false, (T) => `launch(${T.AS}, ['1000']);`],
+  ['RW-collect-in-run', true, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const res = C.collectCounted(k, () => 1, 5); const f = C.checkCollected(res, k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(3); }`],
+  ['RW-unstamped-in-run', false, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const f = C.checkCollected(C.collect(k, () => 1, 5), k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(1); }`],
+  ['RW-forged-stamp', false, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const r = C.collect(k, () => 1, 5); r.grant = 'grant-1@' + process.pid; const f = C.checkCollected(r, k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(1); }`],
+  ['RW-open-never-closed', 'G-60', () => '', () => `await globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence.open();`],
 ];
 
 function readyWorld(d) {
@@ -61,11 +91,33 @@ function readyWorld(d) {
   const s = readFileSync(ee, 'utf8');
   const from = '  return { ready: df.ready, df };';
   if (!s.includes(from)) return ['RW-anchor-missing'];
-  writeFileSync(ee, s.replace(from, '  return { ready: true, df };'));
+  writeFileSync(ee, s.replace(from, '  return { ready: globalThis.__g39NotReady !== true, df };'));
   const bin = join(d, 'rw-bin');
   mkdirSync(bin, { recursive: true });
   const T = {};
-  for (const [k, t] of [['DH', 'die' + 'harder'], ['PR', 'RNG' + '_test']]) { copyFileSync(realpathSync('/bin/true'), join(bin, t)); chmodSync(join(bin, t), 0o755); T[k] = JSON.stringify(join(bin, t)); }
+  // G-55: the READY world pins its fake binaries (copies of /bin/true) in the copy's tool-binaries.json.
+  const srcs = JSON.parse(readFileSync(join(d, 'verification/tool-pins-v1.1.json'), 'utf8')).tools;
+  const NAMES = { ['die' + 'harder']: 'Dieharder', ['RNG' + '_test']: 'PractRand', ['ass' + 'ess']: 'NIST STS' };
+  const pins = [];
+  const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+  const src = (t) => { const x = srcs.find((y) => y.name === NAMES[t]); return { name: x.name, sha256: x.sha256 }; };
+  const put = (k, dir, t, { pin = true, body = null, shaOverride = null, srcOverride = null } = {}) => {
+    mkdirSync(join(d, dir), { recursive: true });
+    const f = join(d, dir, t);
+    if (body === null) copyFileSync(realpathSync('/bin/true'), f); else writeFileSync(f, body);
+    chmodSync(f, 0o755);
+    if (pin) pins.push({ tool: t, path: realpathSync(f), sha256: shaOverride ?? sha(f), source: srcOverride ?? src(t), build: 'g39 READY world fake (/bin/true copy)' });
+    T[k] = JSON.stringify(f);
+  };
+  put('DH', 'rw-bin', 'die' + 'harder');
+  put('PR', 'rw-bin', 'RNG' + '_test');
+  put('UP', 'rw-unpinned', 'die' + 'harder', { pin: false });
+  put('SC', 'rw-script', 'die' + 'harder', { body: '#!/bin/sh\nexit 0\n' });
+  put('SM', 'rw-shamismatch', 'die' + 'harder', { shaOverride: '0'.repeat(64) });
+  put('AS', 'rw-badsrc', 'ass' + 'ess', { srcOverride: { name: 'NIST STS', sha256: 'f'.repeat(64) } });
+  T.MK = JSON.stringify(join(d, 'rw-shell-mark'));
+  T.COL = JSON.stringify(pathToFileURL(join(d, 'verification/harness/collector.mjs')).href);
+  writeFileSync(join(d, 'verification/harness/tool-binaries.json'), JSON.stringify({ binaries: pins }, null, 1));
   const bs = join(d, 'tools/ci/entropy-backstop.mjs');
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
@@ -74,7 +126,8 @@ function readyWorld(d) {
     writeFileSync(f, `import { spawnSync, execSync } from 'node:child_process';\nconst { startEvidenceRun } = await import(${JSON.stringify(pathToFileURL(ee).href)});\nawait startEvidenceRun(async ({ launch }) => { ${body(T)} });\n${after ? after(T) : ''}\nconsole.log('RW-OK');\n`);
     const r = spawnSync(process.execPath, ['--import', bs, f], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
     const out = `${r.stdout}\n${r.stderr}`;
-    const ok = green ? r.status === 0 && /RW-OK/.test(out) : r.status !== 0 && /\(G-45\)/.test(out) && !/RW-OK/.test(out);
+    const ok = green === 'G-60' ? r.status !== 0 && /\(G-60\)/.test(out)
+      : green ? r.status === 0 && /RW-OK/.test(out) : r.status !== 0 && /\(G-(?:45|54|55)\)|harness NOT-READY/.test(out) && !/RW-OK/.test(out);
     if (!ok) reached.push(label);
   }
   return reached;
@@ -93,22 +146,48 @@ function noPreload() {
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 
-function run([label, from, to, expect]) {
+// G-54 (HoQ N15): the exact run HoQ found green. A plain `node runner.mjs` (no preload) spawns a battery
+// binary (nothing can stop that in an unhooked process) and then tries to count what it got. The collector
+// must refuse, and checkCollected must reject an unstamped result, so nothing from such a run can count.
+function npWorld(d) {
+  const bin = join(d, 'np-bin');
+  mkdirSync(bin, { recursive: true });
+  const dh = join(bin, 'die' + 'harder');
+  copyFileSync(realpathSync('/bin/true'), dh); chmodSync(dh, 0o755);
+  const f = join(d, 'np-runner.mjs');
+  writeFileSync(f, `import { spawnSync } from 'node:child_process';
+const C = await import(${JSON.stringify(pathToFileURL(join(d, 'verification/harness/collector.mjs')).href)});
+const ran = spawnSync(${JSON.stringify(dh)}, ['-a']).status === 0;
+const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } };
+let refused = false;
+try { C.collectCounted(k, () => 1, 5); } catch (e) { refused = e.message.includes('collector refused: no entropy-backstop preload proof (G-54)'); }
+const f = C.checkCollected(C.collect(k, () => 1, 5), k, 5, { floor: false });
+const rejected = f.some((x) => x.includes('(G-54)'));
+console.log(ran && refused && rejected ? 'NP-REFUSED' : 'NP-NOT-REFUSED ' + JSON.stringify({ ran, refused, f }));
+`);
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  const r = spawnSync(process.execPath, [f], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
+  return r.status === 0 && /NP-REFUSED/.test(r.stdout) ? [] : ['NP-runner-collect'];
+}
+
+function run([label, from, to, expect, file = 'tools/ci/entropy-backstop.mjs']) {
   const d = mkdtempSync(join(tmpdir(), 'g39-mut-'));
   try {
     for (const p of ['tools', 'src', 'verification']) cpSync(join(ROOT, p), join(d, p), { recursive: true });
     cpSync(join(ROOT, 'package.json'), join(d, 'package.json'));
     const f = join(d, 'tools/ci/entropy-backstop.mjs');
-    const s = readFileSync(f, 'utf8');
+    const mf = join(d, file);
+    const s = readFileSync(mf, 'utf8');
     if (from !== null) {
-      if (!s.includes(from)) return `${label}: anchor missing`;
-      writeFileSync(f, s.replace(from, to));
+      if (s.split(from).length !== 2) return `${label}: anchor missing or not unique`;
+      writeFileSync(mf, s.replace(from, to));
     }
     const env = { ...process.env };
     delete env.NODE_OPTIONS;
     const r = spawnSync(process.execPath, ['--import', f, join(d, 'tools/ci/entropy-backstop-check.mjs')], { cwd: d, encoding: 'utf8', timeout: 300_000, env });
     const out = `${r.stdout}\n${r.stderr}`;
-    const rw = readyWorld(d);
+    const rw = [...readyWorld(d), ...npWorld(d)];
     const reached = [...[...out.matchAll(/G-(?:39|45) ([a-z0-9-]+) was not rejected/g)].map((m) => m[1]), ...rw].sort();
     if (from === null) return r.status === 0 && rw.length === 0 ? `${label}: clean` : `${label}: NOT CLEAN (status ${r.status}; ${reached.join(', ')})\n${out.slice(-2000)}`;
     if (r.status === 0 && rw.length === 0) return `${label}: SURVIVED`;

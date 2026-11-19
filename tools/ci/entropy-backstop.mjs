@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { mkdtempSync, writeFileSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -511,7 +512,7 @@ function evidenceSpawnCheck(kind, exe, argv, opts) {
     if (!ok) refuseChild(`evidence tool ${names[0]} spawned without an OK entry guard (G-45)`);
     let real;
     try { real = realpathSync(isAbsolute(exe) ? exe : resolve(exe)); } catch { refuseChild(`evidence tool ${exe} not found (G-45)`); }
-    if (basename(real) !== base) refuseChild(`evidence tool ${exe} resolves to ${real} (G-45)`);
+    if (launching !== null && real !== launching.real) refuseChild(`evidence tool ${exe} resolves to ${real}, not its pinned binary (G-55)`);
     return { node: false, evidence: true };
   }
   if (INTERPRETER.test(base)) refuseChild(`interpreter ${base} is never spawned (G-45)`);
@@ -534,13 +535,62 @@ export function closeEvidenceGrant(g) {
   evidenceGrants.delete(g);
 }
 
+// G-60 (HoQ report 505599e..96aaf91): a grant opened directly (marker.evidence.open) must be closed. A grant
+// still open when the process exits makes the exit code non-zero; nothing it produced may be relied on.
+function onGrantLeak() {
+  if (activeGrant !== null) {
+    console.error(`entropy-backstop: evidence grant ${activeGrant.grant} still open at exit (G-60)`);
+    process.exitCode = 1;
+  }
+}
+
+// G-54 (HoQ report 505599e..96aaf91): collection results are stamped by the backstop while a grant is open.
+// The stamp set is private to this module, so a process without the preload, or outside a grant, cannot
+// produce a stamped result; the collector and checkCollected refuse unstamped results.
+const stampedResults = new WeakMap();
+export function stampEvidenceResult(result) {
+  if (activeGrant === null || !evidenceGrants.has(activeGrant)) refuseChild('result stamp outside an open evidence grant (G-54)');
+  if (result === null || typeof result !== 'object') refuseChild('result stamp of a non-object (G-54)');
+  const token = `grant-${activeGrant.grant}@${process.pid}`;
+  stampedResults.set(result, token);
+  return token;
+}
+export function evidenceStamp(result) { return (result !== null && typeof result === 'object' && stampedResults.get(result)) || null; }
+export function evidenceGrantActive() { return activeGrant !== null && evidenceGrants.has(activeGrant); }
+
+// G-55 (HoQ report 505599e..96aaf91): a battery binary is launched only if its real path and sha256 equal an
+// entry of verification/harness/tool-binaries.json, whose source pin equals the frozen tool-pins-v1.1.json
+// entry (rule 15), and it is not a script (no '#!'). Both files are read from this tree (root by URL).
+export const TOOL_SOURCE_NAMES = Object.freeze({ dieharder: 'Dieharder', 'tu01-driver': 'TestU01', assess: 'NIST STS', RNG_test: 'PractRand' });
+const PIN_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+function pinnedBinary(file) {
+  const tool = basename(file);
+  let bins, srcs;
+  try {
+    bins = JSON.parse(readFileSync(join(PIN_ROOT, 'verification/harness/tool-binaries.json'), 'utf8')).binaries;
+    srcs = JSON.parse(readFileSync(join(PIN_ROOT, 'verification/tool-pins-v1.1.json'), 'utf8')).tools;
+  } catch (e) { refuseChild(`evidence tool pins unreadable: ${e.message} (G-55)`); }
+  if (!Array.isArray(bins) || !Array.isArray(srcs)) refuseChild('evidence tool pins malformed (G-55)');
+  let real;
+  try { real = realpathSync(file); } catch { refuseChild(`evidence tool ${file} not found (G-55)`); }
+  const pin = bins.find((b) => b && b.tool === tool && b.path === real);
+  if (!pin) refuseChild(`evidence tool ${real} is not a pinned binary path for ${tool} (G-55)`);
+  const src = srcs.find((t) => t && t.name === TOOL_SOURCE_NAMES[tool]);
+  if (!src || !pin.source || pin.source.name !== src.name || pin.source.sha256 !== src.sha256) refuseChild(`evidence tool ${tool}: source pin does not equal tool-pins-v1.1.json (G-55)`);
+  const bytes = readFileSync(real);
+  if (bytes.subarray(0, 2).toString('latin1') === '#!') refuseChild(`evidence tool ${real} is a script (G-55)`);
+  if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) refuseChild(`evidence tool ${real}: sha256 differs from its pin (G-55)`);
+  return real;
+}
+
 // The only way to start a battery tool: an open grant, the guard re-run, an absolute path, no shell.
 export function launchEvidenceTool(g, file, args = [], options = {}) {
   if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');
   grantEntry.assertEvidenceRunReady();
   if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool: ${String(file)} is not an absolute path to an evidence tool (G-45)`);
+  const real = pinnedBinary(file);
   const cp = require('node:child_process');
-  launching = { grant: g, file };
+  launching = { grant: g, file, real };
   try { return cp.spawnSync(file, args, { ...options, shell: false }); } finally { launching = null; }
 }
 
@@ -903,7 +953,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });
@@ -954,3 +1004,4 @@ function onTeardown() {
 install();
 process.on('beforeExit', onTeardown);
 process.on('exit', onTeardown);
+process.on('exit', onGrantLeak);

@@ -11,6 +11,31 @@
 // Nothing here draws entropy; the self-check uses synthetic primitives (collectorSelfCheck in check.mjs).
 import { N_MIN } from './n-floor.mjs';
 
+// G-54 (HoQ report 505599e..96aaf91): a counted collection needs the entropy-backstop preload AND an open
+// evidence grant. Without the preload nothing polices child processes (a plain `node runner.mjs` could run a
+// battery), so nothing such a process collects can count: collectCounted refuses, and checkCollected rejects
+// any result that the backstop did not stamp inside a grant (the stamp registry is private to the backstop).
+const MARK = Symbol.for('open-rng-engine/entropy-backstop/v1');
+function backstopEvidence() {
+  const desc = Object.getOwnPropertyDescriptor(globalThis, MARK);
+  const ev = desc && !desc.writable && !desc.configurable && desc.value && desc.value.evidence;
+  return ev && typeof ev.active === 'function' && typeof ev.stamp === 'function' && typeof ev.stamped === 'function' ? ev : null;
+}
+export function collectCounted(kTest, call, n, source) {
+  const ev = backstopEvidence();
+  if (!ev) throw new Error('collector refused: no entropy-backstop preload proof (G-54)');
+  if (!ev.active()) throw new Error('collector refused: no open evidence grant (G-54)');
+  const res = collect(kTest, call, n, source);
+  res.grant = ev.stamp(res);
+  return res;
+}
+export function grantStampError(result) {
+  const ev = backstopEvidence();
+  if (!ev) return 'collection result checked without the entropy-backstop preload (G-54)';
+  const t = ev.stamped(result);
+  return t !== null && result.grant === t ? null : 'collection result not stamped inside an open evidence grant (G-54)';
+}
+
 // Tuple/window width from the K entry (M-153 G8, B12): 'window' if present, else 2 for tuple tests.
 export function windowWidth(kTest) {
   if (!/tuple/.test(String(kTest.n_unit))) return 1;
@@ -79,8 +104,8 @@ export function outcomeShapeError(kTest, v) {
   }
 }
 
-// Acceptance of a collection result against the witness. opts.floor: false only in the self-check.
-export function checkCollected(result, kTest, witnessReturns, { floor = true } = {}) {
+// Acceptance of a collection result against the witness. opts.floor / opts.grant: false only in the self-check.
+export function checkCollected(result, kTest, witnessReturns, { floor = true, grant = true } = {}) {
   const f = [];
   if (!result || typeof result !== 'object' || !Array.isArray(result.records)) return ['collector result has no records'];
   const w = windowWidth(kTest);
@@ -89,6 +114,7 @@ export function checkCollected(result, kTest, witnessReturns, { floor = true } =
   if (n !== result.records.length) f.push(`collector n ${n} != ${result.records.length} records (M-153 B4-B12: n is not a public-call count)`);
   if (!Number.isSafeInteger(witnessReturns) || witnessReturns !== n * w) f.push(`collector n ${n} × ${w} != ${witnessReturns} public-call returns seen by the witness (M-153 B4-B12)`);
   if (floor && !(n >= N_MIN)) f.push('n < 10^9 public-call outcomes (rule 8; M-153 B1-B3)');
+  if (grant) { const g = grantStampError(result); if (g) f.push(g); }
   let bad = 0;
   for (const r of result.records) {
     const parts = w === 1 ? [r] : (Array.isArray(r) && r.length === w ? r : null);

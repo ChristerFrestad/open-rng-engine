@@ -153,7 +153,7 @@ export function fixtureCases(m, root = ROOT) {
   for (const [label, k] of Object.entries(fam)) {
     colCases.push([`EG-1 collector ${label}: n = records = witness returns / w, shapes ok`, true, () => {
       const { res, returns, source } = collectorRun(C, k);
-      const f = C.checkCollected(res, k, returns, { floor: false });
+      const f = C.checkCollected(res, k, returns, { floor: false, grant: false });
       if (res.n !== 200) f.push(`collector n ${res.n} != 200 calls requested`);
       if (k.primitive === 'shuffle' && !(source.draws > res.n)) f.push('synthetic source did not log inner draws');
       if (k.primitive === 'randomInt' && !(source.tries > source.draws)) f.push('synthetic source logged no rejected tries');
@@ -162,7 +162,7 @@ export function fixtureCases(m, root = ROOT) {
   }
   const kS = fam['shuffle 52 (Fisher-Yates steps)'], kR = fam['randomInt r=38 (A.5.1 tries)'], kP = fam['randomInt ordered pair (tuples of 2)'];
   const kL = fam['shuffle Lehmer-52 (digits)'], kSa = fam['sample 52/5 (index draws)'], kW = fam['weightedPick W-A (tries, bytes)'];
-  const bad = (k, edit) => { const { res, returns, source } = collectorRun(C, k); edit(res, source); return C.checkCollected(res, k, returns, { floor: false }); };
+  const bad = (k, edit) => { const { res, returns, source } = collectorRun(C, k); edit(res, source); return C.checkCollected(res, k, returns, { floor: false, grant: false }); };
   colCases.push(
     ['EG-1 B4/B5 n counted per Fisher-Yates step', false, () => bad(kS, (r, s) => { r.n = s.draws; })],
     ['EG-1 B4 records are index draws', false, () => bad(kS, (r) => { r.records = r.records.flat(); r.n = r.records.length; })],
@@ -180,7 +180,11 @@ export function fixtureCases(m, root = ROOT) {
     ['EG-1 HM-03 shuffle with a repeated card', false, () => bad(kS, (r) => { const x = [...r.records[0]]; x[1] = x[0]; r.records[0] = x; })],
     ['EG-1 HM-05 randomInt outcome equal to max (exclusive)', false, () => bad(kR, (r) => { r.records[4] = Number(kR.parameters.max); })],
     ['EG-1 HM-06 tuple record of width 1', false, () => bad(kP, (r) => { r.records[0] = r.records[0].slice(0, 1); })],
-    ['EG-1 B1 floor at collection: 200 outcomes', false, () => { const { res, returns } = collectorRun(C, kR); return C.checkCollected(res, kR, returns); }],
+    ['EG-1 B1 floor at collection: 200 outcomes', false, () => { const { res, returns } = collectorRun(C, kR); return C.checkCollected(res, kR, returns, { grant: false }); }],
+    // G-54 (HoQ report 505599e..96aaf91): nothing collected outside an open evidence grant counts.
+    ['G-54 unstamped collection result (no grant) is rejected', false, () => { const { res, returns } = collectorRun(C, kR); return C.checkCollected(res, kR, returns, { floor: false }); }],
+    ['G-54 collectCounted outside an open grant refuses', false, () => { try { C.collectCounted(kR, () => 0, 3); return []; } catch (e) { return /collector refused: no (?:open evidence grant|entropy-backstop preload proof) \(G-54\)/.test(e.message) ? [e.message] : []; } }],
+    ['G-54 forged stamp field is rejected', false, () => { const { res, returns } = collectorRun(C, kR); res.grant = 'grant-1@1'; return C.checkCollected(res, kR, returns, { floor: false }); }],
     ['EG-1 window width from K: five-call windows are 5, pairs 2, plain 1', true, () => [
       ...need(C.windowWidth(fam['weightedPick five-call window (tuples of 5)']) === 5, 'five-call'),
       ...need(C.windowWidth(kP) === 2, 'pair'), ...need(C.windowWidth(kR) === 1, 'plain')]],
@@ -575,6 +579,7 @@ export const MUTANTS = [
   ['MU-89 (HM-11) u32-vs-raw compare first row only', 'code', 'counts.mjs', [['JSON.stringify(pr.rows.map((x) => x.p)) === JSON.stringify(pu.rows.map((x) => x.p))', 'JSON.stringify(pr.rows.slice(0, 1).map((x) => x.p)) === JSON.stringify(pu.rows.slice(0, 1).map((x) => x.p))']]],
   ['MU-90 (G-50) TestU01 header numbers Number()-parsed', 'code', 'counts.mjs', [["    if (!TU01_INDEX.test(String(head[k]))) return { error: `malformed header ${k}=${JSON.stringify(head[k])}` };\n", '']]],
   ['MU-91 (G-50) Dieharder p-value parser lenient', 'code', 'counts.mjs', [['const DH_P = /^(?:0|1|0\\.[0-9]+(?:[eE][-+]?[0-9]+)?|1\\.0+)$/;', 'const DH_P = /^[0-9.eE+-]+$/;']]],
+  ['MU-92 (G-54) collection stamp not checked', 'code', 'collector.mjs', [['  if (grant) { const g = grantStampError(result); if (g) f.push(g); }\n', '']]],
   ['MU-23 p-value range check removed', 'code', 'counts.mjs', [['return typeof x === \'number\' && Number.isFinite(x) && x >= 0 && x <= 1;', 'return true;']]],
 ];
 
