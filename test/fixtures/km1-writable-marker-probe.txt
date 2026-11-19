@@ -1,0 +1,1 @@
+globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')] = { evidence: { active: () => true, stamp: () => 'forged', stamped: () => 'forged', report: () => true } };

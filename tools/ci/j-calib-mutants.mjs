@@ -62,6 +62,9 @@ const MUTANTS = [
   ['HS-5 screen counts not lumped', [[ST, "o[lumped.map[i]] += h[i];\n  let worst", "o[i < k ? i : 0] += h[i];\n  let worst"]], SCREEN_TEST],
   ['HM-MC5 tie-path rejection returns the last cell', [[MCF, "        if (j === k) continue; // X >= den·2^s: reject", "        if (j === k) return k - 1;"]], MC_TEST],
   ['HM-MC6 tie-path remainder not aligned', [[MCF, "rest >>= extra; // keep exactly L - 64 bits", "// keep exactly L - 64 bits"]], MC_TEST],
+  // K3d G-69 (HoQ A9; report G-68): G-56 identity over all 26 entries, run against test/g69-evidence-identity.test.mjs.
+  ['GM-3 evidence path reverses shuffle records', [['verification/harness/wave1-evidence.mjs', 'return records[i++]; };', 'const r = records[i++]; return Array.isArray(r) ? [...r].reverse() : r; };']], 'test/g69-evidence-identity.test.mjs'],
+  ['GM-5 evidence path skips one record per 4096 (duplicates)', [['verification/harness/wave1-evidence.mjs', 'return records[i++]; };', "if (e.kind === 'dup' && i % 4096 === 4095) i++; return records[i++]; };"]], 'test/g69-evidence-identity.test.mjs'],
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],

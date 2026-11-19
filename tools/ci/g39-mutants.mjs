@@ -68,12 +68,16 @@ export const G45_MUTANTS = [
   ['G64-M3 fixed known secret instead of the launcher secret', '  delete process.env.ENTROPY_BACKSTOP_CHANNEL;\n  let s = null;\n  try { s = readFileSync(0); } catch { s = null; }\n  if (s && s.length >= 32) channelSecret = Buffer.from(s);', '  channelSecret = Buffer.alloc(32);', ['LW-green']],
   ['G64-M4 launcher counts a failed run', '  return { status: r.status, counted: r.status === 0 ? counted : [],', '  return { status: r.status, counted,', ['LW-report-then-fail'], 'verification/harness/evidence-launcher.mjs'],
   ['G65-M1 stamp lookup ignores the content digest', '  return s && resultContentDigest(result) === s.digest ? s.token : null;', '  return s ? s.token : null;', ['LW-records-swapped']],
+  ['KM-1 (HoQ G-69) collector accepts a writable/configurable marker', '  const ev = desc && !desc.writable && !desc.configurable && desc.value && desc.value.evidence;', '  const ev = desc && desc.value && desc.value.evidence;', ['NP-writable-marker'], 'verification/harness/collector.mjs'],
+  ['KM-2 (HoQ G-69) grantStampError ignores result.grant', 'return t !== null && result.grant === t ? null', 'return t !== null ? null', ['RW-grant-field-altered'], 'verification/harness/collector.mjs'],
   ['G60-M1 grant left open at exit not reported', "process.on('exit', onGrantLeak);", '', ['RW-open-never-closed']],
   ['G45-M10 (HM-21) callers under verification/ exempt', 'function evidenceSpawnCheck(kind, exe, argv, opts) {\n', "function evidenceSpawnCheck(kind, exe, argv, opts) {\n  if (String(process.argv[1] || '').includes('/verification/')) return { node: false, evidence: true };\n", ['verification-dir']],
 ];
 
 // READY world: a copy of the tree whose readiness is forced true, so the grant path can be exercised.
 // G-64/G-65 launcher cases: [label, expected launcher result, runner body inside startEvidenceRun].
+// KM-1 (HoQ G-69): a writable, configurable forged marker planted by a no-preload runner (probe text under test/).
+const KM1_PROBE = readFileSync(join(ROOT, 'test/fixtures/km1-writable-marker-probe.txt'), 'utf8').trim();
 const FORGE_PROBE = readFileSync(join(ROOT, 'test/fixtures/g64-forge-probe.txt'), 'utf8').trim();
 const LW_CASES = [
   ['LW-green', (r) => r.status === 0 && r.counted.length === 1 && r.counted[0].n === 5 && r.rejected === 0, () => `const res = C.collectCounted(k, () => 1, 5); C.reportCounted(res);`],
@@ -103,6 +107,7 @@ const RW_CASES = [
   ['RW-collect-in-run', true, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const res = C.collectCounted(k, () => 1, 5); const f = C.checkCollected(res, k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(3); }`],
   ['RW-unstamped-in-run', false, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const f = C.checkCollected(C.collect(k, () => 1, 5), k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(1); }`],
   ['RW-forged-stamp', false, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const r = C.collect(k, () => 1, 5); r.grant = 'grant-1@' + process.pid; const f = C.checkCollected(r, k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(1); }`],
+  ['RW-grant-field-altered', false, (T) => `const C = await import(${T.COL}); const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } }; const r = C.collectCounted(k, () => 1, 5); r.grant = r.grant + '-altered'; const f = C.checkCollected(r, k, 5, { floor: false }); if (f.length) { console.error(f.join('; ')); process.exit(1); }`],
   ['RW-open-never-closed', 'G-60', () => '', () => `await globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence.open();`],
 ];
 
@@ -206,7 +211,21 @@ console.log(ran && refused && rejected ? 'NP-REFUSED' : 'NP-NOT-REFUSED ' + JSON
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
   const r = spawnSync(process.execPath, [f], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
-  return r.status === 0 && /NP-REFUSED/.test(r.stdout) ? [] : ['NP-runner-collect'];
+  const out = r.status === 0 && /NP-REFUSED/.test(r.stdout) ? [] : ['NP-runner-collect'];
+  // KM-1: the collector must not take a writable/configurable marker as the preload proof.
+  const g = join(d, 'np-writable-marker.mjs');
+  writeFileSync(g, `${KM1_PROBE}
+const C = await import(${JSON.stringify(pathToFileURL(join(d, 'verification/harness/collector.mjs')).href)});
+const k = { id: 'x', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } };
+let refused = false;
+try { C.collectCounted(k, () => 1, 5); } catch (e) { refused = e.message.includes('no entropy-backstop preload proof (G-54)'); }
+const r = C.collect(k, () => 1, 5); r.grant = 'forged';
+const g = C.grantStampError(r);
+console.log(refused && g && g.includes('without the entropy-backstop preload (G-54)') ? 'NP-REFUSED' : 'NP-NOT-REFUSED ' + JSON.stringify({ refused, g }));
+`);
+  const r2 = spawnSync(process.execPath, [g], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
+  if (!(r2.status === 0 && /NP-REFUSED/.test(r2.stdout))) out.push('NP-writable-marker');
+  return out;
 }
 
 function run([label, from, to, expect, file = 'tools/ci/entropy-backstop.mjs']) {
@@ -240,7 +259,8 @@ if (process.env.G39_BASE_ONLY) { console.log(base); process.exit(0); }
 console.log(base);
 const np = noPreload();
 console.log(np);
-const lines = [...G39_MUTANTS, ...G45_MUTANTS].map(run);
+// G39_ONLY (debug, never used by the gate): run only mutants whose label matches; the exit code then covers only those.
+const lines = [...G39_MUTANTS, ...G45_MUTANTS].filter((m) => !process.env.G39_ONLY || new RegExp(process.env.G39_ONLY).test(m[0])).map(run);
 for (const l of lines) console.log(l);
 const bad = lines.filter((l) => !/: killed( \(|$)/.test(l));
 if (!/: clean$/.test(base)) bad.push(base);
