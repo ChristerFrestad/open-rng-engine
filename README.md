@@ -14,7 +14,7 @@ open-rng-engine is planned as a general-purpose Node.js library for unbiased ran
 
 ## Market stance
 
-This project is not intended for, aimed at, or marketed to Norway, or any market where the integrator lacks a licence.
+This project is not intended for, aimed at, or marketed to any market where the integrator lacks a licence.
 
 ## License
 
