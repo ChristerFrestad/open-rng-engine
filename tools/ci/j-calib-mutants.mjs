@@ -57,6 +57,11 @@ const MUTANTS = [
   ['MC-12 manifest constants not checked', [[MCF, "  checkManifestConstants(man);\n", ""]], MC_TEST],
   ['MC-13 block #>= not re-verified', [[MCF, "  if (geOf(x.x2, obs.x2) !== x.ge) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
   ['MC-14 block from another observed vector accepted', [[MCF, "  if (x.observed_sha256 !== obs.observed_sha256 || x.x2obs !== obs.x2) throw new Error(", "  if (false) throw new Error("]], MC_TEST],
+  // K3c G-69 (report G-68 survivors).
+  ['HS-3 screen k = raw length', [[ST, 'const logBound = Math.LN2 + Math.log(k) - M * klMax;', 'const logBound = Math.LN2 + Math.log(h.length) - M * klMax;']], SCREEN_TEST],
+  ['HS-5 screen counts not lumped', [[ST, "o[lumped.map[i]] += h[i];\n  let worst", "o[i < k ? i : 0] += h[i];\n  let worst"]], SCREEN_TEST],
+  ['HM-MC5 tie-path rejection returns the last cell', [[MCF, "        if (j === k) continue; // X >= den·2^s: reject", "        if (j === k) return k - 1;"]], MC_TEST],
+  ['HM-MC6 tie-path remainder not aligned', [[MCF, "rest >>= extra; // keep exactly L - 64 bits", "// keep exactly L - 64 bits"]], MC_TEST],
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],

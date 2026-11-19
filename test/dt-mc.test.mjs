@@ -110,3 +110,24 @@ test('G-67: manifest constants checked; resume recomputes a block digest-identic
     assert.equal(MCm.runEntry(MAN, L60, TEST_KEY, OBS, d).chain_head, r.chain_head, 'a block from another manifest is recomputed identically');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+// G-69 (HoQ A9; report G-68 HM-MC5 / HM-MC6): exhaustive tie path. den needs 72 bits (8 bits past the 64-bit
+// prefix); at every boundary prefix every one of the 256 remainders is decided against the full-width X.
+test('exact sampler tie path, exhaustive: every remainder at every boundary prefix, rejection region included', () => {
+  const c0 = (1n << 70n) + 5n, c1 = (1n << 69n) + 3n, c2 = (1n << 70n) + (1n << 69n) + 77n; const den = c0 + c1 + c2;
+  assert.equal(den.toString(2).length, 72);
+  const law = { cellNum: [c0, c1, c2], den }; const cum = [c0, c0 + c1, den];
+  let checked = 0, rejections = 0;
+  for (const B of cum) {
+    const p = B >> 8n; const hi = Number(p >> 32n), lo = Number(p & 0xffffffffn);
+    for (let r = 0; r < 256; r++) {
+      const smp = MCm.exactSampler(law); let i = 0; const words = [hi, lo, (r << 24) >>> 0, 0, 0];
+      const got = smp.draw(() => { if (i >= words.length) throw new Error('drew past script'); return words[i++]; });
+      const X = (p << 8n) | BigInt(r);
+      const want = X >= den ? 0 : cum.findIndex((q) => X < q);
+      if (X >= den) { rejections += 1; assert.equal(i, 5, 'rejected draw is redrawn'); }
+      assert.equal(got, want, `prefix of ${B} rest ${r}`); assert.equal(smp.stats().slow, 1); checked += 1;
+    }
+  }
+  assert.equal(checked, 768); assert.ok(rejections > 100);
+});
