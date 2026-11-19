@@ -65,7 +65,7 @@ test('G-56: one statistic module, bound by identity on the evidence path and in 
   const h = S.histogram(e, M, tap, lu.map.length);
   const viaRecords = Ev.statisticFromRecords(e, rec, M);
   assert.equal(viaRecords.x2, direct.x2); assert.equal(viaRecords.p, direct.p); assert.equal(viaRecords.unread, 0); assert.equal(h.outcomes, direct.outcomes);
-  assert.throws(() => Ev.evidenceStatistic(e.id, { records: rec }, M), /G-54/);
+  assert.throws(() => Ev.evidenceStatistic(e.id, { records: rec }, M), /not counted by the evidence launcher \(G-64\)/);
 });
 
 const perms = (a) => (a.length <= 1 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [x, ...p])));

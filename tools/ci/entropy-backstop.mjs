@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { mkdtempSync, writeFileSync, writeSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -566,28 +566,25 @@ export function evidenceStamp(result) {
   return s && resultContentDigest(result) === s.digest ? s.token : null;
 }
 
-// G-64 (HoQ A9, MAJOR): the counting authority is OUTSIDE this process. verification/harness/evidence-launcher.mjs
-// spawns the runner with this preload and ENTROPY_BACKSTOP_CHANNEL=1, writes a fresh secret to the child's stdin
-// and reads fd 3. Here, at preload (before any runner code), the flag is deleted and the secret is consumed from
-// stdin into this closure; nothing else can read it. Only reportEvidenceResult writes authenticated lines
-// (HMAC-SHA256 over id, n, content digest and grant token); the launcher counts nothing else. A process started
-// any other way (plain node, a forged marker) has no channel and no secret, so nothing it does can count.
-let channelSecret = null;
+// G-64 (HoQ A9, MAJOR; A11): the counting authority is OUTSIDE this process and holds no secret this process
+// could read (K3a's HMAC key, kept in this closure, was recovered by a runner from /proc/self/mem; HoQ A11).
+// verification/harness/evidence-launcher.mjs spawns the runner with this preload, ENTROPY_BACKSTOP_CHANNEL=1
+// and fd 3, and counts only full results it re-checks itself. Here the flag is deleted at preload, and
+// reportEvidenceResult (the honest path) writes the FULL stamped result (id, n, records) to fd 3. The stamp
+// check below is hygiene for honest runners, not authority: anything this process writes is only a claim.
+let channelOpen = false;
 function initEvidenceChannel() {
   if (process.env.ENTROPY_BACKSTOP_CHANNEL !== '1') return;
   delete process.env.ENTROPY_BACKSTOP_CHANNEL;
-  let s = null;
-  try { s = readFileSync(0); } catch { s = null; }
-  if (s && s.length >= 32) channelSecret = Buffer.from(s);
+  channelOpen = true;
 }
 export function reportEvidenceResult(result) {
-  if (channelSecret === null) refuseChild('evidence report without a launcher channel (G-64)');
+  if (!channelOpen) refuseChild('evidence report without a launcher channel (G-64)');
   const t = evidenceStamp(result);
   if (t === null || result.grant !== t) refuseChild('evidence report of a result not stamped inside an open evidence grant (G-64)');
-  const line = { id: result.id, n: result.n, digest: resultContentDigest(result), grant: t };
-  line.mac = createHmac('sha256', channelSecret).update(`${line.id}\n${line.n}\n${line.digest}\n${line.grant}`).digest('hex');
-  writeSync(3, `${JSON.stringify(line)}\n`);
-  return line.digest;
+  const line = JSON.stringify({ id: result.id, n: result.n, records: result.records }, (k, v) => (typeof v === 'bigint' ? `${v}n` : v));
+  writeSync(3, `${line}\n`);
+  return resultContentDigest(result);
 }
 export function evidenceGrantActive() { return activeGrant !== null && evidenceGrants.has(activeGrant); }
 

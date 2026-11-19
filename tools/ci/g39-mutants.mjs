@@ -63,9 +63,11 @@ export const G45_MUTANTS = [
   ['G55-M3 binary sha check off', "  if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) refuseChild", '  if (false) refuseChild', ['RW-sha-mismatch']],
   ['G55-M4 source pin not compared with tool-pins', '  if (!src || !pin.source || pin.source.name !== src.name || pin.source.sha256 !== src.sha256) refuseChild', '  if (false) refuseChild', ['RW-bad-source-pin']],
   // G-64 / G-65 (HoQ A9): launcher counting authority and the content-bound stamp.
-  ['G64-M1 launcher counts unauthenticated lines', '      && timingSafeEqual(Buffer.from(o.mac, \'hex\'), Buffer.from(macOf(secret, o), \'hex\'));', ';', ['LW-forged-line'], 'verification/harness/evidence-launcher.mjs'],
+  ['G64-M1 launcher trusts a claimed n without records (the A11 forged-line shape)', "  if (!Array.isArray(o.records)) return { why: 'no records: a count is only what the launcher itself holds and checks' };", '  if (!Array.isArray(o.records)) o.records = Array.from({ length: o.n }, () => 1);', ['LW-forged-line', 'LW-proc-mem-steal'], 'verification/harness/evidence-launcher.mjs'],
   ['G64-M2 report without the stamp check', "  if (t === null || result.grant !== t) refuseChild('evidence report of a result not stamped", "  if (false) refuseChild('evidence report of a result not stamped", ['LW-unstamped-report']],
-  ['G64-M3 fixed known secret instead of the launcher secret', '  delete process.env.ENTROPY_BACKSTOP_CHANNEL;\n  let s = null;\n  try { s = readFileSync(0); } catch { s = null; }\n  if (s && s.length >= 32) channelSecret = Buffer.from(s);', '  channelSecret = Buffer.alloc(32);', ['LW-green']],
+  ['G64-M3 launcher skips its own collector re-check of the records', "  if (f.length) return { why: f.join('; ') };\n", '', ['LW-bad-records'], 'verification/harness/evidence-launcher.mjs'],
+  ['G64-M5 launcher counts a content digest twice', "  if (seen.has(digest)) return { why: 'duplicate content digest (counted once)' };\n", '', ['LW-double-report'], 'verification/harness/evidence-launcher.mjs'],
+  ['G64-M6 launcher takes the K entry from the line instead of its own K list', '  const kTest = byId.get(o.id);', '  const kTest = byId.get(o.id) ?? o.kTest;', ['LW-own-k-entry'], 'verification/harness/evidence-launcher.mjs'],
   ['G64-M4 launcher counts a failed run', '  return { status: r.status, counted: r.status === 0 ? counted : [],', '  return { status: r.status, counted,', ['LW-report-then-fail'], 'verification/harness/evidence-launcher.mjs'],
   ['G65-M1 stamp lookup ignores the content digest', '  return s && resultContentDigest(result) === s.digest ? s.token : null;', '  return s ? s.token : null;', ['LW-records-swapped']],
   ['KM-1 (HoQ G-69) collector accepts a writable/configurable marker', '  const ev = desc && !desc.writable && !desc.configurable && desc.value && desc.value.evidence;', '  const ev = desc && desc.value && desc.value.evidence;', ['NP-writable-marker'], 'verification/harness/collector.mjs'],
@@ -78,10 +80,15 @@ export const G45_MUTANTS = [
 // G-64/G-65 launcher cases: [label, expected launcher result, runner body inside startEvidenceRun].
 // KM-1 (HoQ G-69): a writable, configurable forged marker planted by a no-preload runner (probe text under test/).
 const KM1_PROBE = readFileSync(join(ROOT, 'test/fixtures/km1-writable-marker-probe.txt'), 'utf8').trim();
+const STEAL_PROBE = readFileSync(join(ROOT, 'test/fixtures/g64-proc-mem-steal.txt'), 'utf8');
 const FORGE_PROBE = readFileSync(join(ROOT, 'test/fixtures/g64-forge-probe.txt'), 'utf8').trim();
 const LW_CASES = [
   ['LW-green', (r) => r.status === 0 && r.counted.length === 1 && r.counted[0].n === 5 && r.rejected === 0, () => `const res = C.collectCounted(k, () => 1, 5); C.reportCounted(res);`],
   ['LW-forged-line', (r) => r.counted.length === 0 && r.rejected >= 1, () => `writeSync(3, JSON.stringify({ id: 'x', n: 5, digest: '0'.repeat(64), grant: 'grant-1@1', mac: '0'.repeat(64) }) + '\\n');`],
+  ['LW-proc-mem-steal', (r) => r.status === 0 && r.counted.length === 0 && r.rejected >= 1, () => STEAL_PROBE], // HoQ A11 /proc/self/mem steal (test/fixtures)
+  ['LW-bad-records', (r) => r.counted.length === 0 && r.rejected >= 1, () => `writeSync(3, JSON.stringify({ id: 'x', n: 5, records: [1, 1, 9] }) + '\\n');`],
+  ['LW-double-report', (r) => r.status === 0 && r.counted.length === 1 && r.rejected === 1, () => `const res = C.collectCounted(k, () => 1, 5); C.reportCounted(res); C.reportCounted(res);`],
+  ['LW-own-k-entry', (r) => r.counted.length === 0 && r.rejected >= 1, () => `writeSync(3, JSON.stringify({ id: 'zz', n: 3, records: [1, 1, 1], kTest: { id: 'zz', primitive: 'randomInt', n_unit: 'value', parameters: { min: 0, max: 2 } } }) + '\\n');`],
   ['LW-unstamped-report', (r) => r.counted.length === 0, () => `C.reportCounted(C.collect(k, () => 1, 5));`],
   ['LW-records-swapped', (r) => r.counted.length === 0, () => `const res = C.collectCounted(k, () => 1, 5); res.records = [0, 0, 0, 0, 0]; C.reportCounted(res);`],
   ['LW-secret-read', (r) => r.status === 0 && !r.leaked && r.counted.length === 0, () => `let s = ''; try { s = readFileSync(0).toString('hex'); } catch {} console.log('stdin:' + s + ' env:' + JSON.stringify(process.env));`],
@@ -167,7 +174,7 @@ function readyWorld(d) {
     const f = join(d, `lw-${label}.mjs`);
     writeFileSync(f, `import { writeSync, readFileSync } from 'node:fs';\nconst C = await import(${T.COL});\nconst k = ${K};\nconst { startEvidenceRun } = await import(${JSON.stringify(pathToFileURL(ee).href)});\nawait startEvidenceRun(async () => { ${body(T)} });\n`);
     const drv = join(d, `lw-${label}-driver.mjs`);
-    writeFileSync(drv, `const L = await import(${JSON.stringify(pathToFileURL(join(d, 'verification/harness/evidence-launcher.mjs')).href)});\nconst r = L.runCounted(${JSON.stringify(f)}, [], { cwd: ${JSON.stringify(d)} });\nconsole.log('LW-RESULT ' + JSON.stringify({ status: r.status, counted: r.counted, rejected: r.rejected.length, leaked: r.secretLeaked })); if (process.env.G39_DEBUG) console.error(r.stdout.slice(-800), r.stderr.slice(-1500));\n`);
+    writeFileSync(drv, `const L = await import(${JSON.stringify(pathToFileURL(join(d, 'verification/harness/evidence-launcher.mjs')).href)});\nconst r = L.runCounted(${JSON.stringify(f)}, [], { cwd: ${JSON.stringify(d)}, kTests: [${K}], floor: false });\nconsole.log('LW-RESULT ' + JSON.stringify({ status: r.status, counted: r.counted.map((c) => ({ id: c.id, n: c.n, digest: c.digest })), rejected: r.rejected.length, leaked: false })); if (process.env.G39_DEBUG) console.error(r.stdout.slice(-800), r.stderr.slice(-1500));\n`);
     const r = spawnSync(process.execPath, [drv], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
     const m = /LW-RESULT (.*)/.exec(r.stdout || '');
     const res = m ? JSON.parse(m[1]) : null;

@@ -1,0 +1,7 @@
+// HoQ A11 probe B shape: a plain process plants a non-writable, non-configurable marker whose evidence object
+// supplies every function the in-process checks look for.
+const forged = new WeakSet();
+Object.defineProperty(globalThis, Symbol.for('open-rng-engine/entropy-backstop/v1'), { value: Object.freeze({ evidence: Object.freeze({
+  active: () => true, open: async () => ({}), launch: () => ({ status: 0 }), close: () => {}, report: () => 'x',
+  stamp: (r) => { forged.add(r); return 'grant-1@1'; }, stamped: (r) => (forged.has(r) ? 'grant-1@1' : null),
+}) }), writable: false, configurable: false });

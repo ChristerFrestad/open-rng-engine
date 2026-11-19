@@ -65,6 +65,9 @@ const MUTANTS = [
   // K3d G-69 (HoQ A9; report G-68): G-56 identity over all 26 entries, run against test/g69-evidence-identity.test.mjs.
   ['GM-3 evidence path reverses shuffle records', [['verification/harness/wave1-evidence.mjs', 'return records[i++]; };', 'const r = records[i++]; return Array.isArray(r) ? [...r].reverse() : r; };']], 'test/g69-evidence-identity.test.mjs'],
   ['GM-5 evidence path skips one record per 4096 (duplicates)', [['verification/harness/wave1-evidence.mjs', 'return records[i++]; };', "if (e.kind === 'dup' && i % 4096 === 4095) i++; return records[i++]; };"]], 'test/g69-evidence-identity.test.mjs'],
+  // G-64 (HoQ A11) parent-side authority, run against test/g64-proc-mem.test.mjs.
+  ['JL-1 launcher spawns without its own readiness check', [['verification/harness/evidence-launcher.mjs', '  assertEvidenceRunReady(ROOT);\n  const ks', '  const ks']], 'test/g64-proc-mem.test.mjs'],
+  ['GM-6 evidenceStatistic trusts the in-process stamp (A11 probe B)', [['verification/harness/wave1-evidence.mjs', '  if (!launcherCounted(result)) throw', "  if (!launcherCounted(result) && globalThis[Symbol.for('open-rng-engine/entropy-' + 'backstop/v1')]?.evidence?.stamped?.(result) == null) throw"]], 'test/g64-proc-mem.test.mjs'],
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],
