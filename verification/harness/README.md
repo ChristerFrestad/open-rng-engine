@@ -75,3 +75,5 @@ Verification, NOT a counted evidence run: no battery tool is started and the evi
 - **Run**: `node verification/calibration/wave1-calibrate.mjs` (8 worker threads) writes
   `verification/calibration/wave1-results.json` (per entry: stream index, reps, M_cal, cells, df, min E,
   min outcomes, KS D, KS p, flag count, PASS/FAIL, sha256 of the p-value vector).
+
+- **Batch I (HoQ report 5f7f4ad7, addendum 1 A7 MINORs).** G-47: EG-1 red fixtures for HM-01/02/03/05/06 with mutants MU-82..86. G-49: HM-07 (STS dedupe keyed on every test: sequences equal in Frequency only stay distinct, green), HM-10 (BigCrush header battery and stream checked), HM-11 (u32-vs-raw compared on every row; row 0 equal stays green) with MU-87..89. G-50: TestU01 header `ntests`/`words` must be plain decimal (0xa0 and +160 red, MU-90); Dieharder p-values must match `0`, `1`, `0.<digits>[e±n]` or `1.0…` (+0.50000000, -0 and .5 red, MU-91). Self-test 157 fixtures, 91/91 mutants. G-46 (`process.execve`) and G-48 (node:wasi / /dev/urandom documented) are in tools/ci/README.md; G-51 (QR-33 runs after segment 0, QM-8) is in tools/ci/rule22-exports-map.mjs.

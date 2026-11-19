@@ -174,6 +174,12 @@ export function fixtureCases(m, root = ROOT) {
     ['EG-1 n and records inflated together (witness disagrees)', false, () => bad(kR, (r) => { r.records = [...r.records, ...r.records]; r.n = r.records.length; })],
     ['EG-1 records dropped while n is kept (n != records)', false, () => bad(kR, (r) => { r.records = r.records.slice(0, 100); })],
     ['EG-1 a record that is not an outcome (out of range)', false, () => bad(kR, (r) => { r.records[3] = 999; })],
+    // G-47 (HoQ HM-01/02/03/05/06): shape-breaking records with n, records and witness all consistent.
+    ['EG-1 HM-01 weightedPick index one past the strip', false, () => bad(kW, (r) => { r.records[2] = (kW.parameters.weights ?? [1, 3, 6]).length; })],
+    ['EG-1 HM-02 sample with a repeated index', false, () => bad(kSa, (r) => { const x = [...r.records[1]]; x[1] = x[0]; r.records[1] = x; })],
+    ['EG-1 HM-03 shuffle with a repeated card', false, () => bad(kS, (r) => { const x = [...r.records[0]]; x[1] = x[0]; r.records[0] = x; })],
+    ['EG-1 HM-05 randomInt outcome equal to max (exclusive)', false, () => bad(kR, (r) => { r.records[4] = Number(kR.parameters.max); })],
+    ['EG-1 HM-06 tuple record of width 1', false, () => bad(kP, (r) => { r.records[0] = r.records[0].slice(0, 1); })],
     ['EG-1 B1 floor at collection: 200 outcomes', false, () => { const { res, returns } = collectorRun(C, kR); return C.checkCollected(res, kR, returns); }],
     ['EG-1 window width from K: five-call windows are 5, pairs 2, plain 1', true, () => [
       ...need(C.windowWidth(fam['weightedPick five-call window (tuples of 5)']) === 5, 'five-call'),
@@ -199,6 +205,14 @@ export function fixtureCases(m, root = ROOT) {
     ['EG-2 BigCrush u32 is a relabelled copy of raw (same p-values)', false, () => withC((c) => { c.bigcrush.u32 = tu01Text('u32', 160, { off: 0 }); })],
     ['EG-2 BigCrush u32 input sha = raw input sha', false, () => withC((c) => { c.bigcrushInputs = { raw: SHA_A, u32: SHA_A }; })],
     ['EG-2 BigCrush input shas missing', false, () => withC((c) => { delete c.bigcrushInputs; })],
+    // G-49 (HoQ HM-07/10/11) and G-50.
+    ['EG-2 HM-07 STS sequences equal in the first test only are not duplicates', true, () => withC((c) => { c.sts[7].Frequency = JSON.parse(JSON.stringify(c.sts[6].Frequency)); c.sts[7].Serial = [0.123, 0.456]; })],
+    ['EG-2 HM-10 BigCrush raw header names stream u32', false, () => withC((c) => { c.bigcrush.raw = c.bigcrush.raw.replace('\tstream=raw\t', '\tstream=u32\t'); })],
+    ['EG-2 HM-10 BigCrush header battery is Crush', false, () => withC((c) => { c.bigcrush.u32 = c.bigcrush.u32.replace('\tbattery=BigCrush\t', '\tbattery=Crush\t'); })],
+    ['EG-2 HM-11 u32 row 0 equals raw row 0, the rest differ (green)', true, () => withC((c) => { const raw = c.bigcrush.raw.split('\n'); const u = c.bigcrush.u32.split('\n'); const p0 = raw[1].split('\t')[4]; const cols = u[1].split('\t'); cols[4] = p0; u[1] = cols.join('\t'); c.bigcrush.u32 = u.join('\n'); })],
+    ['G-50 TestU01 header ntests=0xa0 is malformed', false, () => withC((c) => { c.bigcrush.raw = c.bigcrush.raw.replace('\tntests=160\t', '\tntests=0xa0\t'); })],
+    ['G-50 TestU01 header ntests=+160 is malformed', false, () => withC((c) => { c.bigcrush.u32 = c.bigcrush.u32.replace('\tntests=160\t', '\tntests=+160\t'); })],
+    ...['+0.50000000', '-0', '.5'].map((bp) => [`G-50 Dieharder p-value ${bp} is malformed`, false, () => withC((c) => { const l = c.dieharder.split('\n'); const i = l.findIndex((x) => /\|\s*PASSED/.test(x)); l[i] = l[i].replace(/\|[0-9.]+\|(\s*PASSED)/, `|${bp}|$1`); c.dieharder = l.join('\n'); })]),
     ['EG-2 STS one sequence duplicated', false, () => withC((c) => { c.sts[7] = JSON.parse(JSON.stringify(c.sts[6])); })],
     ['EG-2 STS 1000 identical sequences', false, () => withC((c) => { c.sts = c.sts.map(() => JSON.parse(JSON.stringify(c.sts[0]))); })],
   ];
@@ -551,6 +565,16 @@ export const MUTANTS = [
   ['MU-79 (H-5) runner argv value compare off', 'code', 'pins.mjs', [['    else if (a !== w) f.push(', '    else if (false) f.push(']]],
   ['MU-80 (D16) hidden df-null cap of 76', 'code', 'df-table.mjs', [['const nullIds = kTests.filter((t) => t.df === null).map((t) => t.id);', 'const nullIds = kTests.filter((t) => t.df === null).map((t) => t.id).slice(0, 76);']]],
   ['MU-81 (D17) k-tests sha256 check off', 'code', 'df-table.mjs', [['if (kTestsSha256 !== undefined && kTestsSha256 !== K_TESTS_SHA256) f.push(', 'if (false) f.push(']]],
+  ['MU-82 (HM-01) weightedPick range check off', 'code', 'collector.mjs', [["return len === undefined || (v >= 0 && v < len) ? null : 'weightedPick outcome outside the strip';", 'return null;']]],
+  ['MU-83 (HM-02) sample distinctness off', 'code', 'collector.mjs', [['return new Set(v).size === k && v.every', 'return v.every']]],
+  ['MU-84 (HM-03) shuffle permutation (Set size) off', 'code', 'collector.mjs', [['return s.size === n && v.every', 'return v.every']]],
+  ['MU-85 (HM-05) randomInt max inclusive', 'code', 'collector.mjs', [['return x >= min && x < max ? null', 'return x >= min && x <= max ? null']]],
+  ['MU-86 (HM-06) tuple record width not checked', 'code', 'collector.mjs', [['(Array.isArray(r) && r.length === w ? r : null)', '(Array.isArray(r) ? r : null)']]],
+  ['MU-87 (HM-07) STS dedupe key = first test only', 'code', 'counts.mjs', [['const key = JSON.stringify(Object.keys(STS_PER_TEST).map((k) => s[k]));', 'const key = JSON.stringify(Object.keys(STS_PER_TEST).slice(0, 1).map((k) => s[k]));']]],
+  ['MU-88 (HM-10) BigCrush header battery/stream check off', 'code', 'counts.mjs', [["if (r.head.battery !== 'BigCrush' || r.head.stream !== s) f.push", 'if (false) f.push']]],
+  ['MU-89 (HM-11) u32-vs-raw compare first row only', 'code', 'counts.mjs', [['JSON.stringify(pr.rows.map((x) => x.p)) === JSON.stringify(pu.rows.map((x) => x.p))', 'JSON.stringify(pr.rows.slice(0, 1).map((x) => x.p)) === JSON.stringify(pu.rows.slice(0, 1).map((x) => x.p))']]],
+  ['MU-90 (G-50) TestU01 header numbers Number()-parsed', 'code', 'counts.mjs', [["    if (!TU01_INDEX.test(String(head[k]))) return { error: `malformed header ${k}=${JSON.stringify(head[k])}` };\n", '']]],
+  ['MU-91 (G-50) Dieharder p-value parser lenient', 'code', 'counts.mjs', [['const DH_P = /^(?:0|1|0\\.[0-9]+(?:[eE][-+]?[0-9]+)?|1\\.0+)$/;', 'const DH_P = /^[0-9.eE+-]+$/;']]],
   ['MU-23 p-value range check removed', 'code', 'counts.mjs', [['return typeof x === \'number\' && Number.isFinite(x) && x >= 0 && x <= 1;', 'return true;']]],
 ];
 

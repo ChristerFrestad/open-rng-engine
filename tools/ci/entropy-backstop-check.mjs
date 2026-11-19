@@ -401,6 +401,11 @@ c.on('exit', (code) => process.exit(code === 0 ? 0 : 2));`],
       ['binding-spawn-sync', `const b = process.binding('spawn_sync');
 const r = b.spawn({ file: ${node}, args: [${node}, ${cp}], envPairs: [], stdio: [{ type: 'pipe', readable: true }, { type: 'pipe', writable: true }, { type: 'pipe', writable: true }] });
 process.exit(r.status === 0 ? 0 : 2);`],
+      ['execve-node', `if (typeof process.execve !== 'function') { console.error('entropy-backstop: process.execve absent on this Node'); process.exit(1); }
+const env = { ...process.env }; delete env.NODE_OPTIONS;
+process.execve(${node}, [${node}, ${cp}], env);`],
+      ['execve-sh', `if (typeof process.execve !== 'function') { console.error('entropy-backstop: process.execve absent on this Node'); process.exit(1); }
+process.execve('/bin/sh', ['/bin/sh', '-c', 'unset NODE_OPTIONS; ' + ${node} + ' ' + ${cp}], {});`],
       ['dlopen', `import { createRequire } from 'node:module';
 const m = { exports: {} };
 try { process.dlopen(m, '/nonexistent/addon.node'); } catch (e) { if (/entropy-backstop:/.test(String(e && e.message))) throw e; }

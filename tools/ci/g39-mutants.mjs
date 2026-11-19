@@ -24,6 +24,7 @@ export const G39_MUTANTS = [
   ['G39-M4 binding guard off', '    if (REFUSED_BINDINGS.includes(String(name))) {', '    if (false) {', ['binding-spawn-sync']],
   ['G39-M5 dlopen guard off', "  if (typeof process.dlopen === 'function' && !process.dlopen._backstopBinding) {", '  if (false) {', ['dlopen']],
   ['G39-M6 git repo-config allowlist off', '      for (const k of gitConfigKeys(t)) if (!GIT_CONFIG_KEYS.some((r) => r.test(k)))', '      for (const k of gitConfigKeys(t)) if (false)', ['git-repo-config']],
+  ['G46-M1 process.execve guard off', "  if (typeof process.execve === 'function' && !process.execve._backstopBinding) {", '  if (false) {', ['execve-node', 'execve-sh']],
   ['G39-M7 shell line plain-word check off', "    if (!words.every((w) => PLAIN_WORD.test(w)) || words[0].includes('=')) refuseChild", '    if (false) refuseChild', ['shell-chain-after-allowed']],
 ];
 

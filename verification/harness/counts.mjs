@@ -82,6 +82,10 @@ export function parseTu01(text) {
   const lines = String(text).split('\n').filter((l) => l.length > 0);
   if (lines.length === 0 || !lines[0].startsWith('# tu01-driver v1\t')) return { error: 'missing tu01-driver v1 header' };
   const head = Object.fromEntries(lines[0].split('\t').slice(1).map((kv) => kv.split('=')));
+  // G-50: header numbers are strict decimals too (no 0x, sign, blank or exponent).
+  for (const k of ['ntests', 'words']) {
+    if (!TU01_INDEX.test(String(head[k]))) return { error: `malformed header ${k}=${JSON.stringify(head[k])}` };
+  }
   const rows = [];
   for (const l of lines.slice(1)) {
     const c = l.split('\t');
@@ -131,11 +135,13 @@ export function checkBigCrush(outputs, inputs) {
 
 // dieharder -a table rows: "   test_name|ntup| tsamples |psamples|  p-value |Assessment".
 const DH_ROW = /^\s*([a-z0-9_]+)\|\s*(\d+)\|\s*(\d+)\|\s*(\d+)\|\s*([0-9.eE+-]+)\|\s*([A-Z]+)\s*$/;
+// G-50: the p-value field is a plain decimal in [0, 1]: no sign, no bare leading '.', no '-0'.
+const DH_P = /^(?:0|1|0\.[0-9]+(?:[eE][-+]?[0-9]+)?|1\.0+)$/;
 export function parseDieharder(text) {
   const rows = [];
   for (const l of String(text).split('\n')) {
     const m = DH_ROW.exec(l);
-    if (m) rows.push({ name: m[1], ntup: Number(m[2]), p: Number(m[5]) });
+    if (m && DH_P.test(m[5])) rows.push({ name: m[1], ntup: Number(m[2]), p: Number(m[5]) });
   }
   return rows;
 }

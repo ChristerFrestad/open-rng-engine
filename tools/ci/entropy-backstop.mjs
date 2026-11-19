@@ -780,6 +780,17 @@ function installBindingGuard() {
     dl._backstopBinding = true;
     Object.defineProperty(process, 'dlopen', { configurable: false, writable: false, enumerable: true, value: dl });
   }
+  // G-46 (HoQ report 5f7f4ad7, B8/B16): process.execve replaces this process with an unhooked program
+  // (node without the preload, or a shell). Refused outright.
+  if (typeof process.execve === 'function' && !process.execve._backstopBinding) {
+    const ex = function () {
+      const msg = 'entropy-backstop: process.execve refused (G-46: replaces the process with an unhooked program)';
+      console.error(msg);
+      throw new NativeError(msg);
+    };
+    ex._backstopBinding = true;
+    Object.defineProperty(process, 'execve', { configurable: false, writable: false, enumerable: true, value: ex });
+  }
 }
 
 function installChildProcessHook() {

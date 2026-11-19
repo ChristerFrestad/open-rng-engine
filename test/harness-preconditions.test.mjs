@@ -79,7 +79,7 @@ test('rule 17(i): expected counts are the frozen numbers', () => {
 test('self-test: every fixture as expected, all 81 mutants killed, none PATCH-FAILED', async () => {
   const r = await selfTest();
   assert.deepEqual(r.fails, []);
-  assert.equal(r.mutants.length, 81);
+  assert.equal(r.mutants.length, 91);
   assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
 });
 

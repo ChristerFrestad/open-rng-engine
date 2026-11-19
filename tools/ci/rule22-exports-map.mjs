@@ -198,7 +198,9 @@ export function qr33RunRed() {
   const a = t11.slice(0, 4), b = t11.slice(4);
   const t1 = uUnescape(QR33_TERM_ESCAPES[1]);
   const t6 = uUnescape(QR33_TERM_ESCAPES[6]);
-  return [`${a}_${b}`, `${a.toUpperCase()}_${b.toUpperCase()}`, `${a}${b[0].toUpperCase()}${b.slice(1)}`, `${a}_${b}s`, `${t6.slice(0, 3)}_${t6.slice(3, 5)}_${t6.slice(5)}`, `deal_${t1}`];
+  return [`${a}_${b}`, `${a.toUpperCase()}_${b.toUpperCase()}`, `${a}${b[0].toUpperCase()}${b.slice(1)}`, `${a}_${b}s`, `${t6.slice(0, 3)}_${t6.slice(3, 5)}_${t6.slice(5)}`, `deal_${t1}`,
+    // G-51 (HoQ QM-H1): runs that start after the first segment.
+    `x_${a}_${b}`, `get${a[0].toUpperCase()}${a.slice(1)}${b[0].toUpperCase()}${b.slice(1)}`, `my_${a}_${b}_x`];
 }
 // Run-check green controls: whole-segment runs that do not equal a term, and boundary names.
 export function qr33RunGreen() {

@@ -19,6 +19,7 @@ const MUTANTS = [
   ['QM-4 constructor parameter properties not scanned', '      for (const name of constructorParameterProperties(st)) member(name);\n', '', /g42-ctor-param-public/],
   ['QM-5 type-literal members not scanned', '    if (ts.isTypeLiteralNode(n)) for (const m of n.members)', '    if (false) for (const m of n.members)', /g42-type-literal-member/],
   ['QM-6 namespace members not scanned', '      if (body && ts.isModuleBlock(body)) for (const b of exportedBindingsOf(body.statements))', '      if (false) for (const b of exportedBindingsOf(body.statements))', /g42-namespace-member/],
+  ['QM-8 (QM-H1) run check only from segment 0', '  for (let i = 0; i < segs.length; i++) {\n    let run = segs[i];', '  for (let i = 0; i < Math.min(segs.length, 1); i++) {\n    let run = segs[i];', /qr33-run-red-6/],
   ['QM-7 run check ignores plurals', '      if (segmentMatchesTerm(run, t)) return true;', '      if (run === t) return true;', /qr33-run-red-3/],
 ];
 
