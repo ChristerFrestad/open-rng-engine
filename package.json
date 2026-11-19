@@ -22,7 +22,28 @@
     "lint:claims:fixture": "node tools/claims-lint.mjs --self-test",
     "check:qiu05": "node tools/qiu05-check.mjs",
     "check:qiu05:fixture": "node tools/qiu05-check.mjs --self-test",
-    "check:ph0": "node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test"
+    "check:ph0": "npm run -s typecheck && node tools/ci/rule46-license-integrity.mjs && node tools/claims-lint.mjs && node tools/claims-lint.mjs --self-test && node tools/qiu05-check.mjs && node tools/qiu05-check.mjs --self-test && node tools/ci/rule40-protected-names.mjs && node tools/ci/rule40-protected-names.mjs --self-test && node tools/ci/import-allowlist.mjs && node tools/ci/import-allowlist.mjs --self-test && node tools/ci/rule22-exports-map.mjs && node tools/ci/rule22-exports-map.mjs --self-test && node tools/ci/rule24-module-graph.mjs && node tools/ci/rule24-module-graph.mjs --self-test && node tools/ci/b8-dependencies.mjs && node tools/ci/b8-dependencies.mjs --self-test && node --import ./tools/ci/entropy-backstop.mjs tools/ci/entropy-backstop-check.mjs",
+    "test": "node --import ./tools/ci/entropy-backstop.mjs --test \"test/**/*.test.mjs\"",
+    "check:rule40": "node tools/ci/rule40-protected-names.mjs",
+    "check:rule40:fixture": "node tools/ci/rule40-protected-names.mjs --self-test",
+    "check:rule46": "node tools/ci/rule46-license-integrity.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check:rule27": "node tools/ci/import-allowlist.mjs",
+    "check:rule27:self-test": "node tools/ci/import-allowlist.mjs --self-test",
+    "check:rule22": "node tools/ci/rule22-exports-map.mjs",
+    "check:rule22:self-test": "node tools/ci/rule22-exports-map.mjs --self-test",
+    "check:rule24": "node tools/ci/rule24-module-graph.mjs",
+    "check:rule24:self-test": "node tools/ci/rule24-module-graph.mjs --self-test",
+    "check:b8": "node tools/ci/b8-dependencies.mjs",
+    "check:b8:self-test": "node tools/ci/b8-dependencies.mjs --self-test"
   },
-  "dependencies": {}
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "dependencies": {},
+  "exports": {
+    ".": "./src/index.ts",
+    "./audited": "./src/audited/index.ts",
+    "./package.json": "./package.json"
+  }
 }

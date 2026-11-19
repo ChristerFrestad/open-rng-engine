@@ -1,0 +1,48 @@
+format: open-rng-engine/protected-names/v1
+version: 1
+
+# v1 contents: o55-scan.py 156340f7 pattern set plus super texas hold em (CPO-R95).
+# Amended in place per CTO review and C-9 v1.1 errata (dadae96e): product-only slot and slots;
+# regex groups non-capturing; source tags quality-v5.5.2§7.5 (pinned quality.md 8eed0132, §7.5 L1082-1090).
+# regex kind: P7 only; CPO review required (C-9 section 3).
+
+PN-001	P1	phrase	poker	quality-v5.5.2§7.5
+PN-002	P2	phrase	hold em	quality-v5.5.2§7.5
+PN-003	P3	phrase	super hold em	quality-v5.5.2§7.5
+PN-004	P4	phrase	roulette	quality-v5.5.2§7.5
+PN-005	P5	phrase	black jack	quality-v5.5.2§7.5
+PN-006	P6	phrase	baccarat	quality-v5.5.2§7.5
+PN-007	P6	phrase	punto banco	quality-v5.5.2§7.5
+PN-008	P6	phrase	chemin de fer	quality-v5.5.2§7.5
+# regex: CPO review required
+PN-009	P7	regex	slots?<SEP>(?:machines?|games?)	quality-v5.5.2§7.5
+PN-010	P7	phrase-plural	video slot	quality-v5.5.2§7.5
+# regex: CPO review required
+PN-011	P7	regex	slot(?=\.[a-z])	quality-v5.5.2§7.5
+PN-012	P7	product-only	slot	quality-v5.5.2§7.5
+PN-013	P8	phrase	craps	quality-v5.5.2§7.5
+PN-014	P8	phrase	sic bo	quality-v5.5.2§7.5
+PN-015	P8	phrase	keno	quality-v5.5.2§7.5
+PN-016	P8	phrase	bingo	quality-v5.5.2§7.5
+PN-017	P8	phrase	pai gow	quality-v5.5.2§7.5
+PN-018	P8	phrase	teen patti	quality-v5.5.2§7.5
+PN-019	P8	phrase	andar bahar	quality-v5.5.2§7.5
+PN-020	P8	phrase	dragon tiger	quality-v5.5.2§7.5
+PN-021	P8	phrase	caribbean stud	quality-v5.5.2§7.5
+PN-022	P8	phrase	let it ride	quality-v5.5.2§7.5
+PN-023	P8	phrase	casino war	quality-v5.5.2§7.5
+PN-024	P8	phrase	pontoon	quality-v5.5.2§7.5
+PN-025	P9	phrase	starburst	quality-v5.5.2§7.5
+PN-026	P9	phrase	book of dead	quality-v5.5.2§7.5
+PN-027	P9	phrase	mega moolah	quality-v5.5.2§7.5
+PN-028	P9	phrase	gonzo s quest	quality-v5.5.2§7.5
+PN-029	P9	phrase	crazy time	quality-v5.5.2§7.5
+PN-030	P9	phrase	deal or no deal	quality-v5.5.2§7.5
+PN-031	P9	phrase	gates of olympus	quality-v5.5.2§7.5
+PN-032	P9	phrase	sweet bonanza	quality-v5.5.2§7.5
+PN-033	P9	phrase	big bass	quality-v5.5.2§7.5
+PN-034	P9	phrase	lightning roulette	quality-v5.5.2§7.5
+PN-035	P9	phrase	lightning dice	quality-v5.5.2§7.5
+PN-036	P9	phrase	lightning baccarat	quality-v5.5.2§7.5
+PN-037	P9	phrase	super texas hold em	CPO-R95
+PN-038	P7	product-only	slots	quality-v5.5.2§7.5

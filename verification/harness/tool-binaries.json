@@ -1,0 +1,5 @@
+{
+ "what": "G-55 (HoQ report 505599e..96aaf91): built battery binaries. launchEvidenceTool runs a tool only if its real path and sha256 equal an entry here and the entry's source pin equals tool-pins-v1.1.json (frozen; rule 15). No binary is built yet, so the list is empty and every launch is refused (fail-closed). An entry is added only when a binary is built from the pinned source, recording the build.",
+ "entry_shape": { "tool": "dieharder | tu01-driver | assess | RNG_test", "path": "absolute real path", "sha256": "hex of the binary", "source": { "name": "tool-pins-v1.1.json tools[].name", "sha256": "tool-pins-v1.1.json tools[].sha256" }, "build": "how it was built" },
+ "binaries": []
+}

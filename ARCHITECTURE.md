@@ -1,6 +1,6 @@
 # Architecture
 
-Planning notes only. This repository has no implementation yet.
+Work in progress. An early implementation exists in this repository; it is not released, and the statistical evidence is still open.
 
 The library is intended to produce unbiased random outcomes (integers, shuffles, and weighted picks) from the platform CSPRNG.
 

@@ -1,0 +1,19 @@
+{
+  "format": "open-rng-engine/claims-terms/v1",
+  "cpoVerdict": "CPO-R100 (DECISIONS L93) closed validat term allow-list; CPO-R101 F-23 strict boundaries; lab names in tools/lab-names.txt (F-24), authorities in tools/authority-terms.txt (CPO-R102 LF-10). Additions need CPO review plus a known-bad fixture",
+  "validatAllowedPhrases": [
+    "schema-validated",
+    "schema validator",
+    "schema validation"
+  ],
+  "forbiddenCoTerms": [
+    "\\bmodul\\w*",
+    "\\bsubmodul\\w*",
+    "\\bcrypto\\w*",
+    "\\bFIPS\\b",
+    "\\bCMVP\\b",
+    "\\bcertif\\w*",
+    "\\blaborator\\w*",
+    "\\btest[\\s-]*hous\\w*"
+  ]
+}

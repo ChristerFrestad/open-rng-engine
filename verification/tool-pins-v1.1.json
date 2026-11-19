@@ -1,0 +1,274 @@
+{
+  "schema": "tool-pins-v1",
+  "title": "Official source-archive pins for decision-rule-v1 freeze precondition B-4 (CPO-R107)",
+  "prepared_at": "2026-11-18T09:33:09+01:00",
+  "prepared_at_zone": "Europe/Copenhagen (CET, UTC+1)",
+  "fetch_note": "Each archive was downloaded with curl -L from the canonical URL below. Fetch times are local box time, Europe/Copenhagen (CET, UTC+1).",
+  "tools": [
+    {
+      "name": "NIST STS",
+      "version": "2.1.2",
+      "canonical_page": "https://csrc.nist.gov/projects/random-bit-generation/documentation-and-software",
+      "canonical_page_href": "/CSRC/media/Projects/Random-Bit-Generation/documents/sts-2_1_2.zip",
+      "url": "https://csrc.nist.gov/CSRC/media/Projects/Random-Bit-Generation/documents/sts-2_1_2.zip",
+      "final_url": "https://csrc.nist.gov/CSRC/media/Projects/Random-Bit-Generation/documents/sts-2_1_2.zip",
+      "redirects": 0,
+      "filename": "sts-2_1_2.zip",
+      "byte_size": 43915127,
+      "sha256": "0238d2f1d26e120e3cc748ed2d4c674cdc636de37fc4027c76cc2a394fff9157",
+      "fetched_at_start": "2026-11-18T09:25:00+01:00",
+      "fetched_at_end": "2026-11-18T09:25:00+01:00",
+      "http_status": 200,
+      "archive_ok": true,
+      "archive_notes": "Valid zip, 229 entries, top directory sts-2.1.2/sts-2.1.2/ (includes data/*.dat and src/assess.c).",
+      "official_checksum_or_signature": {
+        "published_on_canonical_page": false,
+        "compared": false,
+        "note": "The CSRC documentation-and-software page links the zip and does not publish a SHA-256, MD5, or signature. No official checksum was compared. The pin is the hash of the file actually fetched from that official URL."
+      },
+      "proposed_command_lines": {
+        "build": "cd sts-2.1.2/sts-2.1.2 && make",
+        "rc_raw_stream": {
+          "cmd": "./assess 1000000",
+          "note": "assess is interactive. The harness must drive it with a fixed answer file, not a human. Proposed answers for one raw bitstream file (PLAN L738 / quality L434): input file (0), path to the raw bit file, apply all tests (1), do not adjust parameters (0), number of bitstreams = 1000, no more files. Sequence length n=10^6 bits, m=1000 sequences, per-sequence α=0.01, default test parameters. The exact answer-file bytes should be frozen with the harness.",
+          "parameters": {
+            "n_bits": 1000000,
+            "m_sequences": 1000,
+            "alpha": 0.01,
+            "tests": "all, default parameters"
+          }
+        }
+      }
+    },
+    {
+      "name": "TestU01",
+      "version": "1.2.3",
+      "canonical_page": "https://simul.iro.umontreal.ca/testu01/tu01.html",
+      "url": "https://simul.iro.umontreal.ca/testu01/TestU01-1.2.3.zip",
+      "final_url": "https://simul.iro.umontreal.ca/testu01/TestU01-1.2.3.zip",
+      "redirects": 0,
+      "filename": "TestU01-1.2.3.zip",
+      "byte_size": 3123035,
+      "sha256": "bc1d1dd2aea7ed3b3d28eaad2c8ee55913f11ce67aec8fe4f643c1c0d2ed1cac",
+      "fetched_at_start": "2026-11-18T09:25:00+01:00",
+      "fetched_at_end": "2026-11-18T09:25:03+01:00",
+      "http_status": 200,
+      "archive_ok": true,
+      "archive_notes": "Valid zip, 279 entries, top directory TestU01-1.2.3/. Version created 18 August 2009 (canonical page).",
+      "official_checksum_or_signature": {
+        "published_on_canonical_page": false,
+        "compared": true,
+        "comparison": "match-against-third-party-package-hashes-only",
+        "note": "The Université de Montréal page and directory listing do not publish a checksum or signature. The computed sha256 matches the hash published by third-party package collections (Spack testu01 package, Arch/FreshPorts), which is not an official author checksum. Flagged as such.",
+        "third_party_sha256": "bc1d1dd2aea7ed3b3d28eaad2c8ee55913f11ce67aec8fe4f643c1c0d2ed1cac",
+        "third_party_sources": [
+          "Spack",
+          "Arch Linux",
+          "FreshPorts"
+        ]
+      },
+      "proposed_command_lines": {
+        "build": "unzip TestU01-1.2.3.zip && cd TestU01-1.2.3 && ./configure && make && make install",
+        "nightly_raw": {
+          "cmd": "bbattery_SmallCrush(gen)  /* via a pinned C driver linked against libtestu01, gen = unif01_CreateExternGenBits on the raw stream */",
+          "suite": "SmallCrush",
+          "streams": [
+            "raw"
+          ]
+        },
+        "weekly_raw": {
+          "cmd": "bbattery_Crush(gen)  /* same driver; Crush ≈ 2^35 numbers */",
+          "suite": "Crush",
+          "streams": [
+            "raw"
+          ]
+        },
+        "rc": {
+          "cmd": "bbattery_BigCrush(gen)  /* same driver, twice: once on the raw stream, once on the [0,2^32) mapped stream; ≈ 2^38 numbers (quality L435, PLAN L739) */",
+          "suite": "BigCrush",
+          "streams": [
+            "raw",
+            "mapped [0,2^32)"
+          ],
+          "note": "The exact driver source (how bits are widened to TestU01 unif01_Gen) must be pinned with the harness before the first evidence run."
+        }
+      }
+    },
+    {
+      "name": "Dieharder",
+      "test_name_note": "Dieharder tests whose upstream names hit the repo protected-names scan (rule 40 / O-55) are given by their -d index instead (e.g. -d 16 (diehard index 16)); the upstream name list is in the pinned source's dieharder/list_tests.c (v1.1 rewording of tool-pins-v1.json 075f52ec; data unchanged).",
+      "version": "3.31.1",
+      "canonical_page": "https://webhome.phy.duke.edu/~rgb/General/dieharder/",
+      "canonical_page_current_marker": "Current_Is_3.31.1 (2011-10-14)",
+      "url": "https://webhome.phy.duke.edu/~rgb/General/dieharder/dieharder-3.31.1.tgz",
+      "final_url": "https://webhome.phy.duke.edu/~rgb/General/dieharder/dieharder-3.31.1.tgz",
+      "redirects": 0,
+      "filename": "dieharder-3.31.1.tgz",
+      "byte_size": 1149780,
+      "sha256": "6cff0ff8394c553549ac7433359ccfc955fb26794260314620dfa5e4cd4b727f",
+      "fetched_at_start": "2026-11-18T09:25:03+01:00",
+      "fetched_at_end": "2026-11-18T09:25:05+01:00",
+      "http_status": 200,
+      "archive_ok": true,
+      "archive_notes": "Valid gzip tarball, 445 members, top directory dieharder-3.31.1/.",
+      "hoq_upstream_sha256_prefix": "6cff0ff8",
+      "hoq_sha_comparison": "MATCH",
+      "hoq_sha_comparison_note": "HoQ's upstream tarball sha256 starts with 6cff0ff8. The official rgb 3.31.1 tarball fetched here is 6cff0ff8394c553549ac7433359ccfc955fb26794260314620dfa5e4cd4b727f, which matches that prefix.",
+      "official_checksum_or_signature": {
+        "published_on_canonical_page": false,
+        "compared": true,
+        "comparison": "matches-hoq-prefix; also matches FreeBSD ports distinfo (third-party)",
+        "note": "Robert G. Brown's directory listing does not publish a checksum or signature. The pin is the hash of the file fetched from that official URL. It also matches the SHA-256 in FreeBSD ports math/dieharder/distinfo, which is not an official author checksum."
+      },
+      "distro_patch_sets": [
+        {
+          "name": "Debian dieharder 3.31.1.4-1.1",
+          "homepage": "https://packages.debian.org/source/sid/dieharder",
+          "orig_url": "http://deb.debian.org/debian/pool/main/d/dieharder/dieharder_3.31.1.4.orig.tar.gz",
+          "orig_filename": "dieharder_3.31.1.4.orig.tar.gz",
+          "orig_byte_size": 1053769,
+          "orig_sha256": "ddb8961c4809483b0478d882b21ea003cc3af6d039a186794e6d93b724e7f5fd",
+          "dsc_url": "http://deb.debian.org/debian/pool/main/d/dieharder/dieharder_3.31.1.4-1.1.dsc",
+          "dsc_sha256": "54a454d73a3bed18c577ce556eaf7aa4e26701727a37e5176eed1b893d5e6f5f",
+          "debian_tar_url": "http://deb.debian.org/debian/pool/main/d/dieharder/dieharder_3.31.1.4-1.1.debian.tar.xz",
+          "debian_tar_sha256": "4b4f1b393564eac85020fdf9e72badeebe29d5a3ab92dfa02dd186a16809564b",
+          "dsc_declares_orig_sha256": "ddb8961c4809483b0478d882b21ea003cc3af6d039a186794e6d93b724e7f5fd",
+          "dsc_declares_debian_tar_sha256": "4b4f1b393564eac85020fdf9e72badeebe29d5a3ab92dfa02dd186a16809564b",
+          "dsc_checksums_match_fetched": true,
+          "dsc_is_pgp_signed": true,
+          "quilt_patches": [],
+          "quilt_series": "debian/patches/series is present and empty (0 bytes). This Debian revision has no quilt patch set.",
+          "note": "3.31.1.4.orig.tar.gz is NOT the same file as rgb's dieharder-3.31.1.tgz (different size and sha256). It is Dirk Eddelbuettel's later 'upstream minor release' (changelog: 3.31.1.1, 3.31.1.2, 3.31.1.4; homepage github.com/eddelbuettel/dieharder), used as the Debian orig. It is recorded here, not substituted as the pin. The pin remains Robert G. Brown 3.31.1, sha256 6cff0ff8….",
+          "fetched_at": "2026-11-18T09:26:29+01:00"
+        }
+      ],
+      "proposed_command_lines": {
+        "build": "tar -xzf dieharder-3.31.1.tgz && cd dieharder-3.31.1 && ./configure && make",
+        "list_tests": "dieharder -l",
+        "rc_raw_stream": {
+          "cmd": "dieharder -a -Y 0 -g 201 -f RAW_UINT32_FILE",
+          "alternatives": [
+            "dieharder -a -Y 0 -g 200 < RAW_BINARY_STDIN",
+            "dieharder -a -Y 0 -g 202 -f RAW_ASCII_FILE"
+          ],
+          "flag_notes": {
+            "-a": "Run all documented tests with default tsamples/psamples (PLAN L740).",
+            "-Y 0": "Xtrategy 0: run with the specified tsamples and psamples only; do not dynamically add psamples (man page: 'the way it has always run, and is the default'). Required so the run cannot quietly enter RA (-Y 1) or test-to-destruction (-Y 2), which would violate the decision rule's 'no other re-runs, no seed or run selection'.",
+            "-g 201": "File input, raw binary (man: generators 201 or 202 read a file; 200 reads raw binary from stdin). The exact generator id and file layout must be frozen with the harness."
+          }
+        }
+      },
+      "counted_tests": {
+        "policy": "Under this pin, OPSO, OQSO and DNA (list_tests.c: 'Suspect', -d 5/6/7) and Sums ('Do Not Use', -d 14) are run and published but not counted. That makes the counted-test count 110.",
+        "counted_pvalue_count": 110,
+        "full_minus_a_pvalue_count_including_excluded": 114,
+        "excluded_from_count_but_published": [
+          {
+            "d": 5,
+            "sname": "diehard_opso",
+            "reliability": "Suspect"
+          },
+          {
+            "d": 6,
+            "sname": "diehard_oqso",
+            "reliability": "Suspect"
+          },
+          {
+            "d": 7,
+            "sname": "diehard_dna",
+            "reliability": "Suspect"
+          },
+          {
+            "d": 14,
+            "sname": "diehard_sums",
+            "reliability": "Do Not Use"
+          }
+        ],
+        "verification": {
+          "method": "Recomputed from the official 3.31.1 source (dieharder_test_types.c, run_all_tests.c, list_tests.c, and each Dtest nkps). Not from a live `dieharder -l` run: this box has gcc but no make, and libgsl-dev could not be installed (apt InRelease 500 / unsigned). `dieharder -l` lists tests and reliability labels; it does not itself print the number 110. 110 is the count of p-values produced by `dieharder -a` after excluding tests that list_tests.c labels Suspect or Do Not Use.",
+          "list_tests_c_labels": {
+            "file": "dieharder/list_tests.c",
+            "rule": "i==5 || i==6 || i==7 → Suspect; i==14 → Do Not Use; else Good",
+            "i_5_6_7": [
+              "diehard_opso",
+              "diehard_oqso",
+              "diehard_dna"
+            ],
+            "i_14": "diehard_sums",
+            "matches_hoq": true
+          },
+          "minus_a_pvalue_count_including_excluded": 114,
+          "minus_a_pvalue_count_counted": 110,
+          "breakdown": {
+            "diehard_indices_0_to_17_nkps": "birthdays 1, operm5 1, rank32 1, rank6x8 1, bitstream 1, opso 1 (Suspect, not counted), oqso 1 (Suspect, not counted), dna 1 (Suspect, not counted), count1s_stream 1, count1s_byte 1, parking 1, 2dsphere 1, 3dsphere 1, squeeze 1, sums 1 (Do Not Use, not counted), runs 2, -d 16 (diehard index 16) 2, gcd 2. Counted diehard p-values: 11×1 + 2+2+2 = 17.",
+            "sts": "monobit 1 + runs 1 + serial nkps=30 (m=1..16) = 32.",
+            "other_with_ntuple_loops_from_run_all_tests_c": "rgb_bitdist ntuple 1..12 × nkps 1 = 12; rgb_minimum_distance 2..5 × 1 = 4; rgb_permutations 2..5 × 1 = 4; rgb_lagged_sums 0..32 × 1 = 33; rgb_kstest 1; dab_bytedistrib 1; dab_dct 1; dab_filltree nkps=2; dab_filltree2 nkps=2; dab_monobit2 1. Other total 61.",
+            "sum": "17 + 32 + 61 = 110. Including the four excluded tests (each nkps=1) gives 114, which is the ANTATT figure in PLAN L743 / quality L439."
+          },
+          "built_and_ran_dieharder_l": false,
+          "build_failure": "configure failed: 'Couldn't find GSL headers'. apt-get install libgsl-dev failed (deb.debian.org trixie InRelease HTTP 500 / repository not signed). /usr/bin/make is not installed. No dieharder binary is present. 110 is therefore a source-derived figure, not a runtime verification."
+        }
+      }
+    },
+    {
+      "name": "PractRand",
+      "version": "0.96",
+      "canonical_page": "https://sourceforge.net/projects/pracrand/files/",
+      "project_home": "https://pracrand.sourceforge.net/",
+      "url": "https://downloads.sourceforge.net/project/pracrand/PractRand_0.96.zip",
+      "final_url": "https://altushost-bul.dl.sourceforge.net/project/pracrand/PractRand_0.96.zip?viasf=1&fid=7908a5930eb8f629&e=1795076705&st=kDomhJ-LhaIdbNoUKBPpHA",
+      "redirects": 1,
+      "redirect_flag": "The request went to the official SourceForge project URL and was redirected once to a SourceForge geographic CDN mirror (altushost-bul.dl.sourceforge.net). This is SourceForge's normal delivery path, not a third-party unofficial mirror. The SHA-256 published on the official SourceForge files page matches the fetched bytes, so the redirect did not alter the payload.",
+      "filename": "PractRand_0.96.zip",
+      "byte_size": 904832,
+      "sha256": "e4caf7fda98b2c597bbda3b576753cf5a0f6047aab837c82be370ab798a672e1",
+      "fetched_at_start": "2026-11-18T09:25:05+01:00",
+      "fetched_at_end": "2026-11-18T09:25:06+01:00",
+      "http_status": 200,
+      "archive_ok": true,
+      "archive_notes": "Valid zip, 161 entries, top directory PractRand/. versions.txt starts with 'version 0.96'. This is the latest file on the official SourceForge files page (dated 2025-12-26), newer than PractRand-pre0.95.zip (2019-10-12).",
+      "official_checksum_or_signature": {
+        "published_on_canonical_page": true,
+        "compared": true,
+        "comparison": "MATCH",
+        "source": "SourceForge files page JSON for PractRand_0.96.zip",
+        "published_sha256": "e4caf7fda98b2c597bbda3b576753cf5a0f6047aab837c82be370ab798a672e1",
+        "published_sha1": "c9c45729f84d995cc2a1ded95a83b40c601b1b09",
+        "published_md5": "624221574e8f43754c823db89057a089",
+        "note": "Computed sha256 equals the SHA-256 published on the official SourceForge files listing."
+      },
+      "previous_release_not_pinned": {
+        "filename": "PractRand-pre0.95.zip",
+        "published_sha256": "5738c322ccb983b63fbe693f305afa2a7c73e64a80b303c9139278c453ce27b4",
+        "note": "Listed only for identification. The pin is 0.96, the latest official release."
+      },
+      "proposed_command_lines": {
+        "build": "unzip PractRand_0.96.zip && cd PractRand && (g++ -O2 -finline-limit=8000 tools/RNG_test.cpp src/*.cpp src/RNGs/*.cpp src/RNGs/other/*.cpp -o RNG_test  # or the package's documented build)",
+        "rc_raw_stream": {
+          "cmd": "./RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 40 < RAW_BINARY_FILE",
+          "equivalent": "cat RAW_BINARY_FILE | ./RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 40",
+          "flag_notes": {
+            "stdin32": "Interpret stdin as a stream of 32-bit words (tools.txt sample; RNG_test.cpp usage).",
+            "-tf 1 -te 0": "Tool defaults: standard folding, standard (not expanded) test set (RNG_test.cpp usage text).",
+            "-tlmin 10": "Start reporting at 2^10 bytes (a bare integer is log2 of the length; RNG_test.cpp usage).",
+            "-tlmax 40": "Stop at 2^40 bytes = 1 TiB, the PLAN L740 / quality L437 RC floor."
+          }
+        },
+        "nightly_raw_stream": {
+          "cmd": "./RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 34 < RAW_BINARY_FILE",
+          "flag_notes": {
+            "-tlmax 34": "2^34 bytes, the PLAN L740 / quality L437 nightly length (proposed)."
+          }
+        }
+      }
+    }
+  ],
+  "failures": [
+    {
+      "what": "dieharder local build / `dieharder -l` runtime verification",
+      "result": "FAILED to build or run",
+      "detail": "configure failed: 'Couldn't find GSL headers'. apt-get install libgsl-dev failed (deb.debian.org trixie InRelease HTTP 500 / repository not signed). /usr/bin/make is not installed. No dieharder binary is present. 110 is therefore a source-derived figure, not a runtime verification.",
+      "consequence": "110 is reported as a source-derived count from the pinned 3.31.1 tarball, not as output of `dieharder -l`. The reliability labels (Suspect / Do Not Use) were read from list_tests.c in that tarball and match HoQ's names."
+    }
+  ]
+}
