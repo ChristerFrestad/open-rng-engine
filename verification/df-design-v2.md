@@ -512,3 +512,17 @@ The KS MDD of the A6 rule itself is D_crit = 0.061462 (R = 1000, α = 0.001).
 | 25 | `shuffle/adjacency-div4/n-52` | 1,000,000 | – | – | 1,000,000 | 1,000,000 | 14 | 0.03498 | 0.1696 | 12 | PASS |
 
 Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DEEP-TAIL (actual size ≤ nominal at α = 6.369e-5 per EBC entry) is NOT established** by this calibration (α = 0.01 / KS 0.001 scale); open item for HoQ/CPO.
+
+### 8.1 R-DT-SCREEN hard-FAIL screen (K1; CPO-R116a = HoQ R-DT-SCREEN, ratified)
+
+- In THE statistic module (`screen`, `klBernoulli`, `klSafe`, `screenFails`, `SCREEN`): b_i = 2·exp(−M·KL(q_i‖p_i)),
+  q_i = x_i/M, p_i the exact lumped law cell; Bound = k·min_i b_i with k = the module's lumped cell count;
+  **HARD FAIL iff Bound < 1e-10**. KL(0‖p) = −ln(1−p), KL(1‖p) = −ln p.
+- Numerics: log space; KL_safe = max(0, KL·(1 − 10^-6) − 10^-15), so the Bound is rounded toward LARGER (a hard
+  FAIL is never produced by rounding). Test: KL_safe ≤ a BigInt fixed-point (60-digit) KL on a 400+ point grid.
+- **Size ≤ 1e-10 per entry** (union bound over the k cells, each b_i ≥ the two-sided Chernoff tail
+  2·min(P[X≤x], P[X≥x]), checked exactly for M ≤ 40). **α ledger: 26 · 1e-10 = 2.6e-9** for wave 1, negligible
+  against the per-entry α_e = 0.01/157.
+- R-DT-MC item 8 (power of the MC flag at B + 1 = 1,004,800, flag iff #≥ ≤ 62): #≥ ~ Binomial(B, p_true);
+  at p_true = α_e (6.369e-5) E[#≥] ≈ 64, so P(flag) ≈ 50 %; at p_true ≤ α_e/2, E[#≥] ≈ 32 and P(flag) is
+  essentially 1 (P[Poisson(32) > 62] < 1e-6).

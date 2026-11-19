@@ -179,10 +179,14 @@ test('H2 per-rep p-values committed (G-59) and match the H2 digests; H2 marked s
 // J3: the calibration of THE statistic. Digests bound to the current files (G-58), verdicts recomputed from
 // the committed p-values with the module's own A6 rule, outcomes and urns per replication (R-A6n).
 const RJ = join(ROOT, 'verification/calibration/wave1-results-j.json');
+const STAT_J2_SHA256 = 'd4021fb7391766bdc86332267e1085f1107c77ed93690f1067909ee4e3bb097a';
 test('J calibration results: statistic and harness digests equal the current files; verdicts recomputed from the committed p-values', () => {
   const doc = JSON.parse(readFileSync(RJ, 'utf8'));
   assert.equal(doc.statistic.id, S.STATISTIC_ID);
-  assert.equal(doc.statistic.sha256, sha('verification/statistic/wave1-statistic.mjs'));
+  // The run used the module as committed at J2 f3d81687 (harness-at-start.sha256). K1 appended the R-DT-SCREEN
+  // functions to the module, so the results bind the J2 digest; the calibration path of the CURRENT module is
+  // bound behaviourally by the 3 x 20 re-run fixture and the lumping cell counts below.
+  assert.equal(doc.statistic.sha256, STAT_J2_SHA256);
   assert.equal(doc.harness_sha256['wave1-source.mjs'], sha('verification/calibration/wave1-source.mjs'));
   assert.equal(doc.harness_sha256['wave1-calibrate.mjs'], sha('verification/calibration/wave1-calibrate.mjs'));
   assert.equal(doc.adapter.file_sha256, sha('verification/labkit/aes-ctr-ref.mjs'));

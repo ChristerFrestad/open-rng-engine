@@ -16,6 +16,7 @@ const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/cal
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
 const TEST = 'test/labkit-calibration.test.mjs', RJ = 'verification/calibration/wave1-results-j.json';
 const DIGEST_TESTS = [/^labkit adapter: pinned digest/, /^J calibration results: statistic and harness digests/];
+const SCREEN_TEST = 'test/dt-screen.test.mjs';
 
 const MUTANTS = [
   ['HM-29 KS D one-sided (D+ only)', [[ST, 'D = Math.max(D, (i + 1) / n - s[i], s[i] - i / n);', 'D = Math.max(D, (i + 1) / n - s[i]);']]],
@@ -30,6 +31,15 @@ const MUTANTS = [
     [AD, '    const b = this.cipher.update(this.zero);', '    this.cipher = this.mk(); const b = this.cipher.update(this.zero);']]],
   ['HM-39 lumping threshold 5 -> 4', [[ST, 'const five = 5n * law.den;', 'const five = 4n * law.den;']]],
   ['HM-40 duplicates urns not reset per block', [[ST, 'const urns = new Set(); let C = 0, t = 0;', 'const urns = (globalThis.__hm40 ??= new Set()); let C = 0, t = 0;']]],
+  // K1 R-DT-SCREEN (CPO-R116a / HoQ R-DT-SCREEN), run against test/dt-screen.test.mjs.
+  ['SC-1 k dropped', [[ST, 'const logBound = Math.LN2 + Math.log(k) - M * klMax;', 'const logBound = Math.LN2 - M * klMax;']], SCREEN_TEST],
+  ['SC-2 sum of b_i instead of k*min', [[ST, 'const logBound = Math.LN2 + Math.log(k) - M * klMax;', 'const logBound = Math.log(Array.from(o, (x, j) => 2 * Math.exp(-M * klSafe(x / M, lumped.cells[j]))).reduce((a, b) => a + b, 0));']], SCREEN_TEST],
+  ['SC-3 factor 2 dropped', [[ST, 'const logBound = Math.LN2 + Math.log(k) - M * klMax;', 'const logBound = Math.log(k) - M * klMax;']], SCREEN_TEST],
+  ['SC-4 KL arguments swapped', [[ST, 'const kl = klSafe(o[j] / M, lumped.cells[j]);', 'const kl = klSafe(Math.min(Math.max(lumped.cells[j], 1e-300), 1), Math.min(Math.max(o[j] / M, 1e-300), 1 - 1e-16));']], SCREEN_TEST],
+  ['SC-5 one tail only (excess)', [[ST, 'const kl = klSafe(o[j] / M, lumped.cells[j]);', 'const kl = o[j] / M > lumped.cells[j] ? klSafe(o[j] / M, lumped.cells[j]) : 0;']], SCREEN_TEST],
+  ['SC-6 < replaced by <=', [[ST, 'export const screenFails = (logBound) => logBound < SCREEN.LOG_THRESHOLD;', 'export const screenFails = (logBound) => logBound <= SCREEN.LOG_THRESHOLD;']], SCREEN_TEST],
+  ['SC-7 threshold drift 1e-10 -> 1e-9', [[ST, 'LOG_THRESHOLD: Math.log(1e-10)', 'LOG_THRESHOLD: Math.log(1e-9)']], SCREEN_TEST],
+  ['SC-8 rounding direction flipped', [[ST, 'klBernoulli(q, p) * (1 - SCREEN.SAFETY_REL) - SCREEN.SAFETY_ABS', 'klBernoulli(q, p) * (1 + SCREEN.SAFETY_REL) + SCREEN.SAFETY_ABS']], SCREEN_TEST],
 ];
 
 const sha = (d, rel) => createHash('sha256').update(readFileSync(join(d, rel))).digest('hex');
@@ -45,19 +55,22 @@ function scratch(edits) {
   }
   // Re-pin every digest that binds the mutated files (the mutant must die to behaviour, not to a pin).
   const doc = JSON.parse(readFileSync(join(d, RJ), 'utf8'));
-  doc.statistic.sha256 = sha(d, ST); doc.harness_sha256['wave1-source.mjs'] = sha(d, SRC);
-  doc.harness_sha256['wave1-calibrate.mjs'] = sha(d, CAL); doc.adapter.file_sha256 = sha(d, AD);
+  const edited = new Set(edits.map(([rel]) => rel)); // re-pin only what the mutant edits (baseline: nothing)
+  if (edited.has(ST)) doc.statistic.sha256 = sha(d, ST);
+  if (edited.has(SRC)) doc.harness_sha256['wave1-source.mjs'] = sha(d, SRC);
+  if (edited.has(CAL)) doc.harness_sha256['wave1-calibrate.mjs'] = sha(d, CAL);
+  if (edited.has(AD)) doc.adapter.file_sha256 = sha(d, AD);
   writeFileSync(join(d, RJ), JSON.stringify(doc));
   const H2 = 'verification/calibration/wave1-results.json'; const h2 = JSON.parse(readFileSync(join(d, H2), 'utf8'));
   if (h2.adapter && h2.adapter.file_sha256) { h2.adapter.file_sha256 = sha(d, AD); writeFileSync(join(d, H2), JSON.stringify(h2)); }
   const t = readFileSync(join(d, TEST), 'utf8'); writeFileSync(join(d, TEST), t.split(oldAd).join(sha(d, AD)));
   return d;
 }
-function run(label, edits) {
+function run(label, edits, testFile = TEST) {
   return new Promise((done) => {
     const d = scratch(edits);
     const env = { ...process.env }; delete env.NODE_OPTIONS;
-    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', TEST], { cwd: d, env });
+    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', testFile], { cwd: d, env });
     let out = ''; c.stdout.on('data', (b) => { out += b; }); c.stderr.on('data', (b) => { out += b; });
     c.on('close', (status) => {
       rmSync(d, { recursive: true, force: true });

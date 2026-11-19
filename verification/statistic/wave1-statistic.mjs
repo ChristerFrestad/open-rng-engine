@@ -220,3 +220,31 @@ export function a6Verdict(ps, minOutcomes) {
   const pass = ps.length >= A6.R && minOutcomes >= A6.N && ks.p >= A6.KS_ALPHA && flags >= A6.FLAGS[0] && flags <= A6.FLAGS[1];
   return { ks, flags, pass };
 }
+
+// ---------------- R-DT-SCREEN hard-FAIL screen (CPO-R116a = HoQ R-DT-SCREEN, ratified) ----------------
+// b_i = 2·exp(-M·KL(q_i || p_i)), q_i = x_i/M, p_i = the exact lumped law cell (lumped.cells, from lumpExact);
+// Bound = k·min_i b_i with k = lumped.cells.length; HARD FAIL iff Bound < 1e-10. Size <= 1e-10 per entry by the
+// union bound (each b_i bounds the two-sided Chernoff tail 2·min(P[X<=x], P[X>=x])).
+// Numerics, conservative (toward a LARGER Bound): KL is evaluated in log space (log/log1p), then shrunk by the
+// relative safety factor SCREEN.SAFETY_REL (1e-6) and the absolute guard SCREEN.SAFETY_ABS (1e-15):
+// KL_safe = max(0, KL·(1 - 1e-6) - 1e-15). The 1e-6 covers float log error and the rounding of p_i to double
+// (|dKL/dp|·p·2^-53·M <= x·2^-52 <= 2.3e-7 for x <= 1e9, against M·KL >= 23 near the threshold); the test
+// checks KL_safe <= a BigInt fixed-point (~60 digit) reference on a KAT grid. log Bound = ln 2 + ln k - M·max_i KL_safe.
+export const SCREEN = Object.freeze({ THRESHOLD: 1e-10, LOG_THRESHOLD: Math.log(1e-10), SAFETY_REL: 1e-6, SAFETY_ABS: 1e-15 });
+export function klBernoulli(q, p) {
+  if (!(p > 0 && p < 1) || !(q >= 0 && q <= 1)) throw new Error(`klBernoulli: q ${q}, p ${p} out of range`);
+  if (q === 0) return -Math.log1p(-p);
+  if (q === 1) return -Math.log(p);
+  return q * Math.log(q / p) + (1 - q) * Math.log1p((p - q) / (1 - p));
+}
+export const klSafe = (q, p) => Math.max(0, klBernoulli(q, p) * (1 - SCREEN.SAFETY_REL) - SCREEN.SAFETY_ABS);
+export const screenFails = (logBound) => logBound < SCREEN.LOG_THRESHOLD;
+export function screen(h, lumped, M) {
+  const k = lumped.cells.length;
+  const o = new Float64Array(k);
+  for (let i = 0; i < h.length; i++) o[lumped.map[i]] += h[i];
+  let worst = -1, klMax = -1;
+  for (let j = 0; j < k; j++) { const kl = klSafe(o[j] / M, lumped.cells[j]); if (kl > klMax) { klMax = kl; worst = j; } }
+  const logBound = Math.LN2 + Math.log(k) - M * klMax;
+  return { k, worst, logBound, bound: Math.exp(logBound), hardFail: screenFails(logBound) };
+}
