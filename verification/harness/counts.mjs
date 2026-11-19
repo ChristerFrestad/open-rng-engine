@@ -76,6 +76,8 @@ export function checkSts(sequences) {
 }
 
 // tu01-driver v1 output (verification/harness/tu01-driver.c).
+const TU01_INDEX = /^(0|[1-9][0-9]*)$/;
+const TU01_P = /^(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?$/;
 export function parseTu01(text) {
   const lines = String(text).split('\n').filter((l) => l.length > 0);
   if (lines.length === 0 || !lines[0].startsWith('# tu01-driver v1\t')) return { error: 'missing tu01-driver v1 header' };
@@ -84,6 +86,10 @@ export function parseTu01(text) {
   for (const l of lines.slice(1)) {
     const c = l.split('\t');
     if (c.length !== 5) return { error: `bad row: ${l}` };
+    // H-4: an empty or blank field, hex (0x1), signs or other Number() leniency is malformed, not 0 or 1.
+    if (!TU01_INDEX.test(c[2])) return { error: `malformed index ${JSON.stringify(c[2])}: ${l}` };
+    if (!TU01_P.test(c[4])) return { error: `malformed p-value ${JSON.stringify(c[4])}: ${l}` };
+    if (c[0] === '' || c[1] === '' || c[3].trim() === '') return { error: `empty field: ${l}` };
     rows.push({ battery: c[0], stream: c[1], index: Number(c[2]), name: c[3], p: Number(c[4]) });
   }
   return { head, rows };

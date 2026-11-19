@@ -87,8 +87,13 @@ export function parseG4Verdicts(text) {
   const BLOCK_CLOSE = /<\/(details|style|script|template|textarea|noscript)\s*>/gi;
   let blockDepth = 0;
   // G-44b: FAIL lexicon and label set for the contradicting-line check.
-  const FAIL_WORD = /\bFAIL\w*|\bREJECT\w*|\bNOT\s+PASS/i;
-  const FAIL_LABEL = /verdict|result|status|outcome|conclusion|decision/i;
+  const FAIL_WORD = /\bFAIL\w*|\bREJECT\w*|\bNOT\s+PASS|\bNO-PASS\b|\bDENIED\b|\bBLOCKED\b|\u2717/i;
+  const FAIL_LABEL = /verdict|result|status|outcome|conclusion|decision|assessment|finding/i;
+  // G-44b residual (HoQ 4c7adda0/f575fe1f §3.2): unlabelled prose that negates the verdict is red too.
+  // Case-insensitive: "does/did not pass", "failed", "fails". Upper case only: NOT PASS, NO-PASS, DENIED,
+  // BLOCKED (so ordinary prose such as "not treated as blocking" stays green).
+  const UNLABELLED_FAIL_I = /\b(?:does|did)\s+not\s+pass\b|\bfail(?:ed|s)\b/i;
+  const UNLABELLED_FAIL_U = /\bNOT\s+PASS\b|\bNO-PASS\b|\bDENIED\b|\bBLOCKED\b|\u2717/;
 
   const applyHtml = (vis, startComment, startPre) => {
     let inC = startComment, inP = startPre;
@@ -152,7 +157,7 @@ export function parseG4Verdicts(text) {
     const isDirective = /^\s*verdict\s*:/i.test(stripped);
     // G-44b: blockquoted and indented lines render visibly, so they count for the FAIL check; only fenced
     // code and HTML comment / <pre> content is exempt.
-    if (!codeOrHtmlHidden && FAIL_WORD.test(vis) && FAIL_LABEL.test(vis)) failConj.push(line);
+    if (!codeOrHtmlHidden && ((FAIL_WORD.test(vis) && FAIL_LABEL.test(vis)) || UNLABELLED_FAIL_I.test(vis) || UNLABELLED_FAIL_U.test(vis))) failConj.push(line);
     if (isDirective) {
       if (!lineHidden && /^VERDICT:\s+PASS\s*$/.test(stripped)) topPass.push(line);
       else if (!lineHidden) topOther.push(line);
@@ -527,6 +532,19 @@ export const G44B_SPECIALS = {
   'g44b-style-pass': [(md) => G44B_REWORD(md) + '\n<style>\nVERDICT: PASS\n</style>\n', G44B_HIDDEN_PASS],
   'g44b-script-pass': [(md) => G44B_REWORD(md) + '\n<script>\nVERDICT: PASS\n</script>\n', G44B_HIDDEN_PASS],
   'g44b-template-pass': [(md) => G44B_REWORD(md) + '\n<template>\nVERDICT: PASS\n</template>\n', G44B_HIDDEN_PASS],
+  // G-44b residual (HoQ 4c7adda0/f575fe1f §3.2): unlabelled prose and labels/words outside the old set.
+  'g44b-prose-does-not-pass': [(md) => md + '\nThe dependency does NOT PASS.\n', G44B_FAIL],
+  'g44b-prose-did-not-pass': [(md) => md + '\nIt did not pass the review.\n', G44B_FAIL],
+  'g44b-prose-failed': [(md) => md + '\nThe review failed.\n', G44B_FAIL],
+  'g44b-prose-fails': [(md) => md + '\nThis dependency fails review.\n', G44B_FAIL],
+  'g44b-assessment-fail': [(md) => md + '\nAssessment: FAIL\n', G44B_FAIL],
+  'g44b-finding-fail': [(md) => md + '\nFinding: FAIL\n', G44B_FAIL],
+  'g44b-result-denied': [(md) => md + '\nResult: DENIED\n', G44B_FAIL],
+  'g44b-result-blocked': [(md) => md + '\nResult: BLOCKED\n', G44B_FAIL],
+  'g44b-bare-denied': [(md) => md + '\nDENIED\n', G44B_FAIL],
+  'g44b-bare-blocked': [(md) => md + '\nBLOCKED by HoQ.\n', G44B_FAIL],
+  'g44b-no-pass': [(md) => md + '\nResult: NO-PASS\n', G44B_FAIL],
+  'g44b-cross-mark': [(md) => md + '\nResult: \u2717\n', G44B_FAIL],
 };
 
 export const BAD_FIXTURES = {

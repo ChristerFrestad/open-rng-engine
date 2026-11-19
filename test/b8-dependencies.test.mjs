@@ -23,11 +23,11 @@ test('B8: this repo is green (dependencies {} , exact devDeps, lockfile integrit
 test('B8: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /57 known-bad fixtures red, control green/);
+  assert.match(r.stdout, /69 known-bad fixtures red, control green/);
 });
 
 test('B8: a runtime dep, an unpinned devDep, a workspace runtime dep, or a lockfile mismatch is red', () => {
-  assert.equal(Object.keys(BAD_FIXTURES).length, 57);
+  assert.equal(Object.keys(BAD_FIXTURES).length, 69);
 });
 
 test('B8: the previous stub exits 2 and does not kill a known-bad fixture', () => withTmp((d) => {

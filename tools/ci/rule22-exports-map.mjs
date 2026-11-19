@@ -127,11 +127,26 @@ export function exportNameNonAscii(name) {
 // segment or its plural, or is a substring inside ONE segment (the substring scan stays). It is never
 // stitched across a segment boundary ('_', digits, or a camel break), so names whose letters only join
 // into a term across segments are green.
+//
+// G-42 regression (HoQ b15a2ff5 gap 1, CTO batch E): a run of two or more WHOLE consecutive segments whose
+// concatenation equals a term or its plural is also red (term 11 split as snake, upper snake or camel). That is a sequence of
+// whole segments, not a substring of the joined name: start_page (start+page) never equals a term.
+export function segmentRunMatchesTerm(segs, t) {
+  for (let i = 0; i < segs.length; i++) {
+    let run = segs[i];
+    for (let j = i + 1; j < segs.length && run.length < t.length + 2; j++) {
+      run += segs[j];
+      if (segmentMatchesTerm(run, t)) return true;
+    }
+  }
+  return false;
+}
 export function qr33Hit(name) {
   const segs = nameSegments(foldConfusables(name));
   for (const t of QR33_TERMS) {
     if (segs.some((s) => segmentMatchesTerm(s, t))) return t;
     if (segs.some((s) => s.includes(t))) return t; // substring scan, within one segment only
+    if (segmentRunMatchesTerm(segs, t)) return t; // whole consecutive segments, never the joined name
   }
   return null;
 }
@@ -163,7 +178,32 @@ export function g42Cases(cardName) {
     { name: 'g42-instance-method', files: { 'src/index.ts': `export class C { ${deal}() { return 1; } }\n`, ...aud }, reason: /QR-33 term/ },
     { name: 'g42-homoglyph', files: { 'src/index.ts': `export const ${homoglyph} = 1;\n`, ...aud }, reason: /QR-33 term/ },
     { name: 'g42-non-ascii', files: { 'src/index.ts': 'export const caf\u00e9 = 1;\n', ...aud }, reason: /non-ASCII character/ },
+    // G-42 carry-over (HoQ 4c7adda0/f575fe1f §3.3; b15a2ff5 gap 2).
+    { name: 'g42-ctor-param-public', files: { 'src/index.ts': `export class C { constructor(public ${deal}: number) {} }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-ctor-param-readonly', files: { 'src/index.ts': `export class C { constructor(private readonly ${deal}: number) {} }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-type-literal-member', files: { 'src/index.ts': `export type T = { ${deal}: number };\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-type-literal-nested', files: { 'src/index.ts': `export type T = { a: { b: Array<{ ${deal}(): void }> } };\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-interface-nested-literal', files: { 'src/index.ts': `export interface I { a: { ${deal}: number } }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-function-param-literal', files: { 'src/index.ts': `export function f(o: { ${deal}: number }) { return o; }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-namespace-member', files: { 'src/index.ts': `export namespace N { export const ${deal} = 1; }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-namespace-nested', files: { 'src/index.ts': `export namespace A.B { export function ${deal}() { return 1; } }\n`, ...aud }, reason: /QR-33 term/ },
+    { name: 'g42-namespace-class-member', files: { 'src/index.ts': `export namespace N { export class K { static ${deal} = 1; } }\n`, ...aud }, reason: /QR-33 term/ },
   ];
+}
+
+// G-42 regression (HoQ b15a2ff5 gap 1): whole-segment runs equal to a term (index 11) are red, in every
+// case form and plural; built from the escaped term list. Also a whole-segment control built from term 1.
+export function qr33RunRed() {
+  const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
+  const a = t11.slice(0, 4), b = t11.slice(4);
+  const t1 = uUnescape(QR33_TERM_ESCAPES[1]);
+  const t6 = uUnescape(QR33_TERM_ESCAPES[6]);
+  return [`${a}_${b}`, `${a.toUpperCase()}_${b.toUpperCase()}`, `${a}${b[0].toUpperCase()}${b.slice(1)}`, `${a}_${b}s`, `${t6.slice(0, 3)}_${t6.slice(3, 5)}_${t6.slice(5)}`, `deal_${t1}`];
+}
+// Run-check green controls: whole-segment runs that do not equal a term, and boundary names.
+export function qr33RunGreen() {
+  const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
+  return [`${t11.slice(0, 4)}_${t11.slice(4)}u`, `${t11.slice(0, 3)}_x_${t11.slice(3)}`, 'deal_cart'];
 }
 
 export const QR33_ALLOW_REL = 'tools/qr33-allow.json';
@@ -220,9 +260,38 @@ function isSourceFile(rel) {
   return /\.(ts|mts|cts|js|mjs|cjs)$/.test(rel);
 }
 
-function exportedBindings(sf) {
+// G-42 carry-over (HoQ 4c7adda0/f575fe1f §3.3, b15a2ff5 gap 2): names of members declared inside type
+// literals anywhere under a node (type aliases, interface member types, nested literals).
+function typeLiteralMemberNames(node) {
   const out = [];
-  for (const st of sf.statements) {
+  const visit = (n) => {
+    if (ts.isTypeLiteralNode(n)) for (const m of n.members) { const x = memberNameText(m.name); if (x !== null) out.push(x); }
+    ts.forEachChild(n, visit);
+  };
+  if (node) visit(node);
+  return out;
+}
+
+// Constructor parameter properties (`constructor(public x)`, private, protected, readonly, override).
+const PARAM_PROPERTY_KINDS = new Set([ts.SyntaxKind.PublicKeyword, ts.SyntaxKind.PrivateKeyword, ts.SyntaxKind.ProtectedKeyword, ts.SyntaxKind.ReadonlyKeyword, ts.SyntaxKind.OverrideKeyword]);
+function constructorParameterProperties(cls) {
+  const out = [];
+  for (const m of cls.members) {
+    if (!ts.isConstructorDeclaration(m)) continue;
+    for (const p of m.parameters) {
+      if ((p.modifiers ?? []).some((x) => PARAM_PROPERTY_KINDS.has(x.kind))) out.push(...bindingNames(p.name));
+    }
+  }
+  return out;
+}
+
+function exportedBindings(sf) {
+  return exportedBindingsOf(sf.statements);
+}
+
+function exportedBindingsOf(statements) {
+  const out = [];
+  for (const st of statements) {
     if (ts.isExportDeclaration(st)) {
       const spec = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
       if (st.exportClause && ts.isNamedExports(st.exportClause)) {
@@ -247,16 +316,30 @@ function exportedBindings(sf) {
         for (const name of bindingNames(d.name)) out.push({ name, local: name, from: null, star: false });
       }
     }
+    const member = (name) => out.push({ name, local: name, from: null, star: false, member: true });
     if (ts.isClassDeclaration(st)) {
       for (const name of classStaticNames(st)) out.push({ name, local: name, from: null, star: false, staticMember: true });
       // G-42: instance members, string/computed-literal and #private names count too.
-      for (const name of classMemberNames(st, false)) out.push({ name, local: name, from: null, star: false, member: true });
+      for (const name of classMemberNames(st, false)) member(name);
+      for (const name of constructorParameterProperties(st)) member(name);
+      for (const name of typeLiteralMemberNames(st)) member(name);
     }
     if (ts.isEnumDeclaration(st)) {
-      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) out.push({ name: n, local: n, from: null, star: false, member: true }); }
+      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) member(n); }
     }
     if (ts.isInterfaceDeclaration(st)) {
-      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) out.push({ name: n, local: n, from: null, star: false, member: true }); }
+      for (const m of st.members) { const n = memberNameText(m.name); if (n !== null) member(n); }
+      for (const name of typeLiteralMemberNames(st)) member(name);
+    }
+    if (ts.isTypeAliasDeclaration(st)) for (const name of typeLiteralMemberNames(st.type)) member(name);
+    if (ts.isFunctionDeclaration(st)) for (const name of typeLiteralMemberNames(st)) member(name);
+    if (ts.isVariableStatement(st)) for (const name of typeLiteralMemberNames(st)) member(name);
+    // Exported namespaces: the namespace name, and every exported member inside it (nested too).
+    if (ts.isModuleDeclaration(st) && st.name && ts.isIdentifier(st.name)) {
+      out.push({ name: st.name.text, local: st.name.text, from: null, star: false });
+      let body = st.body;
+      while (body && ts.isModuleDeclaration(body)) { out.push({ name: body.name.text, local: body.name.text, from: null, star: false, member: true }); body = body.body; }
+      if (body && ts.isModuleBlock(body)) for (const b of exportedBindingsOf(body.statements)) if (!b.star && b.from === null) out.push({ ...b, member: true });
     }
   }
   return out;
@@ -567,11 +650,13 @@ export function selfTest() {
       ...g42Cases(cardName),
       // QR-33 segmentation (HoQ ruling): a whole segment and a substring inside one segment stay red.
       ...qr33BoundaryRed().map((n, i) => ({ name: `qr33-seg-red-${i}`, files: { 'src/index.ts': `export const ${n} = 1;\n`, 'src/audited/index.ts': 'export {};\n' }, reason: /QR-33 term/ })),
+      ...qr33RunRed().map((n, i) => ({ name: `qr33-run-red-${i}`, files: { 'src/index.ts': `export const ${n} = 1;\n`, 'src/audited/index.ts': 'export {};\n' }, reason: /QR-33 term/ })),
     ];
     // QR-33 segmentation green controls: a term stitched across a segment boundary is not a hit. The
     // former G-42 split-term case (term index 11 split by '_') is one of these under the ruling.
-    const t11 = uUnescape(QR33_TERM_ESCAPES[11]);
-    for (const n of [...QR33_BOUNDARY_GREEN, `${t11.slice(0, 4)}_${t11.slice(4)}`]) {
+    // G-42 regression (HoQ b15a2ff5): the former split-term control is red again (qr33RunRed); the
+    // run-check controls below stay green.
+    for (const n of [...QR33_BOUNDARY_GREEN, ...qr33RunGreen()]) {
       const d = join(base, `qr33-seg-green-${n.replace(/[^A-Za-z0-9]/g, '-')}`);
       writeJson(d, 'package.json', GOOD_PKG);
       mkdirSync(join(d, 'src/audited'), { recursive: true });
@@ -622,7 +707,7 @@ export function selfTest() {
     console.error(`rule22 self-test FAILED:\n${fails.join('\n')}`);
     process.exit(1);
   }
-  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + G42_GRAPH_BASE + g42Cases('x').length + QR33_SEG_RED_CASES + 1} known-bad fixtures red, ${QR33_BOUNDARY_GREEN.length + 1 + 1} controls green`);
+  console.log(`rule22 self-test: ${Object.keys(BAD_FIXTURES).length + G42_GRAPH_BASE + g42Cases('x').length + QR33_SEG_RED_CASES + qr33RunRed().length + 1} known-bad fixtures red, ${QR33_BOUNDARY_GREEN.length + qr33RunGreen().length + 1} controls green`);
 }
 
 const here = fileURLToPath(import.meta.url);

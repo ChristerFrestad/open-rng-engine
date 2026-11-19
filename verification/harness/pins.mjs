@@ -25,7 +25,44 @@ export const ARCHIVE_PINS = Object.freeze([
     url: 'https://simul.iro.umontreal.ca/testu01/TestU01-1.2.3.zip',
     sha256: 'bc1d1dd2aea7ed3b3d28eaad2c8ee55913f11ce67aec8fe4f643c1c0d2ed1cac',
   }),
+  // H-5 (HoQ 4c7adda0/f575fe1f): Dieharder and PractRand, so the harness can check their archives too.
+  Object.freeze({
+    tool: 'Dieharder', version: '3.31.1', filename: 'dieharder-3.31.1.tgz', byteSize: 1149780,
+    url: 'https://webhome.phy.duke.edu/~rgb/General/dieharder/dieharder-3.31.1.tgz',
+    sha256: '6cff0ff8394c553549ac7433359ccfc955fb26794260314620dfa5e4cd4b727f',
+  }),
+  Object.freeze({
+    tool: 'PractRand', version: '0.96', filename: 'PractRand_0.96.zip', byteSize: 904832,
+    url: 'https://downloads.sourceforge.net/project/pracrand/PractRand_0.96.zip',
+    sha256: 'e4caf7fda98b2c597bbda3b576753cf5a0f6047aab837c82be370ab798a672e1',
+  }),
 ]);
+
+// H-5: rule 15 commands, exact argv. `RAW_UINT32_FILE` is the placeholder of the frozen text; a runner
+// substitutes one path for it and nothing else. Each command is cross-checked against the frozen text
+// (rule text: "Command: `<argv joined>`"; the PractRand nightly command is the RC command with
+// `-tlmax 34`). TestU01 runs through the pinned driver (HARNESS_FILE_PINS), so it has no argv here.
+export const FILE_PLACEHOLDER = 'RAW_UINT32_FILE';
+export const TOOL_COMMANDS = Object.freeze({
+  'NIST STS': Object.freeze(['./assess', '1000000']),
+  Dieharder: Object.freeze(['dieharder', '-a', '-Y', '0', '-g', '201', '-f', 'RAW_UINT32_FILE']),
+  'PractRand RC': Object.freeze(['RNG_test', 'stdin32', '-tf', '1', '-te', '0', '-tlmin', '10', '-tlmax', '40']),
+  'PractRand nightly': Object.freeze(['RNG_test', 'stdin32', '-tf', '1', '-te', '0', '-tlmin', '10', '-tlmax', '34']),
+});
+
+// A runner's argv must equal the pinned command exactly, with the placeholder replaced by one path.
+export function checkToolCommand(name, argv, commands = TOOL_COMMANDS) {
+  const want = commands[name];
+  if (!want) return [`rule 15: no pinned command for ${name}`];
+  if (!Array.isArray(argv) || argv.length !== want.length) return [`rule 15: ${name} argv length ${Array.isArray(argv) ? argv.length : 'none'} != pinned ${want.length}`];
+  const f = [];
+  want.forEach((w, i) => {
+    const a = argv[i];
+    if (w === FILE_PLACEHOLDER) { if (typeof a !== 'string' || a === '' || a.startsWith('-')) f.push(`rule 15: ${name} argv[${i}] is not a file path`); }
+    else if (a !== w) f.push(`rule 15: ${name} argv[${i}] ${JSON.stringify(a)} != pinned ${JSON.stringify(w)}`);
+  });
+  return f;
+}
 
 // Rule 15: harness-frozen bytes. sts-answers.txt answers the assess prompts of STS 2.1.2 src/utilities.c
 // in call order (see verification/harness/README.md); tu01-driver.c is the TestU01 driver source.
@@ -59,20 +96,24 @@ export function checkHarnessPins(root) {
   return findings;
 }
 
-// The archive pins must equal the frozen rule text and the frozen tool-pins file byte for byte.
-export function checkArchivePinsAgainstFrozen(root) {
+// The archive pins and commands must equal the frozen rule text and the frozen tool-pins file byte for byte.
+// opts (self-test only): expected digests and the pin/command tables, so each check can be proven red on
+// its own (H-3).
+export function checkArchivePinsAgainstFrozen(root, opts = {}) {
+  const ruleSha = opts.ruleSha ?? FROZEN_RULE_SHA256, pinsSha = opts.pinsSha ?? TOOL_PINS_SHA256;
+  const pins = opts.pins ?? ARCHIVE_PINS, commands = opts.commands ?? TOOL_COMMANDS;
   const findings = [];
   const rulePath = join(root, FROZEN_RULE_PATH);
   if (!existsSync(rulePath)) return [`frozen rule missing: ${FROZEN_RULE_PATH}`];
   const ruleBytes = readFileSync(rulePath);
-  if (sha256(ruleBytes) !== FROZEN_RULE_SHA256) findings.push('frozen rule sha256 changed');
+  if (sha256(ruleBytes) !== ruleSha) findings.push('frozen rule sha256 changed');
   const rule = ruleBytes.toString('utf8');
   const pinsPath = join(root, TOOL_PINS_PATH);
   if (!existsSync(pinsPath)) return [...findings, `tool pins missing: ${TOOL_PINS_PATH}`];
   const pinsBytes = readFileSync(pinsPath);
-  if (sha256(pinsBytes) !== TOOL_PINS_SHA256) findings.push('tool-pins-v1.1.json sha256 changed');
+  if (sha256(pinsBytes) !== pinsSha) findings.push('tool-pins-v1.1.json sha256 changed');
   const tools = JSON.parse(pinsBytes.toString('utf8')).tools;
-  for (const a of ARCHIVE_PINS) {
+  for (const a of pins) {
     if (!HEX64.test(a.sha256)) { findings.push(`${a.tool}: pin is not a sha256 literal`); continue; }
     if (!rule.includes('`' + a.filename + '`, sha256 `' + a.sha256 + '`')) {
       findings.push(`rule 15: ${a.tool} pin ${a.filename} ${a.sha256} not in the frozen rule text`);
@@ -83,12 +124,23 @@ export function checkArchivePinsAgainstFrozen(root) {
       findings.push(`${a.tool}: pin differs from tool-pins-v1.1.json`);
     }
   }
+  for (const tool of ['TestU01', 'NIST STS', 'Dieharder', 'PractRand']) {
+    if (!pins.some((a) => a.tool === tool)) findings.push(`rule 15: no archive pin for ${tool} (H-5)`);
+  }
+  for (const name of ['NIST STS', 'Dieharder', 'PractRand RC']) {
+    const c = commands[name];
+    if (!c || !rule.includes('`' + c.join(' ') + '`')) findings.push(`rule 15: ${name} command not in the frozen rule text (H-5)`);
+  }
+  const rc = commands['PractRand RC'], ni = commands['PractRand nightly'];
+  const nightlyOk = rc && ni && rule.includes('`-tlmax 34`') && ni.length === rc.length
+    && ni.every((x, i) => (rc[i] === '40' && rc[i - 1] === '-tlmax' ? x === '34' : x === rc[i]));
+  if (!nightlyOk) findings.push('rule 15: PractRand nightly command is not the RC command with -tlmax 34 (H-5)');
   return findings;
 }
 
 // Rule 17(ii): an archive on disk must match its pin before the harness builds from it.
-export function checkArchiveFile(path, filename) {
-  const a = ARCHIVE_PINS.find((x) => x.filename === filename);
+export function checkArchiveFile(path, filename, pins = ARCHIVE_PINS) {
+  const a = pins.find((x) => x.filename === filename);
   if (!a) return [`no pin for archive ${filename}`];
   if (!existsSync(path)) return [`archive missing: ${path}`];
   const b = readFileSync(path);

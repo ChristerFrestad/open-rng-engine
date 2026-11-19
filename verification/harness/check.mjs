@@ -246,6 +246,7 @@ export function fixtureCases(m, root = ROOT) {
     ['M-153 B12 plain unit on a tuple test', false, () => one(plan({ id: tupleId, unit: F.UNIT_PUBLIC_CALL }))],
     ['M-153 tuple unit on a non-tuple test', false, () => one(plan({ unit: F.UNIT_PUBLIC_CALL_TUPLE }))],
     ['M-153 missing plan for one K id', false, () => F.checkRunPlans(kTests.slice(1).map((t) => ({ id: t.id, n: 1000000000, unit: F.expectedUnit(t), counter: F.COUNTER_PER_PUBLIC_CALL })), kTests)],
+    ...h3Cases(m, root, { withC, tu01Text, plan, F, kTests }),
     // rule 17(i)
     ['17(i) exact counts', true, () => m.counts.checkFirstRunCounts(goodC())],
     ['17(i) STS 187 in one sequence', false, () => withC((c) => c.sts[3].NonOverlappingTemplate.pop())],
@@ -266,6 +267,82 @@ export function fixtureCases(m, root = ROOT) {
     ['17(i) Dieharder sums missing (113 emitted)', false, () => withC((c) => { c.dieharder = dhText({ excluded: ['diehard_opso', 'diehard_oqso', 'diehard_dna'] }); })],
     ['17(i) Dieharder dna twice (115 emitted)', false, () => withC((c) => { c.dieharder = dhText({ excluded: ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_dna', 'diehard_sums'] }); })],
     ['17(i) Dieharder p outside [0,1]', false, () => withC((c) => { c.dieharder = dhText({ badP: true }); })],
+  ];
+}
+
+// H-3 / H-4 / H-5 (HoQ 4c7adda0/f575fe1f): a red fixture for every check whose red direction was unproven.
+// Pin checks run on a scratch copy of the two frozen files; where a digest would mask the check, the
+// fixture passes the tampered file's own digest so only the check under test can see the change.
+function scratchRoot(root, edit) {
+  const d = mkdtempSync(join(tmpdir(), 'harness-h3-'));
+  for (const rel of ['verification/decision-rule-v1.md', 'verification/tool-pins-v1.1.json']) {
+    mkdirSync(dirname(join(d, rel)), { recursive: true });
+    copyFileSync(join(root, rel), join(d, rel));
+  }
+  edit(d);
+  return d;
+}
+function withScratch(root, edit, run) {
+  const d = scratchRoot(root, edit);
+  try { return run(d); } finally { rmSync(d, { recursive: true, force: true }); }
+}
+const RULE = 'verification/decision-rule-v1.md', TPINS = 'verification/tool-pins-v1.1.json';
+function h3Cases(m, root, { withC, tu01Text, plan, F, kTests }) {
+  const P = m.pins;
+  const fileSha = (d, rel) => P.sha256(readFileSync(join(d, rel)));
+  const editText = (d, rel, fn) => writeFileSync(join(d, rel), fn(readFileSync(join(d, rel), 'utf8')));
+  const editRow = (text, i, col, v) => { const l = text.split('\n'); const c = l[i + 1].split('\t'); c[col] = v; l[i + 1] = c.join('\t'); return l.join('\n'); };
+  const badTu = (edit) => withC((c) => { c.bigcrush.raw = edit(c.bigcrush.raw); });
+  const arch = (bytes, pin, filename = 'x.zip') => {
+    const d = mkdtempSync(join(tmpdir(), 'harness-arch-'));
+    try { writeFileSync(join(d, filename), bytes); return P.checkArchiveFile(join(d, filename), filename, [pin]); } finally { rmSync(d, { recursive: true, force: true }); }
+  };
+  const B = Buffer.from('archive bytes');
+  const goodPin = { tool: 'T', version: '1', filename: 'x.zip', byteSize: B.length, url: 'u', sha256: P.sha256(B) };
+  return [
+    // pins (H-3 Q23-Q26, Q28-Q30)
+    ['H-3 Q23 frozen rule changed by one trailing newline (only its digest sees it)', false, () => withScratch(root, (d) => editText(d, RULE, (t) => t + '\n'), (d) => P.checkArchivePinsAgainstFrozen(d))],
+    ['H-3 Q24 tool-pins changed by trailing whitespace (only its digest sees it)', false, () => withScratch(root, (d) => editText(d, TPINS, (t) => t + ' '), (d) => P.checkArchivePinsAgainstFrozen(d))],
+    ['H-3 Q25 rule text loses a pin (digest re-pinned to the tampered text)', false, () => withScratch(root, (d) => editText(d, RULE, (t) => t.replace('`dieharder-3.31.1.tgz`, sha256 `6cff', '`dieharder-3.31.1.tgz`, sha256 `7cff')), (d) => P.checkArchivePinsAgainstFrozen(d, { ruleSha: fileSha(d, RULE) }))],
+    ['H-3 Q26 tool-pins byte_size edited (digest re-pinned)', false, () => withScratch(root, (d) => editText(d, TPINS, (t) => t.replace('"byte_size": 904832', '"byte_size": 904833').replace('"byte_size":904832', '"byte_size":904833')), (d) => P.checkArchivePinsAgainstFrozen(d, { pinsSha: fileSha(d, TPINS) }))],
+    ['H-3 Q26 tool-pins url edited (digest re-pinned)', false, () => withScratch(root, (d) => editText(d, TPINS, (t) => t.split('https://downloads.sourceforge.net/project/pracrand/PractRand_0.96.zip').join('https://example.invalid/PractRand_0.96.zip')), (d) => P.checkArchivePinsAgainstFrozen(d, { pinsSha: fileSha(d, TPINS) }))],
+    ['H-3 scratch copy of the real files is green with the real digests', true, () => withScratch(root, () => {}, (d) => P.checkArchivePinsAgainstFrozen(d))],
+    ['H-3 Q28 checkArchiveFile: matching bytes and pin are green', true, () => arch(B, goodPin)],
+    ['H-3 Q28 checkArchiveFile: other bytes are red', false, () => arch(Buffer.from('archive bytez'), goodPin)],
+    ['H-3 Q29 checkArchiveFile: right sha, wrong pinned size is red', false, () => arch(B, { ...goodPin, byteSize: B.length + 1 })],
+    ['H-3 Q30 an upper-case sha256 pin is not a sha256 literal (rule text and tool-pins upper-cased too, digests re-pinned)', false, () => {
+      const lo = P.ARCHIVE_PINS[0].sha256, up = lo.toUpperCase();
+      return withScratch(root, (d) => { editText(d, RULE, (t) => t.split(lo).join(up)); editText(d, TPINS, (t) => t.split(lo).join(up)); },
+        (d) => P.checkArchivePinsAgainstFrozen(d, { ruleSha: fileSha(d, RULE), pinsSha: fileSha(d, TPINS), pins: P.ARCHIVE_PINS.map((a, i) => (i === 0 ? { ...a, sha256: up } : a)) }));
+    }],
+    // H-5
+    ['H-5 Dieharder and PractRand archive pins exist and match the frozen text', true, () => ['Dieharder', 'PractRand'].flatMap((t) => need(P.ARCHIVE_PINS.some((a) => a.tool === t), `no ${t} pin`))],
+    ['H-5 a missing PractRand pin is red', false, () => P.checkArchivePinsAgainstFrozen(root, { pins: P.ARCHIVE_PINS.filter((a) => a.tool !== 'PractRand') })],
+    ['H-5 Dieharder command with -g 200 is red against the frozen text', false, () => P.checkArchivePinsAgainstFrozen(root, { commands: { ...P.TOOL_COMMANDS, Dieharder: ['dieharder', '-a', '-Y', '0', '-g', '200', '-f', 'RAW_UINT32_FILE'] } })],
+    ['H-5 PractRand nightly -tlmax 35 is red', false, () => P.checkArchivePinsAgainstFrozen(root, { commands: { ...P.TOOL_COMMANDS, 'PractRand nightly': [...P.TOOL_COMMANDS['PractRand RC'].slice(0, -1), '35'] } })],
+    ['H-5 PractRand RC -tlmax 41 is red', false, () => P.checkArchivePinsAgainstFrozen(root, { commands: { ...P.TOOL_COMMANDS, 'PractRand RC': [...P.TOOL_COMMANDS['PractRand RC'].slice(0, -1), '41'] } })],
+    ['H-5 runner argv: pinned Dieharder command with a file path is green', true, () => P.checkToolCommand('Dieharder', ['dieharder', '-a', '-Y', '0', '-g', '201', '-f', '/data/raw.u32'])],
+    ['H-5 runner argv: Dieharder without -Y 0 is red', false, () => P.checkToolCommand('Dieharder', ['dieharder', '-a', '-g', '201', '-f', '/data/raw.u32'])],
+    ['H-5 runner argv: Dieharder file replaced by an option is red', false, () => P.checkToolCommand('Dieharder', ['dieharder', '-a', '-Y', '0', '-g', '201', '-f', '-k'])],
+    ['H-5 runner argv: PractRand nightly at -tlmax 40 is red', false, () => P.checkToolCommand('PractRand nightly', [...P.TOOL_COMMANDS['PractRand RC']])],
+    ['H-5 runner argv: STS ./assess 100000 is red', false, () => P.checkToolCommand('NIST STS', ['./assess', '100000'])],
+    // counts (H-3 Q01, Q08, Q09, Q13, Q18) and the tu01 parser (H-4)
+    ['H-3 Q01 STS p = 1.0000001 is red', false, () => withC((c) => { c.sts[0].Frequency[0] = 1.0000001; })],
+    ['H-3 Q01 BigCrush p = 1.0000001 is red', false, () => badTu((t) => editRow(t, 3, 4, '1.0000001'))],
+    ['H-3 p = 1 and p = 0 are in range (STS)', true, () => withC((c) => { c.sts[0].Frequency[0] = 1; c.sts[1].Frequency[0] = 0; })],
+    ['H-3 Q08 BigCrush rows with indices 0..159 but row 5 says 6 (names in order)', false, () => badTu((t) => editRow(t, 5, 2, '6'))],
+    ['H-3 Q08 BigCrush row stream label u32 inside the raw file', false, () => badTu((t) => editRow(t, 9, 1, 'u32'))],
+    ['H-3 Q09 BigCrush header ntests 159 with 160 rows', false, () => withC((c) => { c.bigcrush.raw = tu01Text('raw', 160, { head: 159 }); })],
+    ['H-3 Q13 BigCrush row with 6 columns', false, () => badTu((t) => editRow(t, 2, 4, '0.5\textra'))],
+    ['H-3 Q13 BigCrush row with 4 columns', false, () => badTu((t) => { const l = t.split('\n'); l[3] = l[3].split('\t').slice(0, 4).join('\t'); return l.join('\n'); })],
+    ['H-4 BigCrush empty p field', false, () => badTu((t) => editRow(t, 4, 4, ''))],
+    ['H-4 BigCrush blank p field', false, () => badTu((t) => editRow(t, 4, 4, ' '))],
+    ['H-4 BigCrush p 0x1', false, () => badTu((t) => editRow(t, 4, 4, '0x1'))],
+    ['H-4 BigCrush p +0.5', false, () => badTu((t) => editRow(t, 4, 4, '+0.5'))],
+    ['H-4 BigCrush empty index field', false, () => badTu((t) => editRow(t, 0, 2, ''))],
+    ['H-4 BigCrush index 0x5', false, () => badTu((t) => editRow(t, 5, 2, '0x5'))],
+    ['H-4 BigCrush p in %.17g exponent form is accepted', true, () => (m.counts.parseTu01(editRow(tu01Text('raw', 3), 1, 4, '1.0000000000000001e-05')).error ? ['rejected'] : [])],
+    ['H-3 Q18 one K id planned twice (all 157 present)', false, () => F.checkRunPlans([...kTests, kTests[0]].map((t) => ({ id: t.id, n: 1000000000, unit: F.expectedUnit(t), counter: F.COUNTER_PER_PUBLIC_CALL })), kTests)],
   ];
 }
 
@@ -294,6 +371,16 @@ function dfFixtureCases(D, kTests) {
     return [...need(JSON.stringify(r.open) === JSON.stringify(want), 'open set differs'), ...need(r.ready === (want.length === 0), 'ready flag wrong'),
       ...need(r.dfNull === kTests.filter((t) => t.df === null).length, 'df-null count wrong')];
   }]);
+  // D16 / D17 (HoQ b15a2ff5): no hidden cap on the df-null count; the k-tests digest check is exercised.
+  cases.push(['df D16: a K list with 81 df-null entries (5 synthetic extra) has all 72 non-ruled open', true, () => {
+    const extra = Array.from({ length: 5 }, (_, i) => ({ id: `synthetic/df-null/${i}`, primitive: 'randomInt', df: null }));
+    const ks = [...kTests, ...extra];
+    const want = ks.filter((t) => t.df === null && !RULED_IDS.includes(t.id)).map((t) => t.id);
+    const r = D.dfReadiness(ks);
+    return [...need(r.dfNull === ks.filter((t) => t.df === null).length && r.dfNull > 76, `dfNull ${r.dfNull}`),
+      ...need(JSON.stringify(r.open) === JSON.stringify(want), `open ${r.open.length} != ${want.length}`), ...need(r.fixed === RULED_IDS.length, `fixed ${r.fixed}`)];
+  }]);
+  cases.push(['df D17: a wrong k-tests sha256 is red', false, () => D.checkDfTable(kTests, { kTestsSha256: 'f'.repeat(64) })]);
   cases.push(['df: readiness with every df-null entry fixed would be READY', true, () => {
     const ks = kTests.map((t) => (t.df === null && !RULED_IDS.includes(t.id) ? { ...t, df: 1 } : t));
     return need(D.dfReadiness(ks).ready === true, 'not ready');
@@ -437,6 +524,28 @@ export const MUTANTS = [
   ['MU-58 EG-3 guard order not checked', 'code', 'evidence-entry.mjs', [["  if (g.index > first) return 'calls the entry guard only after starting the run';", '']]],
   ['MU-59 EG-3 collector import not a run start', 'code', 'evidence-entry.mjs', [['const uses = [START.exec(s), IMPORT_COLLECTOR.exec(s)]', 'const uses = [START.exec(s)]']]],
   ['MU-60 startEvidenceRun skips the guard', 'code', 'evidence-entry.mjs', [['  assertEvidenceRunReady(root);\n  return fn();', '  return fn();']]],
+  // H-3 / H-4 / H-5 (HoQ 4c7adda0/f575fe1f), HoQ's survivor numbering in the label.
+  ['MU-61 (Q01) isP upper bound 1.0000001', 'code', 'counts.mjs', [['x >= 0 && x <= 1;', 'x >= 0 && x <= 1.0000001;']]],
+  ['MU-62 (Q08) BigCrush row-order check off', 'code', 'counts.mjs', [["if (row.battery !== 'BigCrush' || row.stream !== s || row.index !== i) f.push", 'if (false) f.push']]],
+  ['MU-63 (Q09) header ntests check off', 'code', 'counts.mjs', [['if (Number(r.head.ntests) !== BIGCRUSH_PER_STREAM) f.push', 'if (false) f.push']]],
+  ['MU-64 (Q13) tu01 row width !== 5 -> < 5', 'code', 'counts.mjs', [['if (c.length !== 5) return', 'if (c.length < 5) return']]],
+  ['MU-65 (Q18) duplicate-plan check off', 'code', 'n-floor.mjs', [['if (p && seen.has(p.id)) findings.push(', 'if (false) findings.push(']]],
+  ['MU-66 (Q23) frozen-rule sha check off', 'code', 'pins.mjs', [["if (sha256(ruleBytes) !== ruleSha) findings.push('frozen rule sha256 changed');", '']]],
+  ['MU-67 (Q24) tool-pins sha check off', 'code', 'pins.mjs', [["if (sha256(pinsBytes) !== pinsSha) findings.push('tool-pins-v1.1.json sha256 changed');", '']]],
+  ['MU-68 (Q25) rule-text cross-check off', 'code', 'pins.mjs', [["if (!rule.includes('`' + a.filename + '`, sha256 `' + a.sha256 + '`')) {", 'if (false) {']]],
+  ['MU-69 (Q26) tool-pins field compare off', 'code', 'pins.mjs', [['if (t.sha256 !== a.sha256 || t.url !== a.url || t.byte_size !== a.byteSize || t.version !== a.version) {', 'if (false) {']]],
+  ['MU-70 (Q28) checkArchiveFile always green', 'code', 'pins.mjs', [['  if (!a) return [`no pin for archive ${filename}`];', '  return [];']]],
+  ['MU-71 (Q29) archive size check off', 'code', 'pins.mjs', [['if (b.length !== a.byteSize) findings.push(', 'if (false) findings.push(']]],
+  ['MU-72 (Q30) HEX64 accepts upper case', 'code', 'pins.mjs', [['const HEX64 = /^[0-9a-f]{64}$/;', 'const HEX64 = /^[0-9a-fA-F]{64}$/;']]],
+  ['MU-73 (H-4) tu01 p parsed with Number()', 'code', 'counts.mjs', [['    if (!TU01_P.test(c[4])) return', '    if (false) return']]],
+  ['MU-74 (H-4) tu01 index parsed with Number()', 'code', 'counts.mjs', [['    if (!TU01_INDEX.test(c[2])) return', '    if (false) return']]],
+  ['MU-75 (H-5) PractRand pin dropped', 'code', 'pins.mjs', [["    tool: 'PractRand', version: '0.96'", "    tool: 'PractRandX', version: '0.96'"]]],
+  ['MU-76 (H-5) command cross-check off', 'code', 'pins.mjs', [["if (!c || !rule.includes('`' + c.join(' ') + '`')) findings.push", 'if (false) findings.push']]],
+  ['MU-77 (H-5) nightly command check off', 'code', 'pins.mjs', [["  if (!nightlyOk) findings.push(", '  if (false) findings.push(']]],
+  ['MU-78 (H-5) runner argv placeholder accepts an option', 'code', 'pins.mjs', [["a === '' || a.startsWith('-')", "a === ''"]]],
+  ['MU-79 (H-5) runner argv value compare off', 'code', 'pins.mjs', [['    else if (a !== w) f.push(', '    else if (false) f.push(']]],
+  ['MU-80 (D16) hidden df-null cap of 76', 'code', 'df-table.mjs', [['const nullIds = kTests.filter((t) => t.df === null).map((t) => t.id);', 'const nullIds = kTests.filter((t) => t.df === null).map((t) => t.id).slice(0, 76);']]],
+  ['MU-81 (D17) k-tests sha256 check off', 'code', 'df-table.mjs', [['if (kTestsSha256 !== undefined && kTestsSha256 !== K_TESTS_SHA256) f.push(', 'if (false) f.push(']]],
   ['MU-23 p-value range check removed', 'code', 'counts.mjs', [['return typeof x === \'number\' && Number.isFinite(x) && x >= 0 && x <= 1;', 'return true;']]],
 ];
 

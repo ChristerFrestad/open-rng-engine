@@ -39,7 +39,7 @@ test('rule 15 / 17(ii): archive pins equal the frozen rule text', () => {
   const rule = readFileSync('verification/decision-rule-v1.md', 'utf8');
   assert.ok(rule.includes('`sts-2_1_2.zip`, sha256 `' + STS_ZIP_SHA + '`'));
   assert.ok(rule.includes('`TestU01-1.2.3.zip`, sha256 `' + TU01_ZIP_SHA + '`'));
-  assert.deepEqual(pins.ARCHIVE_PINS.map((a) => a.sha256), [STS_ZIP_SHA, TU01_ZIP_SHA]);
+  assert.deepEqual(pins.ARCHIVE_PINS.map((a) => a.sha256), [STS_ZIP_SHA, TU01_ZIP_SHA, '6cff0ff8394c553549ac7433359ccfc955fb26794260314620dfa5e4cd4b727f', 'e4caf7fda98b2c597bbda3b576753cf5a0f6047aab837c82be370ab798a672e1']);
   assert.deepEqual(pins.checkArchivePinsAgainstFrozen('.'), []);
 });
 
@@ -76,10 +76,10 @@ test('rule 17(i): expected counts are the frozen numbers', () => {
   assert.deepEqual([...counts.DIEHARDER_EXCLUDED], ['diehard_opso', 'diehard_oqso', 'diehard_dna', 'diehard_sums']);
 });
 
-test('self-test: every fixture as expected, all 60 mutants killed, none PATCH-FAILED', async () => {
+test('self-test: every fixture as expected, all 81 mutants killed, none PATCH-FAILED', async () => {
   const r = await selfTest();
   assert.deepEqual(r.fails, []);
-  assert.equal(r.mutants.length, 60);
+  assert.equal(r.mutants.length, 81);
   assert.ok(r.mutants.every((m) => m.status === 'KILLED'));
 });
 
@@ -91,7 +91,9 @@ test('self-test: a mutant whose patch does not apply is PATCH-FAILED, not killed
 test('check:ph0 wiring: b8 step runs the harness checks on this tree', () => {
   const out = execFileSync('node', ['tools/ci/b8-dependencies.mjs'], { encoding: 'utf8' });
   assert.match(out, /harness preconditions: 0 finding\(s\)/);
-  assert.match(out, /harness readiness: NOT-READY \(rule 8 df fixed 9 of 76 df-null entries, 67 open;/);
+  // HoQ b15a2ff5: the numbers are computed from k-tests and the ruled list, not hard-coded.
+  const { dfNull, fixed, open } = expectedDfCounts();
+  assert.ok(out.includes(`harness readiness: NOT-READY (rule 8 df fixed ${fixed} of ${dfNull} df-null entries, ${open} open;`), out);
   assert.match(readFileSync('package.json', 'utf8'), /node tools\/ci\/b8-dependencies\.mjs && node tools\/ci\/b8-dependencies\.mjs --self-test/);
 });
 
@@ -99,6 +101,16 @@ test('no evidence data in the harness directory', () => {
   const files = execFileSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'verification/harness'], { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
   assert.deepEqual(files, ['verification/harness/README.md', 'verification/harness/check.mjs', 'verification/harness/collector.mjs', 'verification/harness/counts.mjs', 'verification/harness/df-table.mjs', 'verification/harness/evidence-entry.mjs', 'verification/harness/n-floor.mjs', 'verification/harness/pins.mjs', 'verification/harness/sts-answers.txt', 'verification/harness/tu01-driver.c']);
 });
+
+// The 9 ids HoQ ruled (b15a2ff5), held here on their own so the counts are computed independently of DF_TABLE.
+const RULED = ['shuffle/adjacency/n-52-i-0', 'shuffle/adjacency/n-52-i-1', 'shuffle/adjacency/n-52-i-25', 'shuffle/adjacency/n-52-i-50',
+  'randomInt/chi2/min-0-max-2147483649', 'randomInt/chi2/min-0-max-4294967296', 'randomInt/chi2/min-0-max-4294967297',
+  'randomInt/chi2/min-0-max-281474976710656', 'shuffle/chi2/lehmer-52'];
+function expectedDfCounts() {
+  const nulls = loadKTests().filter((t) => t.df === null).map((t) => t.id);
+  const fixed = nulls.filter((id) => RULED.includes(id)).length;
+  return { dfNull: nulls.length, fixed, open: nulls.length - fixed };
+}
 
 // Digest and df literals held here on their own (not imported from the table).
 const DF_DIGEST = '1ed710bfb77b8e2a6736407386e60b70401398e88603b97b172d8df1d3817e63';
@@ -109,20 +121,23 @@ test('rule 8 df table: ruled values, digest literal, K-list sha', () => {
   assert.equal(createHash('sha256').update(df.dfTableCanonical()).digest('hex'), DF_DIGEST);
   for (const i of [0, 1, 25, 50]) assert.equal(df.DF_TABLE[`shuffle/adjacency/n-52-i-${i}`], 2651);
   for (const id of ['randomInt/chi2/min-0-max-2147483649', 'randomInt/chi2/min-0-max-4294967296', 'randomInt/chi2/min-0-max-4294967297', 'randomInt/chi2/min-0-max-281474976710656', 'shuffle/chi2/lehmer-52']) assert.equal(df.DF_TABLE[id], 999);
-  assert.equal(Object.keys(df.DF_TABLE).length, 9);
+  assert.deepEqual(Object.keys(df.DF_TABLE).sort(), [...RULED].sort());
   assert.deepEqual(df.checkDfTable(loadKTests(), { kTestsSha256: kSha }), []);
 });
 
 test('rule 8 readiness: open set computed from k-tests; evidence-run entry refuses; PH0 does not fail', () => {
   const k = loadKTests();
   const nulls = k.filter((t) => t.df === null);
-  assert.equal(nulls.length, 76);
+  const c = expectedDfCounts();
+  assert.equal(c.fixed, RULED.length);
   const r = harnessReadiness();
   assert.equal(r.ready, false);
+  assert.equal(r.df.dfNull, c.dfNull);
   assert.equal(r.df.dfNull, nulls.length);
-  assert.equal(r.df.open.length, nulls.length - 9);
+  assert.equal(r.df.open.length, c.open);
+  assert.deepEqual(r.df.open, nulls.map((t) => t.id).filter((id) => !RULED.includes(id)));
   assert.ok(r.df.open.every((id) => !(id in df.DF_TABLE)));
-  assert.throws(() => assertEvidenceRunReady(), /harness NOT-READY: rule 8 df open for 67 of 76 df-null entries/);
+  assert.throws(() => assertEvidenceRunReady(), (e) => e.message.includes(`harness NOT-READY: rule 8 df open for ${c.open} of ${c.dfNull} df-null entries`));
 });
 
 test('rule 8 bins: exact BigInt probabilities, unequal for non-divisible r, Lehmer rank in BigInt', () => {
@@ -166,4 +181,28 @@ test('EG-3: no unguarded evidence runner in the tree; the contract and startEvid
   assert.match(String(runnerContractText(`spawnSync('${'die' + 'harder'}', ['-a'])`)), /without the entry guard/);
   assert.equal(runnerContractText(`assertEvidenceRunReady();\nspawnSync('${'die' + 'harder'}', ['-a'])`), null);
   assert.throws(() => startEvidenceRun(() => 1), /harness NOT-READY/);
+});
+
+// H-5 (HoQ 4c7adda0/f575fe1f): Dieharder and PractRand archive pins and the rule 15 commands, as literals
+// held here on their own.
+test('H-5 rule 15: Dieharder and PractRand archive pins and pinned commands', () => {
+  const by = Object.fromEntries(pins.ARCHIVE_PINS.map((a) => [a.filename, [a.byteSize, a.sha256]]));
+  assert.deepEqual(by['dieharder-3.31.1.tgz'], [1149780, '6cff0ff8394c553549ac7433359ccfc955fb26794260314620dfa5e4cd4b727f']);
+  assert.deepEqual(by['PractRand_0.96.zip'], [904832, 'e4caf7fda98b2c597bbda3b576753cf5a0f6047aab837c82be370ab798a672e1']);
+  assert.equal(pins.TOOL_COMMANDS.Dieharder.join(' '), 'dieharder -a -Y 0 -g 201 -f RAW_UINT32_FILE');
+  assert.equal(pins.TOOL_COMMANDS['PractRand RC'].join(' '), 'RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 40');
+  assert.equal(pins.TOOL_COMMANDS['PractRand nightly'].join(' '), 'RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 34');
+  assert.equal(pins.TOOL_COMMANDS['NIST STS'].join(' '), './assess 1000000');
+  assert.deepEqual(pins.checkArchivePinsAgainstFrozen(process.cwd()), []);
+});
+
+test('H-4 tu01 parser: empty, blank, hex and signed fields are malformed', () => {
+  const c = counts;
+  const head = '# tu01-driver v1\tbattery=BigCrush\tstream=raw\tntests=1\twords=0\n';
+  for (const [idx, p] of [['0', ''], ['0', ' '], ['0', '0x1'], ['', '0.5'], ['0x0', '0.5'], ['0', '+0.5'], ['0', '-0'], [' 0', '0.5'], ['0', 'Infinity']]) {
+    assert.match(String(c.parseTu01(`${head}BigCrush\traw\t${idx}\tname\t${p}\n`).error), /malformed/, `${idx}/${p}`);
+  }
+  for (const p of ['0', '1', '0.5', '1.0000000000000001e-05', '2.2250738585072014e-308']) {
+    assert.equal(c.parseTu01(`${head}BigCrush\traw\t0\tname\t${p}\n`).error, undefined, p);
+  }
 });

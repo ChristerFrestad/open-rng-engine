@@ -9,6 +9,7 @@ Checked by `check:ph0` through the `tools/ci/b8-dependencies.mjs` step (package.
 | 15, 17(ii) | STS 2.1.2 answer file | `sts-answers.txt` (sha256 `f71ec11d82f83311666af9dc05707227b736f69d1ab768a5448c0ffcfb666383`) | pinned |
 | 15, 17(ii) | TestU01 1.2.3 driver | `tu01-driver.c` (sha256 `5fa75bdd52a49c6fb812f511d97f40f7f0367c230f6a88408ad5ec07dc997c88`) | pinned |
 | 15, 17(ii) | archives `sts-2_1_2.zip`, `TestU01-1.2.3.zip` | `pins.mjs`, cross-checked against the frozen text and `tool-pins-v1.1.json` | pinned; re-fetched 2026-11-18 22:55 CET, sha256 unchanged |
+| 15, 17(ii) (H-5) | archives `dieharder-3.31.1.tgz`, `PractRand_0.96.zip`; commands `./assess 1000000`, `dieharder -a -Y 0 -g 201 -f RAW_UINT32_FILE`, `RNG_test stdin32 -tf 1 -te 0 -tlmin 10 -tlmax 40` (RC) / `-tlmax 34` (nightly) | `pins.mjs` `ARCHIVE_PINS`, `TOOL_COMMANDS`, cross-checked against the frozen text and `tool-pins-v1.1.json`; `checkToolCommand(name, argv)` is the exact-argv check for a runner | pinned (batch E) |
 | 8, 15 (M-153) | refuse n < 10^9 and non-public-call units | `n-floor.mjs` | built |
 | 17(i) | exact counts 188 / 2 x 160 / 110 (114 emitted) | `counts.mjs` | built (synthetic fixtures only) |
 
@@ -52,3 +53,5 @@ Two separate checks:
   - No duplicated STS sequence.
   - Both lists are derived from source, not from a run (ANTATT until the first harness run).
 - **EG-3 (`evidence-entry.mjs`).** No runner exists yet. check:ph0 enforces the contract: any source file outside `test/` that spawns dieharder, tu01-driver, STS assess or PractRand RNG_test, or imports the collector, must call `assertEvidenceRunReady(` (or use `startEvidenceRun(fn)`) before the first such use.
+
+- **Batch E (HoQ 4c7adda0/f575fe1f H-3, H-4, H-5; b15a2ff5 D16, D17).** Every check HoQ found unproven now has a red fixture and a mutant: p = 1 + ε, BigCrush row order and header ntests, tu01 row width, duplicate plan, frozen-rule and tool-pins digests, rule-text cross-check and tool-pins field compare (each with the tampered file's own digest, so only the check under test sees it), checkArchiveFile and the archive size, upper-case hex, a df-null list over 76 (no hidden cap) and a wrong k-tests sha. The tu01 parser rejects empty, blank, hex, signed and non-decimal index or p fields as malformed (H-4). Self-test 140 fixtures, 81/81 mutants.

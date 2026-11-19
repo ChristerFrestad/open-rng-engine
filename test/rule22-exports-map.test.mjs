@@ -39,7 +39,7 @@ test('G-42: tools/qr33-allow.json is empty and its sha256 is pinned as a literal
 test('rule 22: --self-test is green', () => {
   const r = spawnSync(process.execPath, [TOOL, '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /33 known-bad fixtures red, 10 controls green/);
+  assert.match(r.stdout, /48 known-bad fixtures red, 12 controls green/);
 });
 
 for (const name of Object.keys(BAD_FIXTURES)) {
