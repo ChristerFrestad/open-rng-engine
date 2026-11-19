@@ -395,3 +395,54 @@ Expectations, which are not rulings:
 - K′ = 157, the per-test threshold 6.369×10⁻⁵, the hard FAIL at p < 10⁻¹⁰, n = 10⁹ and the rule total
   0.00895 + 0.0005 = 0.00945 are unchanged.
 - No code changes. df-table.mjs is unchanged.
+
+
+## 7. Delta H (appended 2026-11-19; earlier sections unchanged): A6 calibration results, NIT and cite refresh, report limitations
+
+### 7.1 Calibration (verification on the labkit reference stream; NOT evidence; the evidence gate stays CLOSED)
+
+- Adapter `labkit-ref/aes-256-ctr/v1` (`verification/labkit/aes-ctr-ref.mjs`, sha256 ae7a25d3d2a2529c746a6660af65efb816425786eb92cdcf546c8b793d0cc956), key 4e93c44f26d655731512adfe11534a18a0c25ec729259b092fdbb2228133f737, IV = BE32(stream) ‖ BE32(rep) ‖ 0^64, stream = entry index + 1, rep = 0..999.
+- Harness `verification/calibration/` (laws.mjs 10b43729…, wave1-entries.mjs 5833d964…, wave1-calibrate.mjs 6e9690b4…). Rule: R = 1000 per entry, ≥ 10^6 outcomes per replicate, Pearson χ² over the §6.1-lumped exact law at M_cal, KS of the 1000 p-values against U(0,1) at α = 0.001 (KS MDD D_crit = 0.0617), flags at p < 0.01 required in [2, 22]. Duplicates use [0,54) at b = 8448.
+- Run: one detached resumable invocation, 2026-11-19T03:31:52.889Z UTC end, node v24.22.1, OpenSSL 3.5.9, 2647 s. An earlier non-resumable invocation was stopped before any result was read (replaced by the resumable runner; not result selection). Results file `verification/calibration/wave1-results.json` (per-entry p-value digests included).
+- **Outcome: 26/26 PASS, 0 FAIL.** Smallest KS p 0.07291 (entry 18), flags range 5–18, max D 0.04053 < 0.0617.
+
+| # | entry | stream | M_cal | cells | outcomes per replication | KS D | KS p | flags@0.01 | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | `randomInt/coupon-collector/min-0-max-2` | 1 | 500000 | 17 | 1,497,297–1,503,102 (mean 1,500,038.3; ≥ 1,000,000) | 0.03402 | 0.194 | 9 | PASS |
+| 1 | `randomInt/coupon-collector/min-1-max-7` | 2 | 166667 | 54 | 2,443,277–2,458,182 (mean 2,450,078.8; ≥ 1,000,002) | 0.02681 | 0.4635 | 7 | PASS |
+| 2 | `randomInt/coupon-collector/min-1-max-38` | 3 | 27028 | 246 | 4,177,106–4,227,602 (mean 4,201,731.1; ≥ 1,000,036) | 0.02647 | 0.4799 | 12 | PASS |
+| 3 | `randomInt/coupon-collector/min-1-max-53` | 4 | 19231 | 308 | 4,509,623–4,564,267 (mean 4,538,177.7; ≥ 1,000,012) | 0.01962 | 0.8325 | 7 | PASS |
+| 4 | `randomInt/coupon-collector/min-0-max-100` | 5 | 10000 | 438 | 5,147,854–5,227,082 (mean 5,187,168.4; ≥ 1,000,000) | 0.02572 | 0.5173 | 5 | PASS |
+| 5 | `randomInt/coupon-collector/min-0-max-2147483649` | 6 | 333334 | 27 | 1,828,641–1,840,012 (mean 1,833,259.8; ≥ 1,000,002) | 0.01896 | 0.8618 | 18 | PASS |
+| 6 | `randomInt/coupon-collector/min-0-max-4294967296` | 7 | 15625 | 349 | 4,710,915–4,775,506 (mean 4,743,954.8; ≥ 1,000,000) | 0.03263 | 0.2335 | 14 | PASS |
+| 7 | `randomInt/coupon-collector/min-0-max-38` | 8 | 26316 | 251 | 4,203,166–4,253,191 (mean 4,227,478.2; ≥ 1,000,008) | 0.03442 | 0.1834 | 10 | PASS |
+| 8 | `randomInt/coupon-collector/min-0-max-54` | 9 | 18519 | 315 | 4,546,864–4,606,300 (mean 4,575,462.7; ≥ 1,000,026) | 0.0269 | 0.4595 | 12 | PASS |
+| 9 | `randomInt/coupon-collector/min-0-max-4294967297` | 10 | 12488 | 1115 | 56,066,294–56,690,171 (mean 56,364,038.7; ≥ 8,004,808) | 0.01804 | 0.8982 | 12 | PASS |
+| 10 | `randomInt/coupon-collector/min-0-max-281474976710656` | 11 | 15625 | 349 | 4,714,430–4,776,517 (mean 4,744,146.3; ≥ 1,000,000) | 0.02119 | 0.7559 | 11 | PASS |
+| 11 | `shuffle/coupon-collector/lehmer-52` | 12 | 19231 | 308 | 4,509,359–4,567,038 (mean 4,537,531.7; ≥ 1,000,012) | 0.01482 | 0.9798 | 14 | PASS |
+| 12 | `randomInt/duplicates/min-0-max-2` | 13 | 200 | 12 | 16,384,000 (fixed) | 0.02831 | 0.3945 | 12 | PASS |
+| 13 | `randomInt/duplicates/min-1-max-7` | 14 | 200 | 10 | 6,553,600 (fixed) | 0.02018 | 0.8063 | 11 | PASS |
+| 14 | `randomInt/duplicates/min-1-max-38` | 15 | 400 | 10 | 6,553,600 (fixed) | 0.02275 | 0.6738 | 9 | PASS |
+| 15 | `randomInt/duplicates/min-1-max-53` | 16 | 400 | 10 | 13,107,200 (fixed) | 0.03481 | 0.1737 | 10 | PASS |
+| 16 | `randomInt/duplicates/min-0-max-100` | 17 | 200 | 12 | 2,457,600 (fixed) | 0.02438 | 0.587 | 11 | PASS |
+| 17 | `randomInt/duplicates/min-0-max-2147483649` | 18 | 200 | 10 | 10,649,600 (fixed) | 0.01446 | 0.9843 | 14 | PASS |
+| 18 | `randomInt/duplicates/min-0-max-4294967296` | 19 | 245 | 12 | 1,003,520 (fixed) | 0.04053 | 0.07291 | 8 | PASS |
+| 19 | `randomInt/duplicates/min-0-max-38` | 20 | 400 | 10 | 6,553,600 (fixed) | 0.02739 | 0.4362 | 10 | PASS |
+| 20 | `randomInt/duplicates/min-0-max-54` | 21 | 400 | 10 | 13,516,800 (fixed) | 0.02671 | 0.4686 | 9 | PASS |
+| 21 | `randomInt/duplicates/min-0-max-4294967297` | 22 | 200 | 10 | 1,638,400 (fixed) | 0.02698 | 0.4554 | 13 | PASS |
+| 22 | `randomInt/duplicates/min-0-max-281474976710656` | 23 | 245 | 12 | 1,003,520 (fixed) | 0.03376 | 0.2009 | 12 | PASS |
+| 23 | `shuffle/duplicates/lehmer-52` | 24 | 245 | 12 | 1,003,520 (fixed) | 0.02005 | 0.8125 | 13 | PASS |
+| 24 | `shuffle/adjacency-mod4/n-52` | 25 | 1000000 | 27 | 1,000,000 (fixed) | 0.03569 | 0.1533 | 6 | PASS |
+| 25 | `shuffle/adjacency-div4/n-52` | 26 | 1000000 | 14 | 1,000,000 (fixed) | 0.03498 | 0.1696 | 12 | PASS |
+
+**Outcomes consumed (CTO check 04:37).** One outcome is counted as in HoQ's verified consumption column (coverage report 5f7f4ad7 (e): M × b × u randomInt outcomes, e.g. [0,2) 12208 × 4096 × 20 = 1,000,079,360); A6 reads "at a reduced n of 10^6 outcomes or more". Duplicates consume M_cal × b × u exactly (u = 20, 8, 3 and 13 for [0,2), [1,7), [0,100) and [0,2^31+1), so 200 blocks give 16,384,000, 6,553,600, 2,457,600 and 10,649,600; the smallest are [0,2^32), [0,2^48) and Lehmer at 245 × 4096 = 1,003,520). Adjacency consumes 10^6 shuffles. Coupon consumption is random (≥ M_cal × d); min/max/mean come from a recount of the same 1000 replications whose p-value digests equal the original run's. No entry is below 10^6, so none was re-run and none is superseded. `verification/calibration/wave1-outcomes.mjs` writes these fields into the results file.
+
+### 7.2 NIT and cite refresh (no ruling changes)
+
+- §6.2 duplicates F row (w1 config, b 4096): min E shown as 6.55 (read as "≥ 6.55") is exactly **6.545** (rounded up in the table).
+- The CPO-R114 cite in §6 (DECISIONS.md "85a51013…") now refers to DECISIONS.md at sha256 **b9f2ecdab5f3fec7fc26d9600e9c8ec367507f6cbec1bfe8bbe3a73a3ab5e98d** (current, after the λ erratum).
+
+### 7.3 Report limitations (to be named verbatim in the evidence report)
+
+- **A-1 (adjacency mod-4 and div-4), CPO wording:** "tests clustering of equal labels; does not test label-to-label transition preference."
+- **G-52 (all wave-1 reductions):** the reductions use only leading bits or cards, so they are blind to low-bit and late-card defects.

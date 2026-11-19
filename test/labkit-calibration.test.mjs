@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ref from '../verification/labkit/aes-ctr-ref.mjs';
@@ -75,3 +75,22 @@ test('calibration: chi^2 tail at the K threshold, Lehmer top-20 exact against Bi
   }
 });
 
+const RESULTS = join(ROOT, 'verification/calibration/wave1-results.json');
+test('wave-1 calibration results file: 26 entries, R = 1000, n >= 10^6, verdicts follow the A6 rule', () => {
+  assert.ok(existsSync(RESULTS), 'results file committed in H2');
+  const f = RESULTS;
+  assert.ok(f.endsWith('wave1-results.json'));
+  const doc = JSON.parse(readFileSync(f, 'utf8'));
+  assert.equal(doc.results.length, 26);
+  assert.deepEqual(doc.results.map((r) => r.id).sort(), W.ENTRIES.map((e) => e.id).sort());
+  assert.equal(doc.adapter.key_hex, ref.KEY_HEX);
+  assert.equal(doc.adapter.file_sha256, sha('verification/labkit/aes-ctr-ref.mjs'));
+  for (const r of doc.results) {
+    assert.ok(r.reps >= 1000 && r.minOutcomes >= 1e6, r.id);
+    const o = r.outcomes_per_rep;
+    assert.ok(o && o.meets_n_1e6 === true && (o.exact ?? o.min) >= 1e6 && (o.exact ?? o.min) === r.minOutcomes, r.id);
+    if (o.exact === undefined) assert.ok(o.recount_pvalue_sha256_equal === true && o.min >= o.lower_bound && o.lower_bound >= 1e6, r.id);
+    const pass = r.ks_p >= 0.001 && r.flags_0_01 >= 2 && r.flags_0_01 <= 22;
+    assert.equal(r.verdict, pass ? 'PASS' : 'FAIL', r.id);
+  }
+});

@@ -52,11 +52,11 @@ if (!isMainThread) {
   const runEntry = (ei) => new Promise((done, fail) => {
     const tasks = []; for (let r = 0; r < R; r += CH) tasks.push({ ei, r0: r, r1: Math.min(R, r + CH) });
     const out = []; let next = 0, pending = 0, fb = 0;
-    const feed = (wk) => { if (next < tasks.length) { pending += 1; wk.postMessage(tasks[next++]); } else if (pending === 0) { for (const w of workers) w.removeAllListeners('message'); done({ out, fb }); } };
+    const feed = (wk) => { if (next < tasks.length) { pending += 1; wk.postMessage(tasks[next++]); } else if (pending === 0) { for (const w of workers) { w.removeAllListeners('message'); w.off('error', fail); } done({ out, fb }); } };
     for (const wk of workers) {
       wk.removeAllListeners('message');
       wk.on('message', (m) => { out.push(...m.out); fb += m.fallbacks; pending -= 1; feed(wk); });
-      wk.once('error', fail);
+      wk.once('error', fail); // removed again when the entry completes (H2: was left attached, MaxListenersExceededWarning)
     }
     for (const wk of workers) feed(wk);
   });
@@ -78,7 +78,7 @@ if (!isMainThread) {
     const ks = ksUniform(ps); const flags = ps.filter((p) => p < 0.01).length;
     const minOut = Math.min(...reps.map((x) => x.outcomes));
     const pass = ks.p >= 0.001 && flags >= 2 && flags <= 22 && reps.length >= 1000 && minOut >= 1e6;
-    const row = { id: e.id, stream: e.stream, reps: reps.length, M_cal: M, cells: lu.cells.length, df: lu.cells.length - 1, minE: +(M * Math.min(...lu.cells)).toFixed(3), minOutcomes: minOut, ks_D: +ks.D.toFixed(5), ks_p: +ks.p.toPrecision(4), flags_0_01: flags, verdict: pass ? 'PASS' : 'FAIL', pvalue_sha256: createHash('sha256').update(JSON.stringify(ps)).digest('hex') };
+    const row = { id: e.id, stream: e.stream, reps: reps.length, M_cal: M, cells: lu.cells.length, df: lu.cells.length - 1, minE: +(M * Math.min(...lu.cells)).toFixed(3), minOutcomes: minOut, outcomes_max: Math.max(...reps.map((x) => x.outcomes)), outcomes_total: reps.reduce((a, x) => a + x.outcomes, 0), outcomes_sha256: createHash('sha256').update(JSON.stringify(reps.map((x) => x.outcomes))).digest('hex'), ks_D: +ks.D.toFixed(5), ks_p: +ks.p.toPrecision(4), flags_0_01: flags, verdict: pass ? 'PASS' : 'FAIL', pvalue_sha256: createHash('sha256').update(JSON.stringify(ps)).digest('hex') };
     writeFileSync(`${f}.tmp`, JSON.stringify({ digests, row, fallbacks: fb, pvalues: ps }) + '\n');
     renameSync(`${f}.tmp`, f);
     rows.push(row); fallbacks += fb;
