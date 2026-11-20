@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { J3, FAST, SLOW, ENTRIES, REPS, BIND_GROUPS, bindEntry } from './r-k1-bind-lib.mjs';
+import { getPriority } from 'node:os';
+import { J3, FAST, SLOW, ENTRIES, REPS, BIND_GROUPS, NICE, bindEntry } from './r-k1-bind-lib.mjs';
 
 test('R-K1-BIND covers all 26 entries: the file groups are disjoint, cover 0..25, and each file binds its group', () => {
   assert.equal(ENTRIES.length, 26); assert.equal(J3.results.length, 26);
@@ -12,5 +13,6 @@ test('R-K1-BIND covers all 26 entries: the file groups are disjoint, cover 0..25
   assert.deepEqual([...FAST, ...SLOW].sort((a, b) => a - b), all);
   for (const f of Object.keys(BIND_GROUPS)) assert.match(readFileSync(new URL(f, import.meta.url), 'utf8'), f === 'r-k1-bind-entry9.test.mjs' ? /bindEntry\(9\)/ : new RegExp(`BIND_GROUPS\\['${f.replace(/\./g, '\\.')}'\\]\\) test\\(`), f);
   J3.results.forEach((r) => assert.ok(r.pvalues.length >= REPS, r.id));
+  assert.ok(getPriority(0) >= NICE, 'the CPU-heavy re-run runs at lowered priority (K3g: it starved timed tests)');
 });
 for (const i of BIND_GROUPS['r-k1-bind.test.mjs']) test(`R-K1-BIND entry ${i} ${ENTRIES[i].id}: reps 0..${REPS - 1} bit-identical to J3`, () => bindEntry(i));

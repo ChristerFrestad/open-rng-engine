@@ -10,6 +10,7 @@
 // Entry 9 (randomInt/coupon-collector/min-0-max-4294967297) has its own file because its exact law takes about
 // 3 minutes of BigInt work; BIND_GROUPS (below) pins that all 26 entries are bound.
 import assert from 'node:assert/strict';
+import { setPriority, getPriority } from 'node:os';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,13 @@ import * as S from '../verification/statistic/wave1-statistic.mjs';
 import * as Src from '../verification/calibration/wave1-source.mjs';
 import * as Ev from '../verification/harness/wave1-evidence.mjs';
 import { RefStream } from '../verification/labkit/aes-ctr-ref.mjs';
+
+// These files are minutes of pure CPU (about 15 CPU-min over five files). node --test runs files in parallel, so
+// at normal priority they starve tests with wall-clock budgets (K3g gate: the rule27 M-167 self-test spawn hit
+// its 60 s timeout). They lower their own scheduling priority (nice 10; lowering needs no privilege) so timed
+// tests get the CPU first; the results are deterministic and do not depend on scheduling.
+export const NICE = 10;
+try { if (getPriority(0) < NICE) setPriority(0, NICE); } catch { /* not supported: run at normal priority */ }
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const J3 = JSON.parse(readFileSync(join(ROOT, 'verification/calibration/wave1-results-j.json'), 'utf8'));
