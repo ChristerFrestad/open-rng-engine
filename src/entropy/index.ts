@@ -7,3 +7,8 @@
 // @ts-expect-error node:crypto typings are not in the pinned devDependencies.
 import { randomFillSync } from 'node:crypto';
 export { randomFillSync };
+
+export function fillBuffer(target: Uint8Array): Uint8Array {
+  randomFillSync(target);
+  return target;
+}
