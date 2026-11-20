@@ -56,36 +56,78 @@ test('exact sampler KAT: marginal histogram matches the exact law (Pearson p > 1
 });
 
 const E12 = S.ENTRIES[12];
-function testSetup() {
-  const M = 300; const lumped = S.lumpExact(S.lawExact(E12), M);
-  const man = { ...MCm.nullManifest({ entryIndex: 12, e: E12, M, lumped, keyId: 'test-only', keyHex: TEST_KEY }), B: 10, block_size: 4, n_blocks: 3 };
-  return { M, lumped, man };
-}
+// Full-size block plan (G-67: B, B+1, block size and block count must be the constants), small M so it is fast.
+const M60 = 60; const L60 = S.lumpExact(S.lawExact(E12), M60);
+const MAN = MCm.nullManifest({ entryIndex: 12, e: E12, M: M60, lumped: L60, keyId: 'test-only', keyHex: TEST_KEY });
+const OBS = { counts: Array.from(L60.cells, (p) => Math.round(p * M60)) }; { const t = OBS.counts.reduce((a, x) => a + x, 0); OBS.counts[OBS.counts.indexOf(Math.max(...OBS.counts))] += M60 - t; }
+const hOf = (counts) => { const k = L60.cellNum.length; const first = new Int32Array(k).fill(-1); for (let i = 0; i < L60.map.length; i++) if (first[L60.map[i]] < 0) first[L60.map[i]] = i; const h = new Float64Array(L60.map.length); counts.forEach((c, j) => { h[first[j]] = c; }); return h; };
+
 test('null manifest: no observed X² field; pins domain, IV scheme, B, block size, cell order and code digests', () => {
-  const { man } = testSetup(); const full = MCm.nullManifest({ entryIndex: 12, e: E12, M: 300, lumped: S.lumpExact(S.lawExact(E12), 300), keyId: 't', keyHex: TEST_KEY });
-  assert.ok(!JSON.stringify(full).toLowerCase().includes('x2')); assert.equal(full.B, 1004799); assert.equal(full.n_blocks, 1005);
-  assert.deepEqual(Object.keys(full.digests).sort(), ['adapter', 'sampler', 'statistic']); assert.equal(man.domain, MCm.MC.DOMAIN);
+  assert.ok(!JSON.stringify(MAN).toLowerCase().includes('x2')); assert.equal(MAN.B, 1004799); assert.equal(MAN.n_blocks, 1005);
+  assert.deepEqual(Object.keys(MAN.digests).sort(), ['adapter', 'sampler', 'statistic']); assert.equal(MAN.domain, MCm.MC.DOMAIN);
   assert.throws(() => MCm.nullManifest({ entryIndex: 0, e: S.ENTRIES[0], M: 10, lumped: { cellNum: [1n], den: 1n }, keyId: 't', keyHex: TEST_KEY }), /duplicates/);
 });
 
-test('resume: a recomputed block is digest-identical; runEntry assembles #>= over all blocks and refuses drifted inputs', () => {
-  const { lumped, man } = testSetup(); const d = mkdtempSync(join(tmpdir(), 'dtmc-'));
+test('G-71: observed X² is computed from the observed counts through S.pearson; scalar refused; M = Σcounts; M > 10^9 refused', () => {
+  const o = MCm.observedX2(MAN, L60, OBS);
+  assert.equal(o.x2, S.pearson(hOf(OBS.counts), L60, M60).x2);
+  const skew = { counts: OBS.counts.map((c, j) => (j === 0 ? c + 3 : j === 1 ? c - 3 : c)) };
+  assert.equal(MCm.observedX2(MAN, L60, skew).x2, S.pearson(hOf(skew.counts), L60, M60).x2);
+  assert.notEqual(MCm.observedX2(MAN, L60, skew).x2, o.x2);
+  for (const bad of [12.5, o.x2, null, { x2: o.x2 }, { counts: OBS.counts.slice(1) }, { counts: OBS.counts.map((c, j) => (j ? c : c + 0.5)) }]) assert.throws(() => MCm.observedX2(MAN, L60, bad), /G-71/);
+  assert.throws(() => MCm.observedX2(MAN, L60, { counts: OBS.counts.map((c, j) => (j ? c : c + 1)) }), /sum of observed counts/);
+  assert.throws(() => MCm.runBlock(MAN, L60, TEST_KEY, 0, o.x2), /scalar/);
+  const big = { ...MAN, M: 1e9 + 1 }; const bc = OBS.counts.slice(); bc[0] += 1e9 + 1 - M60;
+  assert.throws(() => MCm.observedX2(big, L60, { counts: bc }), /M > 10\^9/);
+});
+
+test('G-67: manifest constants checked; resume recomputes a block digest-identically; assembly verifies X², #>= and the chain', () => {
+  const d = mkdtempSync(join(tmpdir(), 'dtmc-'));
   try {
-    const x2obs = 20;
-    assert.equal(MCm.runEntry(man, lumped, TEST_KEY, x2obs, d, { maxBlocks: 2 }), null); // interrupted after 2 blocks
+    for (const bad of [{ B: 4 }, { B_plus_1: 5 }, { block_size: 4 }, { n_blocks: 3 }]) assert.throws(() => MCm.runEntry({ ...MAN, ...bad }, L60, TEST_KEY, OBS, d), /G-67/);
+    assert.equal(MCm.runEntry(MAN, L60, TEST_KEY, OBS, d, { maxBlocks: 2 }), null); // interrupted after 2 blocks
     const b1 = readFileSync(join(d, 'block-0001.json'), 'utf8'); unlinkSync(join(d, 'block-0001.json'));
-    const r = MCm.runEntry(man, lumped, TEST_KEY, x2obs, d);
-    assert.equal(readFileSync(join(d, 'block-0001.json'), 'utf8'), b1);
-    const blocks = [0, 1, 2].map((b) => JSON.parse(readFileSync(join(d, `block-000${b}.json`), 'utf8')));
-    assert.deepEqual(blocks.map((x) => x.reps), [4, 4, 2]); assert.notEqual(blocks[0].x2_sha256, blocks[1].x2_sha256);
-    assert.equal(r.reps, 10); assert.equal(r.ge, blocks.reduce((a, x) => a + x.ge, 0)); assert.equal(r.p_mc, (1 + r.ge) / 11);
-    // Replay block 0 by hand: same draws, same X², same #>=.
-    const again = MCm.runBlock(man, lumped, TEST_KEY, 0, x2obs); assert.equal(again.x2_sha256, blocks[0].x2_sha256); assert.equal(again.ge, blocks[0].ge);
-    // Ties: x2obs equal to a simulated X² counts it.
-    const tieBlock = MCm.runBlock(man, lumped, TEST_KEY, 0, 0); assert.equal(tieBlock.ge, 4);
-    assert.throws(() => MCm.runEntry({ ...man, cell_order_sha256: '0'.repeat(64) }, lumped, TEST_KEY, x2obs, d), /cell order/);
-    assert.throws(() => MCm.runEntry(man, lumped, '00'.repeat(32), x2obs, d), /key/);
-    writeFileSync(join(d, 'block-0002.json'), JSON.stringify({ ...blocks[2], manifest_sha256: 'x' }));
-    assert.equal(MCm.runEntry(man, lumped, TEST_KEY, x2obs, d).ge, r.ge, 'a block from another manifest is recomputed');
+    const r = MCm.runEntry(MAN, L60, TEST_KEY, OBS, d);
+    assert.equal(readFileSync(join(d, 'block-0001.json'), 'utf8'), b1, 'recomputed block is byte-identical');
+    const blk = (b) => JSON.parse(readFileSync(join(d, `block-${String(b).padStart(4, '0')}.json`), 'utf8'));
+    assert.deepEqual([blk(0).reps, blk(1003).reps, blk(1004).reps], [1000, 1000, 799]); assert.notEqual(blk(0).x2_sha256, blk(1).x2_sha256);
+    assert.equal(r.reps, 1004799); assert.equal(r.p_mc, (1 + r.ge) / 1004800); assert.equal(r.x2obs, MCm.observedX2(MAN, L60, OBS).x2);
+    let ge = 0, chain = MCm.CHAIN_SEED; for (let b = 0; b < 1005; b++) { const x = blk(b); ge += x.ge; chain = MCm.chainNext(chain, x); }
+    assert.equal(r.ge, ge); assert.equal(r.chain_head, chain);
+    const again = MCm.runBlock(MAN, L60, TEST_KEY, 0, OBS); assert.equal(again.x2_sha256, blk(0).x2_sha256); assert.equal(again.ge, blk(0).ge);
+    // HoQ R1: resume with a different observed vector is refused, not mixed.
+    const skew = { counts: OBS.counts.map((c, j) => (j === 0 ? c + 3 : j === 1 ? c - 3 : c)) };
+    assert.throws(() => MCm.runEntry(MAN, L60, TEST_KEY, skew, d), /another observed vector/);
+    // HoQ R2: an edited ge (manifest sha kept) is refused.
+    const f2 = join(d, 'block-0002.json'); const x2b = blk(2); writeFileSync(f2, JSON.stringify({ ...x2b, ge: x2b.ge === 0 ? 1 : 0 }));
+    assert.throws(() => MCm.runEntry(MAN, L60, TEST_KEY, OBS, d), /#>= does not match/);
+    writeFileSync(f2, JSON.stringify({ ...x2b, x2: x2b.x2.map((v, i) => (i ? v : v + 1)) }));
+    assert.throws(() => MCm.runEntry(MAN, L60, TEST_KEY, OBS, d), /content does not match/);
+    writeFileSync(f2, JSON.stringify(x2b));
+    assert.throws(() => MCm.runEntry({ ...MAN, cell_order_sha256: '0'.repeat(64) }, L60, TEST_KEY, OBS, d), /cell order/);
+    assert.throws(() => MCm.runEntry(MAN, L60, '00'.repeat(32), OBS, d), /key/);
+    writeFileSync(f2, JSON.stringify({ ...x2b, manifest_sha256: 'x' }));
+    assert.equal(MCm.runEntry(MAN, L60, TEST_KEY, OBS, d).chain_head, r.chain_head, 'a block from another manifest is recomputed identically');
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// G-69 (HoQ A9; report G-68 HM-MC5 / HM-MC6): exhaustive tie path. den needs 72 bits (8 bits past the 64-bit
+// prefix); at every boundary prefix every one of the 256 remainders is decided against the full-width X.
+test('exact sampler tie path, exhaustive: every remainder at every boundary prefix, rejection region included', () => {
+  const c0 = (1n << 70n) + 5n, c1 = (1n << 69n) + 3n, c2 = (1n << 70n) + (1n << 69n) + 77n; const den = c0 + c1 + c2;
+  assert.equal(den.toString(2).length, 72);
+  const law = { cellNum: [c0, c1, c2], den }; const cum = [c0, c0 + c1, den];
+  let checked = 0, rejections = 0;
+  for (const B of cum) {
+    const p = B >> 8n; const hi = Number(p >> 32n), lo = Number(p & 0xffffffffn);
+    for (let r = 0; r < 256; r++) {
+      const smp = MCm.exactSampler(law); let i = 0; const words = [hi, lo, (r << 24) >>> 0, 0, 0];
+      const got = smp.draw(() => { if (i >= words.length) throw new Error('drew past script'); return words[i++]; });
+      const X = (p << 8n) | BigInt(r);
+      const want = X >= den ? 0 : cum.findIndex((q) => X < q);
+      if (X >= den) { rejections += 1; assert.equal(i, 5, 'rejected draw is redrawn'); }
+      assert.equal(got, want, `prefix of ${B} rest ${r}`); assert.equal(smp.stats().slow, 1); checked += 1;
+    }
+  }
+  assert.equal(checked, 768); assert.ok(rejections > 100);
 });

@@ -233,10 +233,11 @@ test('labkit below(): rejection limit exact (u = lim rejected, lim - 1 accepted)
 });
 
 // G-58: a small fixed-seed re-run of the calibration path itself (lawExact, lumpExact, the reference source,
-// histogram, pearson): 3 entries x R = 20 reproduce the committed J p-values exactly, then the A6 rule.
-test('calibration fixture: 3 entries x 20 reps re-run reproduce the committed J p-values', () => {
+// histogram, pearson): 4 entries x R = 20 reproduce the committed J p-values exactly, then the A6 rule.
+// G-70 (HoQ A9; report G-69): entry 23 (shuffle/duplicates/lehmer-52) added to entries 0, 16, 25.
+test('calibration fixture: 4 entries x 20 reps re-run reproduce the committed J p-values', () => {
   const doc = JSON.parse(readFileSync(RJ, 'utf8'));
-  for (const ei of [0, 16, 25]) {
+  for (const ei of [0, 16, 23, 25]) {
     const e = Src.ENTRIES[ei]; const M = Src.mCal(e); const lumped = S.lumpExact(S.lawExact(e), M);
     assert.equal(M, doc.results[ei].M_cal); assert.equal(lumped.cells.length, doc.results[ei].cells);
     const ps = []; for (let rep = 0; rep < 20; rep++) { const r = Src.replicate(e, rep, M, lumped); ps.push(r.p); assert.equal(r.outcomes >= 1e6, true); }

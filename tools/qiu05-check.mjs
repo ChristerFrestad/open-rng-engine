@@ -16,7 +16,7 @@ import { licenseGuard, LICENSE_PATH } from './license-guard.mjs';
 const ROOT = new URL('..', import.meta.url).pathname;
 export const ALLOWED = {
   file: 'README.md',
-  sentence: 'This project is not intended for, aimed at, or marketed to Norway, or any market where the integrator lacks a licence.',
+  sentence: 'This project is not intended for, aimed at, or marketed to any market where the integrator lacks a licence.',
 };
 const RULES = [
   ['F1-tie', /\b(?:\u006eorway|\u006eorwegian|\u006eorge|\u006eoreg|\u006eorsk\w*|\u006fslo|\u0062ergen|\u0074rondheim|\u0073tavanger)\b/gi],

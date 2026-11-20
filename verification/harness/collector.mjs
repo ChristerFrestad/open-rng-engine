@@ -29,6 +29,12 @@ export function collectCounted(kTest, call, n, source) {
   res.grant = ev.stamp(res);
   return res;
 }
+// G-64: hand a stamped result to the launcher's counting channel (only counted if the launcher verifies it).
+export function reportCounted(result) {
+  const ev = backstopEvidence();
+  if (!ev || typeof ev.report !== 'function') throw new Error('collector refused: no entropy-backstop preload proof (G-54)');
+  return ev.report(result);
+}
 export function grantStampError(result) {
   const ev = backstopEvidence();
   if (!ev) return 'collection result checked without the entropy-backstop preload (G-54)';

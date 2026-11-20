@@ -445,7 +445,7 @@ Expectations, which are not rulings:
 ### 7.3 Report limitations (to be named verbatim in the evidence report)
 
 - **A-1 (adjacency mod-4 and div-4), CPO wording:** "tests clustering of equal labels; does not test label-to-label transition preference."
-- **G-52 (all wave-1 reductions):** the reductions use leading bits or cards only (top 6/20 bits; first cards for Lehmer-52), so they are blind to low-bit and late-card defects.
+- **G-52 (all wave-1 reductions):** the reductions use leading bits or cards only (top 6/20 bits; the cards at positions 0..9 for Lehmer-52, which the J source draws first and the spec's top-down loop settles last), so they are blind to low-bit and late-card defects.
 
 ### 7.4 Urns and blocks per replication; calibration-scale MDD (CTO batch J, HoQ A6-n / A8 R-A6n)
 
@@ -480,7 +480,7 @@ The KS MDD of the A6 rule itself is D_crit = 0.061462 (R = 1000, α = 0.001).
 - Statistic `verification/statistic/wave1-statistic.mjs` (d4021fb7…, exact BigInt laws, exact §6.1 lumping), source `verification/calibration/wave1-source.mjs` (1a1c5573…), runner `wave1-calibrate.mjs` (632cb215…), adapter ae7a25d3…. Digests checked at run start (harness-at-start.sha256) and equal to the J2 commit f3d81687; the results test re-checks them against the current files (G-58).
 - Same IV set as H2 (stream = entry index + 1, reps 0..999), committed before the run (H1). Not a re-roll: the statistic changed (G-56), so the H2 file `wave1-results.json` is kept and marked `superseded`; H2 per-rep p-values committed as `wave1-h2-pvalues.json` (G-59); J per-rep p-values are in the J results file.
 - Rule unchanged: R = 1000, outcomes per replication ≥ 10^6, KS α = 0.001 (D_crit 0.061462 exact), flags at p < 0.01 in [2, 22]. KS p is asymptotic (Stephens).
-- **Outcome: 26/26 PASS.** 25/26 rows reproduce H2 per-rep p-values to ≤ 1.1e-11 (law arithmetic). Entry 23 (Lehmer duplicates) differs in exactly one replication (rep 195, p 0.6423 → 0.0930): H2 completed a fallback shuffle with a 52nd `below(1)` draw, which consumes one stream word; the J source draws only the 51 forward Fisher–Yates draws (as the public shuffle and the adjacency entries do). Rep 195 has the only prefix fallback in that entry with H2 code, verified by replaying it both ways (the no-`below(1)` replay reproduces the J histogram exactly). Not a defect; both are valid null draws.
+- **Outcome: 26/26 PASS.** 25/26 rows reproduce H2 per-rep p-values to ≤ 1.1e-11 (law arithmetic). Entry 23 (Lehmer duplicates) differs in exactly one replication (rep 195, p 0.6423 → 0.0930): H2 completed a fallback shuffle with a 52nd `below(1)` draw, which consumes one stream word; the J source draws only the 51 forward Fisher–Yates draws (i = 0..50, j = i + below(52 − i)), as the adjacency entries do. That is the spec's draw count but not its order: there is no public shuffle yet (src stubs), and the spec loop is top-down (i = n−1..1, the first draw settles a[n−1]). Both maps from draw sequences to permutations are bijections, so the null law of every wave-1 statistic is the same (HoQ A9 §4(c)(d), G-66 NIT); the same draws give a different permutation, which matters only for alternatives. Rep 195 has the only prefix fallback in that entry with H2 code, verified by replaying it both ways (the no-`below(1)` replay reproduces the J histogram exactly). Not a defect; both are valid null draws.
 
 | # | entry | M_cal | blocks/rep | urns/rep | outcomes/rep min | max | cells | KS D | KS p | flags | verdict |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -524,7 +524,7 @@ Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DE
   2·min(P[X≤x], P[X≥x]), checked exactly for M ≤ 40). **α ledger: 26 · 1e-10 = 2.6e-9** for wave 1, negligible
   against the per-entry α_e = 0.01/157.
 - R-DT-MC item 8 (power of the MC flag at B + 1 = 1,004,800, flag iff #≥ ≤ 62): #≥ ~ Binomial(B, p_true);
-  at p_true = α_e (6.369e-5) E[#≥] ≈ 64, so P(flag) ≈ 50 %; at p_true ≤ α_e/2, E[#≥] ≈ 32 and P(flag) is
+  at p_true = α_e (6.369e-5) E[#≥] ≈ 64, so P(flag) = P[Poisson(64) ≤ 62] = 43.4 % (HoQ A9 G-68); at p_true ≤ α_e/2, E[#≥] ≈ 32 and P(flag) is
   essentially 1 (P[Poisson(32) > 62] < 1e-6).
 
 ### 8.2 R-DT-MC framework and the duplicates exact sampler (K2; HoQ R-DT-MC / R-DT-SAMPLER)
@@ -538,3 +538,13 @@ Smallest KS p 0.07291 (entry 18), max D 0.04053 < 0.061462, flags 5–18. **R-DE
   cell order digest and the statistic/sampler/adapter digests; it has NO observed X² (separate later commit).
   Resume re-checks all of these; blocks are written atomically and a recomputed block is digest-identical.
 - Not done here: any MC run, any real key, the coupon/adjacency exact binomial chain (awaiting HoQ).
+
+### 8.3 R-DT-MC integrity (K3b; HoQ A9 G-67, A10 G-71)
+
+- The MC entry takes the OBSERVED count vector in the module's lumped cell order and computes X²_obs itself
+  through `S.pearson` (same lumping, same M); a scalar is refused; manifest M must equal Σcounts; M > 10^9 is
+  refused until Quant rechecks KL_safe at that scale.
+- The manifest's B = 1,004,799, B + 1 = 1,004,800, block size 1,000 and 1,005 blocks must equal the constants.
+- Every block file stores its per-rep X², the observed-vector digest and X²_obs; assembly re-verifies each
+  block's X² digest, recomputes #≥ from the stored X², refuses a block made for another observed vector, and
+  returns the sha256 chain head over all blocks (to be committed with the results).

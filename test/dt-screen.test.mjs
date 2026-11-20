@@ -93,3 +93,34 @@ test('R-DT-SCREEN: threshold is strict "<" at exactly 1e-10', () => {
   assert.equal(S.screenFails(Math.log(1.5e-10)), false);
   assert.equal(S.screenFails(Math.log(0.7e-10)), true);
 });
+
+// G-69 (HoQ A9; report G-68 HS-3 / HS-5): a real lumped law whose lumping merges raw cells.
+test('R-DT-SCREEN on a merging lumped law: k is the lumped cell count; counts on merged raw cells are lumped first', () => {
+  const e = S.ENTRIES[12]; const Mx = 60; const Lx = S.lumpExact(S.lawExact(e), Mx);
+  const k = Lx.cells.length; assert.ok(Lx.map.length > k + 2, 'lumping merges raw cells');
+  const counts = Array.from(Lx.cells, (p) => Math.round(p * Mx)); const jm = counts.indexOf(Math.max(...counts));
+  counts[jm] += Mx - counts.reduce((a, x) => a + x, 0); const jo = jm === 0 ? 1 : 0; counts[jo] += 9; counts[jm] -= 9;
+  const first = new Array(Lx.map.length).fill(0), last = new Array(Lx.map.length).fill(0), spread = new Array(Lx.map.length).fill(0);
+  const fi = [], la = []; for (let i = 0; i < Lx.map.length; i++) { const j = Lx.map[i]; if (fi[j] === undefined) fi[j] = i; la[j] = i; }
+  counts.forEach((c, j) => { first[fi[j]] = c; last[la[j]] = c; spread[fi[j]] = Math.floor(c / 2); spread[la[j]] += c - Math.floor(c / 2); });
+  const a = S.screen(first, Lx, Mx), b = S.screen(last, Lx, Mx), c = S.screen(spread, Lx, Mx);
+  assert.equal(a.k, k); assert.equal(b.logBound, a.logBound); assert.equal(c.logBound, a.logBound); assert.equal(b.worst, a.worst);
+  let mx = 0; counts.forEach((x, j) => { mx = Math.max(mx, S.klSafe(x / Mx, Lx.cells[j])); });
+  assert.equal(a.logBound, Math.LN2 + Math.log(k) - Mx * mx);
+});
+
+// HoQ ruling (a), event-level KAT: for M <= 40, every grid p and every x, P_H0(b(X) <= b(x)) <= b(x), with the
+// exact binomial pmf and b computed exactly as the code computes it (klSafe included).
+test('R-DT-SCREEN event-level KAT (M <= 40): P[b(X) <= b(x)] <= b(x) for every x', () => {
+  for (const [a, b] of PS) for (let m = 1; m <= 40; m++) {
+    const M = BigInt(m); const c = b - a; const pm = []; let C = 1n;
+    for (let j = 0n; j <= M; j++) { pm.push(C * a ** j * c ** (M - j)); C = (C * (M - j)) / (j + 1n); }
+    const den = b ** M; const p = Number(a) / Number(b);
+    const lb = Array.from({ length: m + 1 }, (_, x) => Math.LN2 - m * S.klSafe(x / m, p));
+    for (let x = 0; x <= m; x++) {
+      let ev = 0n; for (let y = 0; y <= m; y++) if (lb[y] <= lb[x]) ev += pm[y];
+      const logP = ev >= den ? 0 : logBig(ev) - logBig(den);
+      assert.ok(Math.min(logP, Math.LN2) <= lb[x] + 1e-12, `M ${m} x ${x} p ${a}/${b}: P ${logP} > b ${lb[x]}`);
+    }
+  }
+});

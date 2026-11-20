@@ -11,9 +11,9 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { mkdtempSync, writeFileSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, writeSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -547,15 +547,48 @@ function onGrantLeak() {
 // G-54 (HoQ report 505599e..96aaf91): collection results are stamped by the backstop while a grant is open.
 // The stamp set is private to this module, so a process without the preload, or outside a grant, cannot
 // produce a stamped result; the collector and checkCollected refuse unstamped results.
+// G-65 (HoQ A9): the stamp binds a sha256 content digest of { id, n, records }; every stamp lookup recomputes it,
+// so records or n changed after stamping (even after the grant closed) lose the stamp.
 const stampedResults = new WeakMap();
+export function resultContentDigest(result) {
+  const canon = JSON.stringify([result.id ?? null, result.n ?? null, result.records ?? null], (k, v) => (typeof v === 'bigint' ? `${v}n` : v));
+  return createHash('sha256').update(canon).digest('hex');
+}
 export function stampEvidenceResult(result) {
   if (activeGrant === null || !evidenceGrants.has(activeGrant)) refuseChild('result stamp outside an open evidence grant (G-54)');
   if (result === null || typeof result !== 'object') refuseChild('result stamp of a non-object (G-54)');
   const token = `grant-${activeGrant.grant}@${process.pid}`;
-  stampedResults.set(result, token);
+  stampedResults.set(result, { token, digest: resultContentDigest(result) });
   return token;
 }
-export function evidenceStamp(result) { return (result !== null && typeof result === 'object' && stampedResults.get(result)) || null; }
+export function evidenceStamp(result) {
+  const s = result !== null && typeof result === 'object' ? stampedResults.get(result) : undefined;
+  return s && resultContentDigest(result) === s.digest ? s.token : null;
+}
+
+// G-64 (HoQ A9, MAJOR): the counting authority is OUTSIDE this process. verification/harness/evidence-launcher.mjs
+// spawns the runner with this preload and ENTROPY_BACKSTOP_CHANNEL=1, writes a fresh secret to the child's stdin
+// and reads fd 3. Here, at preload (before any runner code), the flag is deleted and the secret is consumed from
+// stdin into this closure; nothing else can read it. Only reportEvidenceResult writes authenticated lines
+// (HMAC-SHA256 over id, n, content digest and grant token); the launcher counts nothing else. A process started
+// any other way (plain node, a forged marker) has no channel and no secret, so nothing it does can count.
+let channelSecret = null;
+function initEvidenceChannel() {
+  if (process.env.ENTROPY_BACKSTOP_CHANNEL !== '1') return;
+  delete process.env.ENTROPY_BACKSTOP_CHANNEL;
+  let s = null;
+  try { s = readFileSync(0); } catch { s = null; }
+  if (s && s.length >= 32) channelSecret = Buffer.from(s);
+}
+export function reportEvidenceResult(result) {
+  if (channelSecret === null) refuseChild('evidence report without a launcher channel (G-64)');
+  const t = evidenceStamp(result);
+  if (t === null || result.grant !== t) refuseChild('evidence report of a result not stamped inside an open evidence grant (G-64)');
+  const line = { id: result.id, n: result.n, digest: resultContentDigest(result), grant: t };
+  line.mac = createHmac('sha256', channelSecret).update(`${line.id}\n${line.n}\n${line.digest}\n${line.grant}`).digest('hex');
+  writeSync(3, `${JSON.stringify(line)}\n`);
+  return line.digest;
+}
 export function evidenceGrantActive() { return activeGrant !== null && evidenceGrants.has(activeGrant); }
 
 // G-55 (HoQ report 505599e..96aaf91): a battery binary is launched only if its real path and sha256 equal an
@@ -953,7 +986,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });
@@ -966,6 +999,7 @@ export function install(opts = {}) {
     enumerable: false,
   });
   installedMarker = marker;
+  initEvidenceChannel();
   return marker;
 }
 
