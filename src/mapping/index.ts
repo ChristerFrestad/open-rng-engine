@@ -65,6 +65,9 @@ function takeFilled(target: Uint8Array, out: Uint8Array): Uint8Array {
 
 /**
  * Draw an integer in [min, maxExclusive) from a fill callback.
+ * Every try zeroes its target buffer, and the buffer the fill returned when it
+ * is a different Uint8Array, before the call returns, retries or throws
+ * (PLAN R-23 / QR-08; HoQ A14 (b)).
  * Not part of the public "." surface; tests inject a fill here.
  */
 export function integerWithFill(min: IncomingBound, maxExclusive: IncomingBound, fill: FillBuffer): number {
@@ -84,15 +87,24 @@ export function integerWithFill(min: IncomingBound, maxExclusive: IncomingBound,
   const m = bitLength(span - 1);
   for (let t = 0; t < TRY_LIMIT; t++) {
     const target = new Uint8Array(width);
-    let filled: Uint8Array;
+    let returned: Uint8Array | undefined;
     try {
-      filled = takeFilled(target, fill(target));
-    } catch (e) {
-      if (e instanceof RngRangeError || e instanceof RngHealthError || e instanceof RngEntropyError) throw e;
-      throw new RngEntropyError('adapter failed');
+      let filled: Uint8Array;
+      try {
+        const raw = fill(target);
+        if (raw instanceof Uint8Array) returned = raw;
+        filled = takeFilled(target, raw);
+      } catch (e) {
+        if (e instanceof RngRangeError || e instanceof RngHealthError || e instanceof RngEntropyError) throw e;
+        throw new RngEntropyError('adapter failed');
+      }
+      const c = lowBits(filled, m);
+      if (c < span) return min + c;
+    } finally {
+      // PLAN R-23 / QR-08: no drawn byte outlives the call, on return, reject or throw.
+      target.fill(0);
+      if (returned !== undefined && returned !== target) returned.fill(0);
     }
-    const c = lowBits(filled, m);
-    if (c < span) return min + c;
   }
   throw new RngHealthError('128 consecutive rejects');
 }
