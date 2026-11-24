@@ -96,3 +96,33 @@ export function integerWithFill(min: IncomingBound, maxExclusive: IncomingBound,
   }
   throw new RngHealthError('128 consecutive rejects');
 }
+
+/** PLAN R-72: shuffle length bound 0..2^32-1; longer is RANGE_INVALID with 0 bytes read. */
+export const SHUFFLE_MAX_LENGTH = 2 ** 32 - 1;
+
+/**
+ * Fisher-Yates (Durstenfeld) over a copy, loop pinned top-down (PLAN R-42):
+ * for i = n-1 down to 1, j = integerWithFill(0, i + 1, fill). Each index draw
+ * takes its own fresh fill call(s) through the same rejection path as
+ * integer(); no modulo. n <= 1 reads 0 bytes. The input is never written.
+ * Not part of the public "." surface; tests inject a fill here.
+ */
+export function shuffleWithFill<T>(items: readonly T[], fill: FillBuffer): T[] {
+  if (!Array.isArray(items)) {
+    rangeInvalid('items must be an array');
+  }
+  const n: number = items.length;
+  if (!Number.isSafeInteger(n) || n < 0 || n > SHUFFLE_MAX_LENGTH) {
+    rangeInvalid('items length must be an integer in 0..2^32-1');
+  }
+  const out: T[] = items.slice();
+  if (out.length !== n) {
+    rangeInvalid('items length changed while copying');
+  }
+  for (let i = n - 1; i >= 1; i--) {
+    const j = integerWithFill(0, i + 1, fill);
+    const atI = out.splice(i, 1, ...out.slice(j, j + 1));
+    out.splice(j, 1, ...atI);
+  }
+  return out;
+}

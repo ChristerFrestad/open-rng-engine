@@ -159,6 +159,22 @@ test('KATs: fixed bytes produce fixed outputs, including a rejected word', () =>
   assert.equal(kat4.calls(), 1);
 });
 
+test('KAT: word c == r is rejected (boundary), next word accepted (HoQ A13 NIT)', () => {
+  // r = 6, m = 3, w = 4: c = 6 equals r and is rejected; c = 5 = r - 1 is accepted.
+  const eq6 = tapeFill([packLowBits(4, 3, 6), packLowBits(4, 3, 5)]);
+  assert.equal(integerWithFill(10, 16, eq6), 15);
+  assert.equal(eq6.calls(), 2);
+  // r = 37, m = 6: c = 37 rejected, then c = 0 -> min.
+  const eq37 = tapeFill([packLowBits(4, 6, 37), packLowBits(4, 6, 0)]);
+  assert.equal(integerWithFill(-10, 27, eq37), -10);
+  assert.equal(eq37.calls(), 2);
+  // 7-byte width: r = 2^32+3, m = 33, c = r rejected, then c = r - 1 accepted.
+  const span = WIDTH_SMALL_MAX + 3;
+  const eqWide = tapeFill([packLowBits(7, 33, span), packLowBits(7, 33, span - 1)]);
+  assert.equal(integerWithFill(0, span, eqWide), span - 1);
+  assert.equal(eqWide.calls(), 2);
+});
+
 test('exhaustive rejection check: every r in 2..256, every m-bit word', () => {
   for (let r = 2; r <= 256; r++) {
     const m = bitLength(r - 1);
