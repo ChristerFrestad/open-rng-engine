@@ -126,3 +126,35 @@ export function shuffleWithFill<T>(items: readonly T[], fill: FillBuffer): T[] {
   }
   return out;
 }
+
+/**
+ * PLAN ADR-08 sample(n, k): k distinct indices of [0..n) in draw order, defined
+ * as the first k steps of the pinned Fisher-Yates loop over [0..n) (R-42):
+ * for i = n-1 down to n-k, j = integerWithFill(0, i + 1, fill), swap a[i] and
+ * a[j], emit a[i]. So sample(n, n) is reverse(shuffle([0..n))) on the same
+ * fill calls. Only moved positions are held (at most k entries, O(k) memory); no byte buffer is
+ * introduced here. Bounds 0 <= k <= n <= 2^32-1 (R-72), else RANGE_INVALID
+ * with 0 bytes read. Not part of the public "." surface; tests inject a fill.
+ */
+export function sampleWithFill(n: IncomingBound, k: IncomingBound, fill: FillBuffer): number[] {
+  if (!isSafeInt(n) || !isSafeInt(k) || typeof n !== 'number' || typeof k !== 'number') {
+    rangeInvalid('n and k must be safe integers');
+  }
+  if (n < 0 || n > SHUFFLE_MAX_LENGTH) {
+    rangeInvalid('n must be an integer in 0..2^32-1');
+  }
+  if (k < 0 || k > n) {
+    rangeInvalid('k must be an integer in 0..n');
+  }
+  const moved = new Map<number, number>();
+  const out: number[] = [];
+  for (let t = 0; t < k; t++) {
+    const i = n - 1 - t;
+    const j = integerWithFill(0, i + 1, fill);
+    const atJ = moved.get(j) ?? j;
+    const atI = moved.get(i) ?? i;
+    moved.set(j, atI);
+    out.push(atJ);
+  }
+  return out;
+}
