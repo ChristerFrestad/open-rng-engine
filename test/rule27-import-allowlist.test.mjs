@@ -415,29 +415,62 @@ test('HoQ 81d1d184: b1-b6 and M-163..M-165 are green on the old checker and red 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('G-30 / M-167: disabling unparsed-tracked or js-under-src is killed by the self-test fixtures', () => {
-  const src = readFileSync(join(ROOT, 'tools/ci/import-allowlist.mjs'), 'utf8');
-  assert.match(src, /rule27-unparsed-tracked/);
-  assert.match(src, /rule27-js-under-src/);
-  const dropCw = src.replace('hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);', '/* mutant: unparsed-tracked dropped */');
-  const dropJs = src.replace(/hits\.push\(`\$\{rel\}:1: rule27-js-under-src /g, 'void (`${rel}:1: rule27-js-under-src ');
-  const dir = join(ROOT, 'tools/ci');
-  const cwFile = join(dir, '_scratch-m167-drop-cw.mjs');
-  const jsFile = join(dir, '_scratch-m167-drop-js.mjs');
-  try {
-    writeFileSync(cwFile, dropCw);
-    writeFileSync(jsFile, dropJs);
-    const run = (file) => spawnSync(process.execPath, [file, '--self-test'], { encoding: 'utf8', timeout: 60_000, cwd: ROOT });
-    const cw = run(cwFile);
-    assert.notEqual(cw.status, 0, `dropping unparsed-tracked must fail self-test:\n${cw.stdout}\n${cw.stderr}`);
-    assert.match(`${cw.stdout}\n${cw.stderr}`, /unparsed-tracked/);
-    const js = run(jsFile);
-    assert.notEqual(js.status, 0, `dropping js-under-src must fail self-test:\n${js.stdout}\n${js.stderr}`);
-    assert.match(`${js.stdout}\n${js.stderr}`, /js-under-src/);
-  } finally {
-    try { rmSync(cwFile, { force: true }); } catch {}
-    try { rmSync(jsFile, { force: true }); } catch {}
+// HoQ A17 M-A17-1: the G-30 / M-167 self-test children used a 60 s spawnSync timeout and died under
+// load with empty output. Each child now gets SELFTEST_CHILD_TIMEOUT_MS (180 s), one child per test,
+// and a child killed by the timeout (or by any signal, or never started) fails with an explicit
+// TIMEOUT / CHILD-FAILED message instead of an empty-output assertion.
+const SELFTEST_CHILD_TIMEOUT_MS = 180_000;
+
+function runChecked(label, args, { timeoutMs = SELFTEST_CHILD_TIMEOUT_MS, cwd = ROOT } = {}) {
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', cwd });
+  if (r.error && r.error.code === 'ETIMEDOUT') {
+    assert.fail(`TIMEOUT: ${label} child killed after ${timeoutMs} ms (signal ${r.signal}); output so far:\n${r.stdout ?? ''}\n${r.stderr ?? ''}`);
   }
+  if (r.error) {
+    assert.fail(`CHILD-FAILED: ${label} child did not run (${r.error.code ?? r.error.message})`);
+  }
+  if (r.signal !== null) {
+    assert.fail(`CHILD-FAILED: ${label} child killed by signal ${r.signal}; output so far:\n${r.stdout}\n${r.stderr}`);
+  }
+  return r;
+}
+
+test('M-A17-1: a child that outlives its limit fails with an explicit TIMEOUT, never as empty output', () => {
+  assert.throws(
+    () => runChecked('sleeper', ['-e', 'setTimeout(() => {}, 30000)'], { timeoutMs: 300 }),
+    (e) => e instanceof assert.AssertionError && /^TIMEOUT: sleeper child killed after 300 ms \(signal SIGKILL\)/.test(e.message),
+  );
+  assert.throws(
+    () => runChecked('self-kill', ['-e', 'process.kill(process.pid, "SIGKILL")']),
+    (e) => e instanceof assert.AssertionError && /^CHILD-FAILED: self-kill child killed by signal SIGKILL/.test(e.message),
+  );
+  const ok = runChecked('trivial', ['-e', 'console.log("ok")'], { timeoutMs: 60_000 });
+  assert.equal(ok.status, 0);
+  assert.equal(ok.stdout.trim(), 'ok');
+});
+
+function m167Mutant(name, mutate, reason) {
+  const src = readFileSync(join(ROOT, 'tools/ci/import-allowlist.mjs'), 'utf8');
+  assert.match(src, reason);
+  const mutated = mutate(src);
+  assert.notEqual(mutated, src, `${name}: mutation did not apply`);
+  const file = join(ROOT, 'tools/ci', `_scratch-m167-${name}.mjs`);
+  try {
+    writeFileSync(file, mutated);
+    const r = runChecked(`M-167 ${name}`, [file, '--self-test']);
+    assert.notEqual(r.status, 0, `${name} must fail self-test:\n${r.stdout}\n${r.stderr}`);
+    assert.match(`${r.stdout}\n${r.stderr}`, reason);
+  } finally {
+    try { rmSync(file, { force: true }); } catch {}
+  }
+}
+
+test('G-30 / M-167: disabling unparsed-tracked is killed by the self-test fixtures', () => {
+  m167Mutant('drop-cw', (src) => src.replace('hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);', '/* mutant: unparsed-tracked dropped */'), /unparsed-tracked/);
+});
+
+test('G-30 / M-167: disabling js-under-src is killed by the self-test fixtures', () => {
+  m167Mutant('drop-js', (src) => src.replace(/hits\.push\(`\$\{rel\}:1: rule27-js-under-src /g, 'void (`${rel}:1: rule27-js-under-src '), /js-under-src/);
 });
 
 const OLD_373 = new URL('./fixtures/rule27-checker-373873ae.mjs', import.meta.url);
