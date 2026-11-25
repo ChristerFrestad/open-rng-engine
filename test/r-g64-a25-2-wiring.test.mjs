@@ -39,6 +39,11 @@ test('W-late(a): the evidence-helper main may register one late hook; a second l
   const r = run(helperMain(`M.registerHooks({ load: (u, c, n) => n(u, c) });\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), HELPER_REL);
   assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /registerHooks after the preload/);
 });
+test('W-late(e) earlier caller: a manifest module imported by the helper registers first; the helper\'s own call then exits 94', () => {
+  const files = { ...helperMain(`import './early.mjs';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), 'verification/harness/early.mjs': `import * as M from 'node:module';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n` };
+  const r = run(files, HELPER_REL);
+  assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /registerHooks after the preload/);
+});
 test('W-late(b): a non-helper main calling registerHooks exits 94, even its first call', () => {
   const r = run({ 'probe/main.mjs': `import * as M from 'node:module';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}` }, 'probe/main.mjs');
   assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, '');

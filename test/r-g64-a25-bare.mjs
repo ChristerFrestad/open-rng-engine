@@ -74,3 +74,18 @@ process.stdout.write('NOT-REACHED');`, { mode: null });
   assert.equal(seen.ownSet, true); assert.equal(seen.otherSet, false); assert.equal(seen.other, 9);
   assert.match(seen.rb, /^REFUSED: entropy-backstop: randomBytes/);
 });
+
+// A25-M11 retirement (HoQ/CTO 22:22 rulings): no coverage lost. Each refusal on the parentless-code paths is pinned to its
+// exact exit code here, in the bare-parent run (child in helper mode under the real preload + lockdown), and each has a
+// kill mutant in tools/ci/a25-2-wiring-mutants.mjs (M50 eval, M51 new Function, M52 getBuiltinModule('vm')).
+const M11_REPLACEMENTS = {
+  'eval (M50)': [`const E = await import(SRC); E.integer(0, 10); eval('1'); process.stdout.write('ALIVE');`, 91, /eval called after boot/],
+  'new Function (M51)': [`const E = await import(SRC); E.integer(0, 10); new Function('return 1')(); process.stdout.write('ALIVE');`, 91, /Function called after boot/],
+  "process.getBuiltinModule('vm') (M52)": [`const E = await import(SRC); E.integer(0, 10); process.getBuiltinModule('vm'); process.stdout.write('ALIVE');`, 92, /getBuiltinModule\('vm'\)/],
+};
+for (const [name, [code, want, why]] of Object.entries(M11_REPLACEMENTS)) {
+  test(`A25-M11 replacement: ${name} exits ${want}`, () => {
+    const r = child(code);
+    assert.equal(r.status, want, `${r.status} ${r.err}`); assert.equal(r.out, ''); assert.match(r.err, why);
+  });
+}
