@@ -494,3 +494,20 @@ test('A25-1: the helper-mode preload reads the spawn token once, removes it from
     assert.equal(r2.status, 90, r2.stderr); assert.equal(r2.stdout, '');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+test('A25-2 (CTO 22:12 ruling): the grant digest is the authority; ENTROPY_BACKSTOP_MANIFEST_SHA256 is advisory, removed, and a differing value exits 90 before main', () => {
+  const d = tmp('probe-adv'), f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, "process.stdout.write(JSON.stringify({ adv: process.env.ENTROPY_BACKSTOP_MANIFEST_SHA256 ?? null }));\n");
+    const m = testManifest(d, [f]);
+    const base = L.helperSpawnEnv(env(), { token: `${TOKEN}#8`, ...m });
+    const run = (e) => spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    const same = run({ ...base, ENTROPY_BACKSTOP_MANIFEST_SHA256: m.manifestSha256 });
+    assert.equal(same.status, 0, same.stderr); assert.deepEqual(JSON.parse(same.stdout), { adv: null });
+    const forged = run({ ...base, ENTROPY_BACKSTOP_MANIFEST_SHA256: 'f'.repeat(64) });
+    assert.equal(forged.status, 90, forged.stderr); assert.equal(forged.stdout, '');
+    // a forged advisory sha cannot stand in for the grant digest: grant digest wrong + advisory matching the file still exits 90
+    const g = `${TOKEN}#8|m=${'0'.repeat(64)}`;
+    const swapped = run({ ...base, ENTROPY_BACKSTOP_GRANT: g, ENTROPY_BACKSTOP_MANIFEST_SHA256: m.manifestSha256 });
+    assert.equal(swapped.status, 90, swapped.stderr); assert.equal(swapped.stdout, '');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});

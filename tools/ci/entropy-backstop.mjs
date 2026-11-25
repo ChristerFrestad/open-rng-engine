@@ -262,6 +262,15 @@ const MANIFEST_SHA256 = HELPER_MODE ? GRANT_PARTS.sha256 : null;
 const MANIFEST_PATH = HELPER_MODE && typeof process.env[MANIFEST_ENV] === 'string' ? process.env[MANIFEST_ENV] : null;
 delete process.env[HELPER_GRANT_ENV];
 delete process.env[MANIFEST_ENV];
+// CTO 22:12 binding ruling: the grant digest is the authority. ENTROPY_BACKSTOP_MANIFEST_SHA256 is advisory only;
+// if present in helper mode it must equal the grant digest, else exit 90 before any module loads. Never trusted.
+export const MANIFEST_SHA256_ADVISORY_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
+const ADVISORY_SHA256 = Object.prototype.hasOwnProperty.call(process.env, MANIFEST_SHA256_ADVISORY_ENV) ? process.env[MANIFEST_SHA256_ADVISORY_ENV] : null;
+delete process.env[MANIFEST_SHA256_ADVISORY_ENV];
+if (HELPER_MODE && ADVISORY_SHA256 !== null && ADVISORY_SHA256 !== MANIFEST_SHA256) {
+  try { writeSync(2, `entropy-backstop[A25]: advisory manifest digest differs from the grant digest (exit ${EXIT_A25_MANIFEST_DIGEST})\n`); } catch { /* stderr closed */ }
+  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_MANIFEST_DIGEST);
+}
 // Addendum B: one-shot refusal hook. Each backstop refusal site (dlopen, spawn_sync/process_wrap and the other refused
 // bindings, execve) calls it before its throw, so in helper mode the lockdown turns the refusal into an abort.
 let REFUSE_HOOK = null;
