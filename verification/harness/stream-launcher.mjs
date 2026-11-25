@@ -234,7 +234,8 @@ export async function positionalConsumers(stream, { kTests = loadKTests() } = {}
     if (!k || k.primitive !== 'shuffle' || !/^shuffle\/positional\//.test(k.id)) continue;
     const n = k.parameters.n, M = ent.M;
     if (k.df !== Q.df(n)) throw new Error(`${k.id}: K df ${k.df} != (n-1)^2 = ${Q.df(n)}`);
-    fixed.push({ id: k.id, w: 1, M, create: () => Q.positionalAccumulator(n), finish: (a) => ({ id: k.id, ...Q.positionalStatistic(a.C, n, M) }) });
+    // F-MI-1 (TE, CTO 22:24): the launcher hands add() the w=1 window [v]; the accumulator wants the permutation v itself.
+    fixed.push({ id: k.id, w: 1, M, create: () => { const a = Q.positionalAccumulator(n); return { C: a.C, n, add: (win) => a.add(win[0]), merge: (o) => a.merge(o) }; }, finish: (a) => ({ id: k.id, ...Q.positionalStatistic(a.C, n, M) }) });
   }
   return { fixed, seq: [] };
 }

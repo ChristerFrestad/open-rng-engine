@@ -150,6 +150,27 @@ test('merge equals one pass: coupon and duplicates (sequential, payload files in
   }
 });
 
+test('F-MI-1: a shuffle positional entry streamed through runStreamCore completes at N = 2 and N = 32, and its statistic equals one pass', async () => {
+  const id = 'shuffle/positional/n-52', M = 64, n = 52;
+  const Q = await import('../verification/statistic/positional-statistic.mjs');
+  const one = Q.positionalAccumulator(n); for (const v of onePass(id, M)) one.add(v);
+  const want = Q.positionalStatistic(one.C, n, M);
+  for (const N of [2, 32]) {
+    const plan = P.buildPlan({ runId: 'rt', M: { [id]: M }, N });
+    const stream = plan.streams[0];
+    assert.equal(stream.parts.length, N);
+    const dir = tmp('pos');
+    try {
+      const consumers = await L.positionalConsumers(stream, { kTests: K });
+      assert.equal(consumers.fixed.length, 1);
+      const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
+      assert.equal(res.counted, true, `N=${N} ${JSON.stringify(res.attempts)}`);
+      const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)))[id];
+      assert.equal(st.x2, want.x2, `N=${N}`); assert.equal(st.df, want.df); assert.equal(st.p, want.p);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
 test('D22-3: a shared stream read as w=1 values and w=2 windows; windows never straddle parts; merge equals one pass', async () => {
   const plan = P.buildPlan({ runId: 'rt', M: { 'randomInt/chi2/min-0-max-38': 50, 'randomInt/ordered-pair-chi2/min-0-max-38': 40 }, N: 3 });
   const stream = plan.streams[0];

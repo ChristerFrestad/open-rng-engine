@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A25-2 wiring mutants M39–M54 (Backend). Each mutant is one exact, single-occurrence text edit in a copy of the
+// A25-2 wiring mutants M39–M55 (Backend). Each mutant is one exact, single-occurrence text edit in a copy of the
 // tracked tree; it is KILLED when its named test(s) fail on the copy. HEAVY (one process tree per mutant): run only in a
 // HoQ slot (Addendum A). `--dry` is light: it only checks that every edit applies exactly once on this tree.
 // Usage: node tools/ci/a25-2-wiring-mutants.mjs [--dry] [--only M39,M40]
@@ -27,6 +27,7 @@ export const MUTANTS = Object.freeze([
   { id: 'M47', what: 'manifest file digest not compared with the grant digest (swapped manifest passes)', file: 'tools/ci/a25-manifest.mjs', from: "  if (sha(bytes) !== expectedSha) return { ok: false, code: EXIT_A25_MANIFEST_DIGEST, why: 'manifest file digest differs from the bound digest' };\n", to: '', test: [W, '^W4:'], killOn: onCode(90) },
   { id: 'M48', what: 'lockdown not installed in helper mode', file: BS, from: '  installLockdown({ isManifestUrl: makeIsManifestUrl(VIEW, A25_DYNAMIC_BUILTINS), abort: helperAbort, registerRefuseHook });\n', to: '', test: [W, 'W1c'], killOn: onCode(94) },
   { id: 'M49', what: 'scheme check skips data: (CTO ruling c)', file: BS, from: "const SCHEME_OK = (u) => u === HELPER_GATE_URL || u.startsWith('file:')", to: "const SCHEME_OK = (u) => u === HELPER_GATE_URL || u.startsWith('data:') || u.startsWith('file:')", test: [W, 'W-scheme'], killOn: /late resolve: scheme not allowed in helper mode: data:/ },
+  { id: 'M55', what: 'positional consumer window unwrap removed (F-MI-1)', file: SL, from: 'add: (win) => a.add(win[0])', to: 'add: (win) => a.add(win)', test: [ST, '^F-MI-1'], killOn: /positional: outcome is not a permutation of 52/ },
   // A25-M11 retirement: one kill per refusal on the parentless-code paths (HoQ 22:22 (2)).
   { id: 'M50', what: 'eval refusal removed (M11 replacement)', file: LD, from: "    [globalThis, 'eval', codegenStub('eval')],\n", to: '', test: [BARE, 'M50\\)'], killOn: onCode(91) },
   { id: 'M51', what: 'new Function refusal removed (M11 replacement)', file: LD, from: '  locks[1][2] = FnStub;\n  locks.push([Function.prototype, \'constructor\', FnStub]);\n', to: "  locks[1][2] = Function;\n", test: [BARE, 'M51\\)'], killOn: onCode(91) },
