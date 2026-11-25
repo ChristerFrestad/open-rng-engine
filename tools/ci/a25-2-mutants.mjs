@@ -19,6 +19,19 @@ const BS = 'tools/ci/entropy-backstop.mjs', MAN = 'tools/ci/a25-manifest.mjs', L
 // `export function <override>(` to a private name and appends an exported replacement that may call it as __orig(...),
 // so a mutant of a frozen v1 function needs only its name and signature, not the integrator's code. [file, { re, to }]
 // replaces the one match of a RegExp in that file, or (file '*') in exactly one tools/ci/*.mjs file.
+// R-A29-3 (residual, HoQ ruling 2026-11-25 ~21:20 CET): the real randomFillSync was probed through the INSTALLED gate
+// (helper mode, preload, node 24.22.1, base 150edc5d, 2-call budget): (a) a Uint8Array whose buffer was transferred
+// away with structuredClone(buf, { transfer: [buf.buffer] }) reaches the native fill with byteLength 0 and the fill
+// RETURNS (no throw); (b) offset/size out of range never reaches the fill: the gate refuses 3 arguments with exit 87.
+// No black-box path makes the native fill throw, so the finally-clear of the installed gate is carried by factory
+// identity (test/r-g64-a25.test.mjs pins that the installed gate is makeHelperGate(origFill)) plus the seam tests in
+// test/r-g64-a25-2.test.mjs, killed by A29-3-M11..M15 below.
+// EQ-1 (equivalent mutant, not in the list on purpose; HoQ accepted as EQUIVALENT): "a wrapped primitive aborts in
+// helper mode only while the gate token is CLEAR". The token is set only for the duration of the synchronous native
+// fill (token = true; try { fill(target) } finally { token = false }), and the native fill runs no JavaScript: no
+// callback, no getter on the view (the gate already rejected anything but a plain Uint8Array with intrinsic
+// byteLength). So no wrapped primitive can ever be called while the token is set, every A25-6(v) re-entry takes the
+// token-clear path, and that mutant behaves identically on every input: no test can kill it.
 const MUTANTS = [
   // A25-6 (i) -> 89
   ['A6i-M1 verifyLoad lets a module outside the manifest through', [[MAN, { override: 'verifyLoad', params: 'url, sourceBytes, manifest', body: 'if (!manifest.files.some((f) => f.url === url)) return; return __orig(url, sourceBytes, manifest);' }]]],
