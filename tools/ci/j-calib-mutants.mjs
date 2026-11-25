@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RS_TEST = 'test/r-g64-stream.test.mjs';
+const RP_TEST = 'test/r-g64-positional.test.mjs';
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/calibration/wave1-source.mjs';
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
@@ -72,6 +73,11 @@ const MUTANTS = [
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],
+  // R-G64 item 2 (HoQ addendum 1 R118-4): positional ((n-1)/n)·X², df (n-1)².
+  ['RP-1 raw X² compared with χ² (no (n-1)/n scaling)', [['verification/statistic/positional-statistic.mjs', 'const x2 = scale(n) * raw;', 'const x2 = raw;']], RP_TEST],
+  ['RP-2 df n²-1 instead of (n-1)²', [['verification/statistic/positional-statistic.mjs', 'export const df = (n) => (n - 1) * (n - 1);', 'export const df = (n) => n * n - 1;']], RP_TEST],
+  ['RP-3 row/column sums not checked', [['verification/statistic/positional-statistic.mjs', 'if (rows[i] !== M || cols[i] !== M) throw', 'if (false) throw']], RP_TEST],
+  ['RP-4 merge drops the last cell', [['verification/statistic/positional-statistic.mjs', 'for (let i = 0; i < C.length; i++) C[i] += o.C[i];', 'for (let i = 0; i < C.length - 1; i++) C[i] += o.C[i];']], RP_TEST],
   // R-G64 streamed harness (HoQ addendum 1, A22 and D22-1..8).
   ['RS-1 H j/n_j not checked against the plan (A22)', [['verification/harness/stream-launcher.mjs', 'if (h.j !== j || h.calls !== want) return fail(', 'if (false) return fail(']], RS_TEST],
   ["RS-2 merge uses the result's part count, not the plan's N (A22)", [['verification/harness/stream-launcher.mjs', "  const N = stream.parts.length; // the plan's N", "  const N = res.parts.length; // the plan's N"]], RS_TEST],

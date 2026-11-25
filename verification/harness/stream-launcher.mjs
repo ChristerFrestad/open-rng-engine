@@ -183,6 +183,26 @@ export async function wave1Consumers(stream, { observations = {} } = {}) {
   return { fixed, seq };
 }
 
+// ---------------- shuffle positional consumers (R118-4: ((n-1)/n)·X², df (n-1)², every n) ----------------
+export async function positionalConsumers(stream, { kTests = loadKTests() } = {}) {
+  const Q = await import('../statistic/positional-statistic.mjs');
+  const fixed = [];
+  for (const ent of stream.entries) {
+    const k = kTests.find((x) => x.id === ent.id);
+    if (!k || k.primitive !== 'shuffle' || !/^shuffle\/positional\//.test(k.id)) continue;
+    const n = k.parameters.n, M = ent.M;
+    if (k.df !== Q.df(n)) throw new Error(`${k.id}: K df ${k.df} != (n-1)^2 = ${Q.df(n)}`);
+    fixed.push({ id: k.id, w: 1, M, create: () => Q.positionalAccumulator(n), finish: (a) => ({ id: k.id, ...Q.positionalStatistic(a.C, n, M) }) });
+  }
+  return { fixed, seq: [] };
+}
+
+// Every consumer of a stream: the wave-1 statistic module and the positional statistic module.
+export async function streamConsumers(stream, opts = {}) {
+  const a = await wave1Consumers(stream, opts), b = await positionalConsumers(stream, opts);
+  return { fixed: [...a.fixed, ...b.fixed], seq: [...a.seq, ...b.seq] };
+}
+
 // ---------------- D22-5: evidence only from a dedicated pinned clone ----------------
 export const CLONE_MARK = 'evidence-clone.json';
 export function prepareEvidenceClone(origin, commit, dir) {
@@ -244,7 +264,7 @@ export async function runStreamPlan(plan, { runDir, pinned, observations = {}, m
   if (expect.src.sha256 !== bind.src_digest) throw new Error('src changed while binding');
   const results = [];
   for (const stream of plan.streams) {
-    const consumers = await wave1Consumers(stream, { observations });
+    const consumers = await streamConsumers(stream, { observations });
     const rec = join(runDir, `${stream.id}.json`);
     if (existsSync(rec)) {
       const prev = JSON.parse(readFileSync(rec, 'utf8'));
