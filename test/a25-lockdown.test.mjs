@@ -7,10 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { buildManifest } from '../tools/ci/a25-manifest.mjs';
+import { helperSpawnEnv } from '../verification/harness/stream-launcher.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const LOCKDOWN = join(ROOT, 'tools/ci/a25-lockdown.mjs');
@@ -218,13 +220,53 @@ test('A25-2 under the backstop preload (normal mode): every class still aborts w
   expectAbort(94, "await import('./b.mjs');", { preload: true });
   expectSurvive(`await import(${JSON.stringify(url('a.mjs'))}); require('./c.cjs');`, { preload: true });
 });
-test('A25-2 under the backstop preload in helper mode (ENTROPY_BACKSTOP_HELPER=a25): codes unchanged, manifest import allowed', () => {
-  const env = { ENTROPY_BACKSTOP_HELPER: 'a25' };
-  expectAbort(91, "new Function('return 1');", { preload: true, env });
-  expectAbort(92, "await import('node:vm');", { preload: true, env });
-  expectAbort(93, `require(${JSON.stringify(join(DIR, 'fake.node'))});`, { preload: true, env });
-  expectAbort(94, "await import('./b.mjs');", { preload: true, env });
-  expectSurvive(`await import(${JSON.stringify(url('a.mjs'))});`, { preload: true, env });
+// Helper mode (ENTROPY_BACKSTOP_HELPER=a25): the preload itself installs the lockdown last (Backend's wiring), with
+// isManifestUrl from the manifest bound through the grant, so the case script does NOT call installLockdown and the
+// abort is the backstop's helperAbort. The env comes from the launcher's one builder (helperSpawnEnv) and the manifest
+// from buildManifest, rooted at '/' (the case files live in a temp dir outside the tree), listing the case file, the
+// manifest fixtures (a.mjs, its static import b.mjs, c.cjs, fake.node) and every file under src/, tools/ci/ and
+// verification/harness/. g.mjs is outside the manifest (the 94 target); a static import of it would be 89, not ours.
+const HELPER_TOKEN = 'grant-1@1#a25-lockdown';
+function listUnder(abs) {
+  const out = [];
+  for (const e of readdirSync(abs, { withFileTypes: true })) { const p = join(abs, e.name); if (e.isDirectory()) out.push(...listUnder(p)); else out.push(p); }
+  return out;
+}
+writeFileSync(join(DIR, 'g.mjs'), 'export const g = 7;\n');
+function runHelper(body) {
+  const f = join(DIR, `helper-${++n}.mjs`);
+  writeFileSync(f, [
+    `import { writeSync } from 'node:fs';`,
+    `import { createRequire } from 'node:module';`,
+    `const require = createRequire(import.meta.url);`,
+    `try {`, body, `} catch (e) { writeSync(1, 'CAUGHT ' + (e && e.message) + '\\n'); }`,
+    `writeSync(1, 'SURVIVED\\n');`,
+  ].join('\n'));
+  const files = [f, ...['a.mjs', 'b.mjs', 'c.cjs', 'fake.node'].map((x) => join(DIR, x))];
+  for (const d of ['src', 'tools/ci', 'verification/harness']) files.push(...listUnder(join(ROOT, d)));
+  const { bytes, sha256 } = buildManifest('/', files.map((x) => x.slice(1)));
+  const manifestPath = join(DIR, `helper-${n}.manifest.json`);
+  writeFileSync(manifestPath, bytes);
+  const env = helperSpawnEnv(process.env, { token: HELPER_TOKEN, manifestPath, manifestSha256: sha256 });
+  const r = spawnSync(process.execPath, ['--import', BACKSTOP, f], { cwd: DIR, encoding: 'utf8', env, timeout: 30000 });
+  return { code: r.status, out: r.stdout, err: r.stderr };
+}
+function expectHelperAbort(code, body, reason) {
+  const r = runHelper(body);
+  assert.equal(r.code, code, `expected exit ${code}, got ${r.code}\nstdout: ${r.out}\nstderr: ${r.err}`);
+  assert.match(r.err, reason);
+  assert.doesNotMatch(r.out, /SURVIVED/);
+}
+test('A25-2 under the backstop preload in helper mode (ENTROPY_BACKSTOP_HELPER=a25, grant-bound manifest): codes unchanged, manifest import allowed', () => {
+  expectHelperAbort(91, "new Function('return 1');", /A25-2 lockdown: /);
+  expectHelperAbort(91, "eval('1');", /A25-2 lockdown: /);
+  expectHelperAbort(92, "await import('node:vm');", /A25-2 lockdown: /);
+  expectHelperAbort(93, `require(${JSON.stringify(join(DIR, 'fake.node'))});`, /A25-2 lockdown: /);
+  expectHelperAbort(94, "await import('./g.mjs');", /A25-2 lockdown: /);
+  const r = runHelper(`await import(${JSON.stringify(url('a.mjs'))}); require('./c.cjs');`);
+  assert.equal(r.code, 0, `expected exit 0, got ${r.code}\nstdout: ${r.out}\nstderr: ${r.err}`);
+  assert.match(r.out, /SURVIVED/);
+  assert.doesNotMatch(r.out, /CAUGHT/);
 });
 test('A25-2 source rules: no import from the backstop, no node:crypto, no wrapped CSPRNG entry point', () => {
   const src = readFileSync(LOCKDOWN, 'utf8');
