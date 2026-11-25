@@ -2033,9 +2033,37 @@ export function selfTest() {
   return fails;
 }
 
+// HoQ A19 N-A19-1: check:ph0 runs this file plain (no entropy-backstop preload), so the rule27 child-runner
+// tests M-A17-1 and N-A18-1 are re-run here as a plain-node child. That is the gating mode in which
+// runChecked's r.error branch is reachable (under the npm test preload the backstop throws first). It is
+// deliberately NOT a plain-node child inside npm test: the backstop must keep refusing children that drop
+// the preload. Runs only for the real checker file, not for the M-167 scratch copies the tests make.
+export const N19_PATTERN = 'N-A18-1|M-A17-1';
+export const N19_EXPECTED_TESTS = 2;
+function n19PlainNodeStep() {
+  const here = new URL(import.meta.url).pathname;
+  if (!here.endsWith('/tools/ci/import-allowlist.mjs')) return { ok: true, line: 'N-A19-1 plain-node step: skipped (not the real checker file)' };
+  const root = join(dirname(here), '..', '..');
+  // When this self-test itself runs inside a node:test file (the 218-fixture test in npm test), the inherited
+  // NODE_TEST_CONTEXT would make the nested `node --test` skip running files; drop it so the step really runs.
+  const childEnv = { ...process.env }; delete childEnv.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ['--test', `--test-name-pattern=${N19_PATTERN}`, join(root, 'test', 'rule27-import-allowlist.test.mjs')],
+    { cwd: root, encoding: 'utf8', timeout: 180_000, killSignal: 'SIGKILL', env: childEnv });
+  const out = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+  const pass = Number((/^ℹ pass (\d+)$/m.exec(out) ?? [])[1]);
+  const fail = Number((/^ℹ fail (\d+)$/m.exec(out) ?? [])[1]);
+  if (r.error || r.signal !== null || r.status !== 0 || pass !== N19_EXPECTED_TESTS || fail !== 0) {
+    const why = r.error ? `did not run (${r.error.code ?? r.error.message})` : r.signal !== null ? `killed by signal ${r.signal}` : `exit ${r.status}, pass ${pass}, fail ${fail}, expected pass ${N19_EXPECTED_TESTS} fail 0`;
+    return { ok: false, line: `N-A19-1 plain-node step FAILED: ${why}\n${out}` };
+  }
+  return { ok: true, line: `N-A19-1 plain-node step: ${pass}/${N19_EXPECTED_TESTS} rule27 child-runner tests pass without the preload` };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (process.argv[2] === '--self-test') {
-    const f = selfTest(); console.log(f.length ? f.join('\n') : `rule27 self-test: ${Object.keys(BAD).length} known-bad fixtures red, good fixture green, ${SELF_TEST_EXTRA_CASES.length} extra cases ok (${SELF_TEST_EXTRA_CASES.join(', ')})`); process.exit(f.length ? 1 : 0);
+    const f = selfTest(); console.log(f.length ? f.join('\n') : `rule27 self-test: ${Object.keys(BAD).length} known-bad fixtures red, good fixture green, ${SELF_TEST_EXTRA_CASES.length} extra cases ok (${SELF_TEST_EXTRA_CASES.join(', ')})`);
+    const g = n19PlainNodeStep(); console.log(g.line); if (!g.ok) f.push(g.line);
+    process.exit(f.length ? 1 : 0);
   }
   const args = process.argv.slice(2); const phaseExit = args.includes('--phase-exit');
   const root = args.find((x) => !x.startsWith('--')) ?? process.cwd();
