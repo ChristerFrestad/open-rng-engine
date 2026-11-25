@@ -404,10 +404,11 @@ function installHelperMode(cryptoMod) {
   const HELPER_MAIN_REL = 'verification/harness/evidence-helper.mjs';
   const mainIsHelper = MAIN_URL !== null && VIEW.entries.has(HELPER_MAIN_REL) && MAIN_URL === pathToFileURL(join(VIEW.root, HELPER_MAIN_REL)).href;
   let lateHookUsed = false;
+  const realRegisterHooks = registerHooks; // the saved original (the wrapper below is named registerHooks too)
   const lateRegisterHooks = function registerHooks(hooks) {
     if (!mainIsHelper || lateHookUsed) helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2)');
     lateHookUsed = true;
-    return registerHooks(hooks);
+    return realRegisterHooks(hooks);
   };
   const lateRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2)'); };
   Object.defineProperty(nodeModule, 'registerHooks', { value: lateRegisterHooks, writable: false, configurable: false, enumerable: true });
@@ -416,7 +417,7 @@ function installHelperMode(cryptoMod) {
   if (nodeModule.registerHooks !== lateRegisterHooks || nodeModule.register !== lateRegister) helperAbort(EXIT_A25_IMPORT, 'late-hook guard not in place');
 }
 // import() of a builtin in helper mode: none today (the helper's dynamic imports are manifest files); the trace at
-// the A31 prereg re-pins this list together with HELPER_PLAN.manifest_relpaths.
+// the A31 prereg re-pins this list together with the pinned helper closure (verification/harness/helper-closure.json).
 const A25_DYNAMIC_BUILTINS = Object.freeze([]);
 
 function wrapFn(id, orig) {
@@ -877,7 +878,7 @@ export function childPreloadProof(child) {
   let body;
   try { body = JSON.parse(readFileSync(p, 'utf8')); } catch { body = null; }
   const ok = body !== null && typeof body === 'object' && !Array.isArray(body);
-  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
+  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token, manifest_sha256: body.manifest_sha256 ?? null } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
 }
 let proofDir = null;
 let proofSeq = 0;
@@ -1052,7 +1053,7 @@ function writeProof() {
   if (!p) return;
   // A25-1: the proof names this process, the preload's own digest and the spawn token it was started with. 'wx':
   // a file that already exists is never overwritten, so a stale proof keeps its old pid and token (and voids).
-  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN });
+  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN, manifest_sha256: MANIFEST_SHA256 }); // A25-2: the grant-bound manifest digest (null outside helper mode)
   try { writeFileSync(p, body, { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
   delete process.env[PROOF_ENV];
 }

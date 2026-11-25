@@ -43,6 +43,8 @@ export const BOUND_FILES = Object.freeze([
   'verification/harness/stream-frames.mjs', 'verification/harness/run-plan.mjs',
   'verification/statistic/wave1-statistic.mjs', 'verification/statistic/positional-statistic.mjs',
   'verification/harness/rc-decision.mjs',
+  // A25-2: the preload's own imports (loaded before any hook) and the pinned helper closure the manifest is built from.
+  'tools/ci/a25-manifest.mjs', 'tools/ci/a25-lockdown.mjs', 'verification/harness/helper-closure.json',
 ]);
 export function bindings(root = ROOT) {
   const files = {};
@@ -105,6 +107,13 @@ export const planDigest = (plan) => sha(JSON.stringify(plan));
 // plan (counted: true) may have no part with fewer planned outcomes (one gate call per outcome at least), and a counted
 // part whose trailer reports fewer gate calls voids. Non-counted plans (tests) keep tiny parts.
 export const HELPER_PLAN = Object.freeze({ mode: 'a25', sample_k: 12, first_walk: 10000, min_sampled_hits: 20, part_floor: 91920 });
+// A25-2 (design v1 §1): the evidence helper's traced module closure (tools/ci/a25-trace-closure.mjs --write), pinned
+// in verification/harness/helper-closure.json (a bound file). The helper manifest is built from exactly these paths.
+export function helperManifestRelpaths(root = ROOT) {
+  const c = JSON.parse(readFileSync(join(root, 'verification/harness/helper-closure.json'), 'utf8'));
+  if (!c || c.version !== 1 || !Array.isArray(c.relpaths) || c.relpaths.length === 0 || !c.relpaths.every((p) => typeof p === 'string')) throw new Error('helper-closure.json: bad shape (A25-2)');
+  return Object.freeze([...c.relpaths]);
+}
 // Number of gate calls the A25-4 rule walks among the first n: all of the first F, then every index i >= F with
 // i mod 2^k = 0.
 export function expectedWalks(n, { sample_k, first_walk } = HELPER_PLAN) {

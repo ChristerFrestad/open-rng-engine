@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import * as P from '../verification/harness/run-plan.mjs';
 import * as L from '../verification/harness/stream-launcher.mjs';
 import * as S from '../verification/statistic/wave1-statistic.mjs';
 import { statisticFromRecords } from '../verification/harness/wave1-evidence.mjs';
+import { buildManifest } from '../tools/ci/a25-manifest.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const FAKE = join(ROOT, 'test/fixtures/r-g64-fake-helper.mjs');
@@ -21,6 +22,19 @@ const K = P.loadKTests(ROOT);
 const kOf = (id) => K.find((k) => k.id === id);
 const env = () => ({ ...process.env }); // under npm test the children load the backstop too (and prove it)
 const tmp = (p) => mkdtempSync(join(tmpdir(), `rg64-${p}-`));
+// A25-2: helper-mode children need a manifest bound through the grant (L.helperSpawnEnv). Test manifests list every
+// file under src/, verification/ and tools/ci/ (a superset of the traced closure); `extra` adds absolute paths outside
+// the tree, which roots the manifest at '/'.
+function walk(abs) { const out = []; for (const e of readdirSync(abs, { withFileTypes: true })) { const p = join(abs, e.name); if (e.isDirectory()) out.push(...walk(p)); else out.push(p); } return out; }
+function testManifest(dir, extra = []) {
+  const files = ['src', 'verification', 'tools/ci'].flatMap((d) => walk(join(ROOT, d)));
+  const root = extra.length ? '/' : ROOT.replace(/\/$/, '');
+  const rel = [...files, ...extra].map((f) => (root === '/' ? f.slice(1) : f.slice(root.length + 1)));
+  const { bytes, sha256 } = buildManifest(root, rel);
+  const manifestPath = join(dir, 'manifest.json');
+  writeFileSync(manifestPath, bytes);
+  return { manifestPath, manifestSha256: sha256 };
+}
 
 // spawnPart for the fixture: the same global sequence whatever the partition. faults: { 'attempt:j': fault }.
 function fakeSpawn(plan, { seed = 's', faults = {} } = {}) {
@@ -296,7 +310,8 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
   const plan = P.buildPlan({ runId: 'real', M: { [id]: 40 }, N: 2 });
   const stream = plan.streams[0];
   const dir = tmp('real');
-  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25', ENTROPY_BACKSTOP_GRANT: token }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
+  const man = testManifest(mkdtempSync(join(tmpdir(), 'rg64-man-')));
+  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: L.helperSpawnEnv(env(), { token, ...man }), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
   try {
     const consumers = await L.wave1Consumers(stream);
     const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), grant: grantView() });
@@ -465,6 +480,17 @@ test('A25-1: the header names the preload (path, digest of the bound file, helpe
 });
 test('A25-1: the helper-mode preload reads the spawn token once, removes it from the env and reports it', () => {
   const body = "const s = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].helper.state; process.stdout.write(JSON.stringify({ grant: s.grant, env: process.env.ENTROPY_BACKSTOP_GRANT ?? null }));\n";
-  assert.deepEqual(preloadedProbe(body, { ENTROPY_BACKSTOP_HELPER: 'a25', ENTROPY_BACKSTOP_GRANT: `${TOKEN}#7` }), { grant: `${TOKEN}#7`, env: null });
-  assert.deepEqual(preloadedProbe(body, { ENTROPY_BACKSTOP_HELPER: 'a25' }), { grant: null, env: null });
+  // A25-2: the helper env comes from the launcher's builder (grant '<token>|m=<manifest sha>'); the preload reports the
+  // token part only, and a helper-mode spawn with no grant (so no bound manifest digest) exits 90 before main.
+  const d = tmp('probe-man'), f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, body.replace('env: process.env.ENTROPY_BACKSTOP_GRANT ?? null', 'env: process.env.ENTROPY_BACKSTOP_GRANT ?? null, man: process.env.ENTROPY_BACKSTOP_MANIFEST ?? null'));
+    const e = L.helperSpawnEnv(env(), { token: `${TOKEN}#7`, ...testManifest(d, [f]) });
+    const r = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { grant: `${TOKEN}#7`, env: null, man: null });
+    const e2 = { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25' }; delete e2.NODE_OPTIONS; delete e2.ENTROPY_BACKSTOP_GRANT;
+    const r2 = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e2, encoding: 'utf8' });
+    assert.equal(r2.status, 90, r2.stderr); assert.equal(r2.stdout, '');
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

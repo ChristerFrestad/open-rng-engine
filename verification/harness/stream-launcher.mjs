@@ -14,7 +14,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FRAME, FrameReader, codecFor } from './stream-frames.mjs';
 import { outcomeShapeError } from './collector.mjs';
-import { HELPER_PLAN, ROOT, bindings, expectedWalks, loadKTests, planDigest, reuseMismatches, srcManifest } from './run-plan.mjs';
+import { HELPER_PLAN, ROOT, bindings, helperManifestRelpaths, expectedWalks, loadKTests, planDigest, reuseMismatches, srcManifest } from './run-plan.mjs';
 import { assertEvidenceRunReady } from './evidence-entry.mjs';
 import { GRANT_MANIFEST_SEP, MANIFEST_ENV, buildManifest } from '../../tools/ci/a25-manifest.mjs';
 
@@ -87,6 +87,7 @@ function partReader(ctx, j) {
     else if (pr.token !== st.token) fail('proof token is not this spawn\'s token (A25-1)');
     else if (pr.preload_sha256 !== ctx.helperExpect.backstop_sha256) fail('proof preload digest differs from the bound backstop (A25-1)');
     else if (pr.pid !== st.child.pid) fail('proof names another process (A25-1)');
+    else if (ctx.helperExpect.manifest_sha256 !== null && pr.manifest_sha256 !== ctx.helperExpect.manifest_sha256) fail('proof manifest digest differs from the header-bound manifest (A25-2)');
     else if (!(pr.mtime_ms >= st.spawnedAt - PROOF_CLOCK_SLACK_MS)) fail('proof older than the spawn (A25-1)');
     if (code !== 0 || signal) fail(`helper exit ${code}${signal ? ` signal ${signal}` : ''}`);
     if (!st.H) fail('no H frame');
@@ -108,7 +109,7 @@ function partReader(ctx, j) {
 
 // ---------------- one stream: attempts until one counts (integrity voids only) ----------------
 export async function runStreamCore(plan, stream, opts) {
-  const { spawnPart, runDir, consumers = { fixed: [], seq: [] }, expect, maxAttempts = 3, kTests = loadKTests(), grant } = opts;
+  const { spawnPart, runDir, consumers = { fixed: [], seq: [] }, expect, maxAttempts = 3, kTests = loadKTests(), grant, manifestSha256 = null } = opts;
   // A25-1: every part runs inside a live evidence grant: { base, live(), next(), proof(child) }. next() gives each
   // spawn a fresh token base#nonce; a token is never used twice in a run (design v2).
   if (!grant || typeof grant.base !== 'string' || typeof grant.live !== 'function' || typeof grant.next !== 'function' || typeof grant.proof !== 'function') throw new Error(`${stream.id}: runStreamCore needs a live evidence grant (A25-1)`);
@@ -119,7 +120,9 @@ export async function runStreamCore(plan, stream, opts) {
   // A25-4 / CTO change 4: k is fixed by the code, never by the run; a plan with another helper block is refused.
   const hp = plan.helper;
   if (!hp || hp.mode !== HELPER_PLAN.mode || hp.sample_k !== HELPER_PLAN.sample_k || hp.first_walk !== HELPER_PLAN.first_walk || hp.min_sampled_hits !== HELPER_PLAN.min_sampled_hits || hp.part_floor !== HELPER_PLAN.part_floor) throw new Error(`${stream.id}: plan helper block ${JSON.stringify(hp ?? null)} differs from ${JSON.stringify(HELPER_PLAN)} (A25-4)`);
-  const helperExpect = { ...HELPER_PLAN, backstop_sha256: sha(readFileSync(BACKSTOP)) };
+  if (manifestSha256 !== null && !/^[0-9a-f]{64}$/.test(String(manifestSha256))) throw new Error(`${stream.id}: manifestSha256 must be 64 lowercase hex (A25-2)`);
+  // A25-2 (design v1 W6): when the run binds a helper manifest, every proof must name that manifest's sha256.
+  const helperExpect = { ...HELPER_PLAN, backstop_sha256: sha(readFileSync(BACKSTOP)), manifest_sha256: manifestSha256 };
   // A25-4b: in a counted plan every part must be able to reach the sampled-walk floor; refused before any spawn.
   const counted = plan.counted === true;
   if (counted) { const j = stream.parts.findIndex((n) => n < HELPER_PLAN.part_floor); if (j >= 0) throw new Error(`${stream.id}: counted plan part ${j} has ${stream.parts[j]} outcomes, below the A25 part floor ${HELPER_PLAN.part_floor} gate calls (A25-4b)`); }
@@ -315,11 +318,10 @@ export function helperSpawnEnv(baseEnv, { token, manifestPath, manifestSha256 } 
   env.ENTROPY_BACKSTOP_GRANT = `${token}${GRANT_MANIFEST_SEP}${manifestSha256}`;
   return env;
 }
-// A25-2: the helper manifest for this clone, from the frozen traced closure HELPER_PLAN.manifest_relpaths. Written
-// into runDir; its sha256 is bound in the header (preload.manifest_sha256) and in every grant.
+// A25-2: the helper manifest for this clone, from the pinned traced closure (helper-closure.json, a bound file).
+// Written into runDir; its sha256 is bound in the header (preload.manifest_sha256), in every grant and every proof.
 export function writeHelperManifest(runDir) {
-  const rel = HELPER_PLAN.manifest_relpaths;
-  if (!Array.isArray(rel) || rel.length === 0) throw new Error('evidence refused: HELPER_PLAN.manifest_relpaths is not pinned (A25-2)');
+  const rel = helperManifestRelpaths(ROOT);
   const { bytes, sha256 } = buildManifest(ROOT, rel);
   const path = join(runDir, 'helper-manifest.json');
   if (!existsSync(path)) writeFileSync(path, bytes, { flag: 'wx' }); // a resumed run re-checks the existing file below
@@ -370,7 +372,7 @@ export async function runStreamPlan(plan, { runDir, pinned, observations = {}, m
       if (bad.length) throw new Error(`${stream.id}: checkpoint not reusable: ${bad.join(', ')} (D22-7)`);
     }
     assertDisk(runDir, payloadBytes(stream, consumers));
-    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan, manifest), runDir, consumers, expect, maxAttempts, grant });
+    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan, manifest), manifestSha256: manifest.sha256, runDir, consumers, expect, maxAttempts, grant });
     const out = { stream: stream.id, counted: res.counted, attempts: res.attempts, d: res.d, digest: res.digest, entries: stream.entries.map((e) => e.id), bindings: bind };
     if (res.counted) {
       COUNTED.set(out, out.digest);

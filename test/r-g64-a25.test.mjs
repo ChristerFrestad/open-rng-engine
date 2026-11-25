@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as P from '../verification/harness/run-plan.mjs';
-import { ROOT, BACKSTOP, MARK, sha, child } from './fixtures/a25-child.mjs';
+import { ROOT, BACKSTOP, MARK, sha, child, FIXTURE_TOKEN } from './fixtures/a25-child.mjs';
 // The hostile-tree cases (temp copy of src/ and the preload) and the install-abort case need a parent without the
 // preload: a preloaded parent (npm test) adds its own preload to every node child and refuses an unproven one. They
 // live in test/r-g64-a25-bare.mjs, which tools/ci/j-calib-mutants.mjs runs bare (A25 baseline + A25-M*), never skipped.
@@ -36,7 +36,7 @@ test('A25 mode: src runs through the gate; state, leak check and walk counts are
 process.stdout.write(JSON.stringify({ state: M().state, leak: M().assertNoGateLeak(E), counts: M().counts() }));`);
   assert.equal(r.status, 0, r.err);
   const o = JSON.parse(r.out);
-  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor, backstop_sha256: sha(readFileSync(BACKSTOP)), grant: null });
+  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor, backstop_sha256: sha(readFileSync(BACKSTOP)), grant: FIXTURE_TOKEN }); // A25-2: helper mode always carries a grant
   assert.equal(o.leak, true);
   assert.ok(o.counts.gate_calls >= 30003, JSON.stringify(o.counts));
   assert.equal(o.counts.walks, P.expectedWalks(o.counts.gate_calls));
@@ -51,16 +51,25 @@ test('A25 mode adds no global: own keys of globalThis equal those under the norm
   assert.equal(h.out, 'false');
 });
 
+// A25-2: in helper mode the lockdown refuses import() of any builtin not on the (empty) dynamic allowlist with 94
+// before the call is reached, so the token-clear path is exercised through STATIC imports (hoisted; the call still
+// runs after src has used the gate). The dynamic forms are pinned to 94 below.
 const TOKEN_CLEAR = {
-  'import randomBytes': `(await import('node:crypto')).randomBytes(4);`,
-  'import randomFillSync': `(await import('node:crypto')).randomFillSync(new Uint8Array(4));`,
-  'default import': `(await import('crypto')).default.randomInt(3);`,
-  'createRequire': `(await import('node:module')).createRequire(import.meta.url)('node:crypto').randomFillSync(new Uint8Array(4));`,
+  'import randomBytes': `import * as C1 from 'node:crypto'; C1.randomBytes(4);`,
+  'import randomFillSync': `import * as C2 from 'node:crypto'; C2.randomFillSync(new Uint8Array(4));`,
+  'default import': `import Cd from 'crypto'; Cd.randomInt(3);`,
+  'createRequire': `import * as NM from 'node:module'; NM.createRequire(import.meta.url)('node:crypto').randomFillSync(new Uint8Array(4));`,
   'getBuiltinModule': `process.getBuiltinModule('node:crypto').randomFillSync(new Uint8Array(4));`,
-  'webcrypto': `(await import('node:crypto')).webcrypto.getRandomValues(new Uint8Array(4));`,
+  'webcrypto': `import * as C3 from 'node:crypto'; C3.webcrypto.getRandomValues(new Uint8Array(4));`,
   'globalThis.crypto': `globalThis.crypto.getRandomValues(new Uint8Array(4));`,
   'randomUUID': `globalThis.crypto.randomUUID();`,
 };
+for (const [name, call] of Object.entries({ 'dynamic import() of node:crypto': `(await import('node:crypto')).randomBytes(4);`, 'dynamic import() of node:module': `(await import('node:module')).createRequire(import.meta.url)('node:crypto');` })) {
+  test(`A25-2 over A25-3: ${name} in helper mode exits 94 (lockdown, before any call)`, () => {
+    const r = child(`const E = await import(SRC); E.integer(0, 10);\n${call}\nprocess.stdout.write('ALIVE');`);
+    assert.equal(r.status, 94, `${r.status} ${r.err}`); assert.equal(r.out, ''); assert.match(r.err, /dynamic import\(\) of non-manifest/);
+  });
+}
 for (const [name, call] of Object.entries(TOKEN_CLEAR)) {
   test(`A25-3: ${name} with the token clear exits 86, after src has used the gate`, () => {
     const r = child(`const E = await import(SRC); E.integer(0, 10);\n${call}\nprocess.stdout.write('ALIVE');`);
@@ -77,8 +86,12 @@ const GATE_RULES = {
   'parentless vm import of the preload after main started': [`const vm = await import('node:vm'); await vm.runInThisContext(\`import(\${JSON.stringify(new URL('tools/ci/entropy-backstop.mjs', ROOTURL).href)})\`, { importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER }); process.stdout.write('ALIVE');`, /not importable in helper mode \(from undefined\)/],
   'resolve of the preload by import.meta.resolve': [`import.meta.resolve(new URL('tools/ci/entropy-backstop.mjs', ROOTURL).href); await import(new URL('tools/ci/entropy-backstop.mjs', ROOTURL).href);`, /not importable/],
 };
+// A25-2: node:vm is a forbidden module under the lockdown, so the parentless vm case now stops at 92 before it can
+// reach the 87 rule (A25-M11's before-main allowance is unreachable in helper mode; noted to CTO/HoQ).
+const GATE_CODE = { 'parentless vm import of the preload after main started': [92, /module node:vm/] };
 for (const [name, [code, why]] of Object.entries(GATE_RULES)) {
-  test(`A25-3: ${name} exits 87`, () => { const r = child(code); assert.equal(r.status, 87, `${r.status} ${r.err}`); assert.match(r.err, why); });
+  const [want, wantWhy] = GATE_CODE[name] ?? [87, why];
+  test(`A25-3: ${name} exits ${want}`, () => { const r = child(code); assert.equal(r.status, want, `${r.status} ${r.err}`); assert.match(r.err, wantWhy); });
 }
 
 test('A25-3 gate: a prototype change is impossible in helper mode (TypedArray prototypes frozen at install)', () => {
