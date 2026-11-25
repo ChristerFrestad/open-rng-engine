@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const RS_TEST = 'test/r-g64-stream.test.mjs';
 const RP_TEST = 'test/r-g64-positional.test.mjs';
 const RD_TEST = 'test/r-g64-decision.test.mjs';
+const A25_TEST = ['test/r-g64-a25.test.mjs', 'test/r-g64-a25-bare.mjs']; // run here without the preload: the bare file's hostile-src cases need a bare parent
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/calibration/wave1-source.mjs';
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
@@ -109,6 +110,22 @@ const MUTANTS = [
   ['RS-15 parts merged in reverse order', [['verification/harness/stream-launcher.mjs', 'for (let j = 0; j < N; j++) merged.merge(res.parts[j].accs[x]);', 'for (let j = N - 1; j >= 0; j--) merged.merge(res.parts[j].accs[x]);']], RS_TEST],
   ['RS-16 srcDigest_after not compared', [['verification/harness/stream-launcher.mjs', 'if (st.T.src_after !== expect.src.sha256) return fail(', 'if (false) return fail(']], RS_TEST],
   ["RS-17 a killed sibling's reason is listed before the cause", [['verification/harness/stream-launcher.mjs', '    for (const p of parts) noteVoid(p);\n    if (order.length) {', '    order.sort();\n    if (order.length) {']], RS_TEST],
+  ["A25-M1 gate handed off through a global (CTO change 1)", [["tools/ci/entropy-backstop.mjs", "  HELPER_GATE = helperGate;\n", "  HELPER_GATE = helperGate; globalThis.__a25gate = helperGate;\n"]], A25_TEST],
+  ["A25-M2 extra arguments (offset/size, valueOf) not refused (CTO change 2)", [["tools/ci/entropy-backstop.mjs", "  if (arguments.length !== 1) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M3 non-Uint8Array targets not refused", [["tools/ci/entropy-backstop.mjs", "  if (!isView(target) || getProto(target) !== U8P) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M4 own byteLength on the target not refused", [["tools/ci/entropy-backstop.mjs", "  if (hasOwn(target, 'byteLength') || hasOwn(target, 'BYTES_PER_ELEMENT')) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M5 prototypes not frozen in helper mode", [["tools/ci/entropy-backstop.mjs", "  Object.freeze(TAP); Object.freeze(U8P);\n  if (!Object.isFrozen(TAP) || !Object.isFrozen(U8P)) throw", "  if (false) throw"]], A25_TEST],
+  ["A25-M6 leak check removed (CTO change 3)", [["tools/ci/entropy-backstop.mjs", "    if (v === helperGate || v === origFill) helperAbort(", "    if (false) helperAbort("]], A25_TEST],
+  ["A25-M7 first 10^4 gate calls not all walked (A25-4)", [["tools/ci/entropy-backstop.mjs", "  if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {", "  if ((i & HELPER_MASK) === 0) {"]], A25_TEST],
+  ["A25-M8 sample mask k-1 instead of k (A25-4)", [["tools/ci/entropy-backstop.mjs", "  if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {", "  if (i < HELPER_FIRST_WALK || (i & (HELPER_MASK >>> 1)) === 0) {"]], A25_TEST],
+  ["A25-M9 token-clear calls not aborted (A25-3)", [["tools/ci/entropy-backstop.mjs", "    if (HELPER_MODE) helperAbort(EXIT_A25_TOKEN,", "    if (false) helperAbort(EXIT_A25_TOKEN,"]], A25_TEST],
+  ["A25-M10 src/entropy importer guard removed", [["tools/ci/entropy-backstop.mjs", "      if (r.url === ENTROPY_URL && parent !== INDEX_URL) helperAbort(", "      if (false) helperAbort("]], A25_TEST],
+  ["A25-M11 preload importable after the main entry", [["tools/ci/entropy-backstop.mjs", "      if (r.url === MAIN_URL) mainStarted = true;\n", ""]], A25_TEST],
+  ["A25-M12 launcher does not compare the helper k with the plan (CTO change 4)", [["verification/harness/stream-launcher.mjs", "      if (b.mode !== hx.mode || b.sample_k !== hx.sample_k || b.first_walk !== hx.first_walk) return fail(", "      if (b.mode !== hx.mode || b.first_walk !== hx.first_walk) return fail("]], RS_TEST],
+  ["A25-M13 launcher does not check the trailer walk count (A25-4)", [["verification/harness/stream-launcher.mjs", "    if (a.walks !== expectedWalks(a.gate_calls, ctx.helperExpect)) return fail(", "    if (false) return fail("]], RS_TEST],
+  ["A25-M14 launcher accepts an H frame without the helper state", [["verification/harness/stream-launcher.mjs", "      if (!b || typeof b !== 'object') return fail('H has no backstop helper state", "      if (!b || typeof b !== 'object') return; if (false) return fail('H has no backstop helper state"]], RS_TEST],
+  ["A25-M15 launcher does not compare the backstop digest (A25-1)", [["verification/harness/stream-launcher.mjs", "      if (b.backstop_sha256 !== hx.backstop_sha256) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M16 launcher does not require the leak check", [["verification/harness/stream-launcher.mjs", "      if (h.gate_leak_check !== true) return fail(", "      if (false) return fail("]], RS_TEST],
   ['RS-18 voided attempt kept as counted', [['verification/harness/stream-launcher.mjs', "      continue; // the voided attempt's accumulators", "      attempts.at(-1).void = null; // the voided attempt's accumulators"]], RS_TEST],
 ];
 
@@ -140,12 +157,12 @@ function run(label, edits, testFile = TEST) {
   return new Promise((done) => {
     const d = scratch(edits);
     const env = { ...process.env }; delete env.NODE_OPTIONS;
-    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', testFile], { cwd: d, env });
+    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', ...[testFile].flat()], { cwd: d, env });
     let out = ''; c.stdout.on('data', (b) => { out += b; }); c.stderr.on('data', (b) => { out += b; });
     c.on('close', (status) => {
       rmSync(d, { recursive: true, force: true });
       const failed = [...out.matchAll(/^not ok \d+ - (.*)$/gm)].map((m) => m[1].trim());
-      done({ label, status, failed, behavioural: failed.filter((f) => !DIGEST_TESTS.some((r) => r.test(f))) });
+      done({ label, status, failed, skipped: (out.match(/# SKIP/g) || []).length, behavioural: failed.filter((f) => !DIGEST_TESTS.some((r) => r.test(f))) });
     });
   });
 }
@@ -153,6 +170,10 @@ function run(label, edits, testFile = TEST) {
 const base = await run('baseline (re-pin only)', []);
 console.log(`${base.label}: ${base.status === 0 && base.failed.length === 0 ? 'green' : `NOT green: ${base.failed.join('; ')}`}`);
 let bad = base.status !== 0 || base.failed.length !== 0;
+// A25: the A25 test file, bare parent, unmutated, must be green with no skips before its mutants count.
+const a25 = await run('A25 baseline (bare parent)', [], A25_TEST);
+console.log(`${a25.label}: ${a25.status === 0 && a25.failed.length === 0 ? 'green' : `NOT green: ${a25.failed.join('; ')}`}`);
+if (a25.status !== 0 || a25.failed.length !== 0 || a25.skipped !== 0) { bad = true; if (a25.skipped) console.log(`A25 baseline: ${a25.skipped} skipped (must be 0)`); }
 const P = 4; const res = []; let next = 0;
 await Promise.all(Array.from({ length: P }, async () => { while (next < MUTANTS.length) { const i = next++; res[i] = await run(...MUTANTS[i]); } }));
 for (const r of res) {

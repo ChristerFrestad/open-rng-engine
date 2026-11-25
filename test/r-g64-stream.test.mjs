@@ -146,6 +146,7 @@ const FAULTS = [
   ['extra', /more than n_j/], ['t-count', /trailer count/], ['t-digest', /trailer digest differs/], ['shape', /outcome 0: /],
   ['ragged', /not whole outcomes/], ['garbage', /unknown type/], ['h-j', /H frame j\/n_j/], ['h-n', /H frame j\/n_j/],
   ['src-before', /src_before/], ['src-after', /srcDigest_after/], ['loaded', /as loaded differs .*D22-4/],
+  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['t-walks', /trailer A25 walks .*A25-4/],
 ];
 for (const [fault, why] of FAULTS) {
   test(`D22-8 integrity void: ${fault} voids the attempt, the void reason is kept, no statistic is computed`, async () => {
@@ -283,7 +284,7 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
   const plan = P.buildPlan({ runId: 'real', M: { [id]: 40 }, N: 2 });
   const stream = plan.streams[0];
   const dir = tmp('real');
-  const spawnPart = (s, j, calls) => spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: env(), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+  const spawnPart = (s, j, calls) => spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25' }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
   try {
     const consumers = await L.wave1Consumers(stream);
     const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect() });

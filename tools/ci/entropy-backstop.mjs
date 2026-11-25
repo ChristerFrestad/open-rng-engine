@@ -209,12 +209,144 @@ function checkCaller(id, stack) {
   }
 }
 
+
+// ---------------- A25-3 / A25-4: evidence-helper mode (HoQ addendum 1 A25; CTO GO 2026-11-25 13:50) ----------------
+// Only an evidence helper started by stream-launcher.mjs runs in this mode (ENTROPY_BACKSTOP_HELPER=a25, refused by the
+// launcher unless the H frame reports it with this file's digest and the plan's k). Dev, test and every non-evidence
+// path keep the per-call stack walk above unchanged.
+//  - A25-3: the one approved entry is fillBuffer in src/entropy/index.ts. Its `import { randomFillSync } from
+//    'node:crypto'` (and only that importer's) resolves to HELPER_GATE_URL, a preload-owned virtual module whose
+//    randomFillSync is helperGate below. helperGate validates its argument WITHOUT running user code, runs the
+//    integrity checks and the A25-4 sampled walk, then sets the module-private token, calls the ORIGINAL primitive and
+//    clears the token in finally. Every wrapped primitive (any route: import, require, createRequire,
+//    process.getBuiltinModule, webcrypto, globalThis.crypto) aborts in this mode: token clear is the A25-3 abort; token
+//    set means re-entry from inside the native fill, which cannot happen legitimately, and aborts too.
+//  - The gate is handed over only through this module's own export, and the resolve hook lets nothing but the virtual
+//    module resolve this file in helper mode. No global holds it at any time (CTO change 1).
+//  - A25-4: the full checkCaller walk runs on the first HELPER_FIRST_WALK gate calls and then whenever
+//    (index & (2^HELPER_SAMPLE_K - 1)) === 0. A failed walk aborts with its own exit code; the launcher voids the run.
+export const HELPER_MODE_ENV = 'ENTROPY_BACKSTOP_HELPER';
+export const HELPER_MODE_ID = 'a25';
+export const HELPER_FIRST_WALK = 10000;
+export const HELPER_SAMPLE_K = 11;
+export const EXIT_A25_TOKEN = 86;   // a wrapped CSPRNG primitive called in helper mode (token clear, or re-entry)
+export const EXIT_A25_GATE = 87;    // the gate refused: bad argument, tampered intrinsics, wrong importer, leak
+export const EXIT_A25_WALK = 88;    // A25-4 sampled stack walk failed
+export const HELPER_GATE_URL = 'rng-backstop-gate:node-crypto';
+const HELPER_MODE = process.env[HELPER_MODE_ENV] === HELPER_MODE_ID;
+if (process.env[HELPER_MODE_ENV] !== undefined && !HELPER_MODE) {
+  writeSync(2, `entropy-backstop: ${HELPER_MODE_ENV}=${process.env[HELPER_MODE_ENV]} is not a known helper mode\n`);
+  process.exit(EXIT_A25_GATE);
+}
+const SELF_URL = import.meta.url;
+const ENTROPY_URL = pathToFileURL(join(ENTROPY_ROOT, 'index.ts')).href;
+const INDEX_URL = pathToFileURL(join(SRC_ROOT, 'index.ts')).href;
+export const BACKSTOP_SHA256 = createHash('sha256').update(readFileSync(SELF)).digest('hex');
+let helperToken = false;
+let helperGateCalls = 0;
+let helperWalks = 0;
+const HELPER_MASK = (2 ** HELPER_SAMPLE_K) - 1;
+const reallyExit = typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process);
+function helperAbort(code, why) {
+  helperToken = false;
+  try { writeSync(2, `entropy-backstop[A25]: ${why} (exit ${code})\n`); } catch { /* stderr closed */ }
+  reallyExit(code);
+}
+// Intrinsics saved at install, before any user code. Every check below is a slot or own-property read on a
+// non-proxy object, so none of them can run user code.
+const U8 = Uint8Array;
+const U8P = Uint8Array.prototype;
+const TAP = Object.getPrototypeOf(U8P);
+const TA_BYTELENGTH = Object.getOwnPropertyDescriptor(TAP, 'byteLength').get;
+const isView = ArrayBuffer.isView;
+const getProto = Object.getPrototypeOf;
+const hasOwn = Object.hasOwn;
+const gopd = Object.getOwnPropertyDescriptor;
+let origFill = null;
+function helperGate(target) {
+  // CTO change 2: nothing but a real Uint8Array with intrinsic byteLength / BYTES_PER_ELEMENT, and no offset or
+  // size arguments (fillBuffer passes only the target), so node's randomFillSync coerces nothing user-defined.
+  if (arguments.length !== 1) helperAbort(EXIT_A25_GATE, `gate: ${arguments.length} arguments (only the target is allowed)`);
+  if (!isView(target) || getProto(target) !== U8P) helperAbort(EXIT_A25_GATE, 'gate: target is not a plain Uint8Array');
+  // %TypedArray%.prototype and Uint8Array.prototype are frozen at install in helper mode (installHelperMode), so
+  // their byteLength getter, BYTES_PER_ELEMENT and prototype link cannot change; only an own property on the
+  // instance could shadow them.
+  if (hasOwn(target, 'byteLength') || hasOwn(target, 'BYTES_PER_ELEMENT')) helperAbort(EXIT_A25_GATE, 'gate: target shadows byteLength or BYTES_PER_ELEMENT');
+  if (helperToken) helperAbort(EXIT_A25_TOKEN, 'gate re-entered while the token is set');
+  const i = helperGateCalls++;
+  if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {
+    helperWalks++;
+    try {
+      assertMarkerIdentity('helper-walk');
+      assertIdentitiesAndStack('helper-walk');
+      checkCaller('randomFillSync', new NativeError().stack);
+    } catch (e) {
+      helperAbort(EXIT_A25_WALK, `sampled walk failed at gate call ${i}: ${e && e.message}`);
+    }
+  }
+  helperToken = true;
+  try { origFill(target); } finally { helperToken = false; }
+  return target;
+}
+export let HELPER_GATE = null;
+export function helperState() {
+  return HELPER_MODE ? Object.freeze({ mode: HELPER_MODE_ID, sample_k: HELPER_SAMPLE_K, first_walk: HELPER_FIRST_WALK, backstop_sha256: BACKSTOP_SHA256 }) : null;
+}
+// CTO change 3: after importing src/index.ts the helper hands its namespace here; no export may be the gate.
+function helperAssertNoGateLeak(ns) {
+  if (!HELPER_MODE) return false;
+  if (ns === null || typeof ns !== 'object') helperAbort(EXIT_A25_GATE, 'leak check: not a module namespace');
+  for (const k of Reflect.ownKeys(ns)) {
+    const v = gopd(ns, k)?.value;
+    if (v === helperGate || v === origFill) helperAbort(EXIT_A25_GATE, `leak check: src/index.ts export ${String(k)} is the gated primitive`);
+  }
+  return true;
+}
+function helperCounts() { return Object.freeze({ gate_calls: helperGateCalls, walks: helperWalks }); }
+function installHelperMode(cryptoMod) {
+  if (!HELPER_MODE) return;
+  origFill = originals.randomFillSync ?? cryptoMod.randomFillSync;
+  if (typeof origFill !== 'function' || origFill === wrappers.randomFillSync) throw new NativeError('entropy-backstop: helper mode needs the original randomFillSync');
+  // Freeze the two prototypes node's randomFillSync reads through (byteLength, BYTES_PER_ELEMENT), and check the
+  // getter is still the intrinsic one, so the per-call gate needs no descriptor read.
+  if (gopd(TAP, 'byteLength')?.get !== TA_BYTELENGTH || getProto(U8P) !== TAP || hasOwn(U8P, 'byteLength')) throw new NativeError('entropy-backstop: helper mode found a changed Uint8Array prototype chain at install');
+  Object.freeze(TAP); Object.freeze(U8P);
+  if (!Object.isFrozen(TAP) || !Object.isFrozen(U8P)) throw new NativeError('entropy-backstop: helper mode could not freeze the TypedArray prototypes');
+  HELPER_GATE = helperGate;
+  const { registerHooks } = require('node:module');
+  const MAIN_URL = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
+  const STARTUP_CWD_URL = pathToFileURL(process.cwd() + sep).href;
+  let mainStarted = false;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const parent = context.parentURL;
+      if (specifier === HELPER_GATE_URL) helperAbort(EXIT_A25_GATE, `resolve: ${HELPER_GATE_URL} requested by ${parent}`);
+      if (parent === ENTROPY_URL && (specifier === 'node:crypto' || specifier === 'crypto')) return { url: HELPER_GATE_URL, format: 'module', shortCircuit: true };
+      const r = nextResolve(specifier, context);
+      // Before the main entry resolves, a second top-level --import of the preload (NODE_OPTIONS and argv both name it)
+      // is resolved from undefined or the startup cwd; from the main entry on, only the gate URL may import it.
+      if (r.url === MAIN_URL) mainStarted = true;
+      if (r.url === SELF_URL && parent !== HELPER_GATE_URL && (mainStarted || (parent !== undefined && parent !== STARTUP_CWD_URL))) helperAbort(EXIT_A25_GATE, `resolve: the preload is not importable in helper mode (from ${parent})`);
+      if (r.url === ENTROPY_URL && parent !== INDEX_URL) helperAbort(EXIT_A25_GATE, `resolve: src/entropy/index.ts imported by ${parent}, only src/index.ts may`);
+      return r;
+    },
+    load(url, context, nextLoad) {
+      if (url === HELPER_GATE_URL) {
+        return { format: 'module', shortCircuit: true,
+          source: `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n` };
+      }
+      return nextLoad(url, context);
+    },
+  });
+}
+
 function wrapFn(id, orig) {
   if (typeof orig !== 'function') {
     throw new NativeError(`entropy-backstop: cannot wrap ${id}: not a function`);
   }
   const wrapped = function entropyBackstopWrapped(...args) {
     counters[id] += 1;
+    if (HELPER_MODE) helperAbort(EXIT_A25_TOKEN, `${id} called in helper mode ${helperToken ? 'while the token is set (re-entry)' : 'with the token clear'}`);
     assertMarkerIdentity(`call:${id}`);
     assertIdentitiesAndStack(`call:${id}`);
     const err = new NativeError();
@@ -979,6 +1111,7 @@ export function install(opts = {}) {
     wrappers[t.id] = wrapped;
   }
   try { syncBuiltinESMExports(); } catch { /* not fatal for CJS-only surfaces */ }
+  installHelperMode(crypto);
   for (const id of ENTRY_POINT_IDS) counters[id] = 0;
   countersAtInstall = Object.freeze(Object.fromEntries(ENTRY_POINT_IDS.map((id) => [id, 0])));
   installed = true;
@@ -996,6 +1129,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
+    helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts }),
     evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });

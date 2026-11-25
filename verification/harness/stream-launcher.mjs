@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FRAME, FrameReader, codecFor } from './stream-frames.mjs';
 import { outcomeShapeError } from './collector.mjs';
-import { ROOT, bindings, loadKTests, planDigest, reuseMismatches, srcManifest } from './run-plan.mjs';
+import { HELPER_PLAN, ROOT, bindings, expectedWalks, loadKTests, planDigest, reuseMismatches, srcManifest } from './run-plan.mjs';
 import { assertEvidenceRunReady } from './evidence-entry.mjs';
 
 const BACKSTOP = join(ROOT, 'tools/ci/entropy-backstop.mjs');
@@ -41,6 +41,12 @@ function partReader(ctx, j) {
       const man = new Map(expect.src.list);
       if (!Array.isArray(h.loaded) || !h.loaded.some(([p]) => p === 'src/index.ts')) return fail('H has no load-hook digest of src/index.ts (D22-4)');
       for (const [p, s] of h.loaded) if (man.get(p) !== s) return fail(`src file ${p} as loaded differs from srcDigest_before (D22-4)`);
+      // A25-3/A25-4: the helper ran in the plan's helper mode, with the plan's k, under the bound preload, and its leak check ran.
+      const hx = ctx.helperExpect, b = h.backstop;
+      if (!b || typeof b !== 'object') return fail('H has no backstop helper state: helper not in A25 mode');
+      if (b.mode !== hx.mode || b.sample_k !== hx.sample_k || b.first_walk !== hx.first_walk) return fail(`H helper mode ${b.mode}/k=${b.sample_k}/F=${b.first_walk} differs from the plan ${hx.mode}/k=${hx.sample_k}/F=${hx.first_walk} (A25-4)`);
+      if (b.backstop_sha256 !== hx.backstop_sha256) return fail('H backstop digest differs from the bound preload (A25-1)');
+      if (h.gate_leak_check !== true) return fail('H gate leak check did not run (A25-3)');
       return;
     }
     if (f.type === FRAME.D) {
@@ -79,6 +85,9 @@ function partReader(ctx, j) {
     if (st.T.count !== st.count) return fail(`trailer count ${st.T.count} != counted ${st.count}`);
     if (st.T.payload_sha256 !== st.d) return fail('trailer digest differs from the launcher d_j');
     if (st.T.src_after !== expect.src.sha256) return fail('src changed during the part (srcDigest_after)');
+    const a = st.T.a25;
+    if (!a || !Number.isSafeInteger(a.gate_calls) || a.gate_calls < 1) return fail('trailer has no A25 gate count');
+    if (a.walks !== expectedWalks(a.gate_calls, ctx.helperExpect)) return fail(`trailer A25 walks ${a.walks} != ${expectedWalks(a.gate_calls, ctx.helperExpect)} for ${a.gate_calls} gate calls (A25-4)`);
     if (win.some(({ buf }) => buf.length)) return fail('a window straddles the part end');
   };
   return st;
@@ -90,10 +99,14 @@ export async function runStreamCore(plan, stream, opts) {
   const kRep = kTests.find((k) => k.id === stream.rep);
   const codec = codecFor(kRep);
   if (codec.bytes !== stream.outcome_bytes) throw new Error(`${stream.id}: codec ${codec.bytes} B != plan ${stream.outcome_bytes} B`);
+  // A25-4 / CTO change 4: k is fixed by the code, never by the run; a plan with another helper block is refused.
+  const hp = plan.helper;
+  if (!hp || hp.mode !== HELPER_PLAN.mode || hp.sample_k !== HELPER_PLAN.sample_k || hp.first_walk !== HELPER_PLAN.first_walk) throw new Error(`${stream.id}: plan helper block ${JSON.stringify(hp ?? null)} differs from ${JSON.stringify(HELPER_PLAN)} (A25-4)`);
+  const helperExpect = { ...HELPER_PLAN, backstop_sha256: sha(readFileSync(BACKSTOP)) };
   mkdirSync(runDir, { recursive: true });
   const attempts = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers };
+    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers, helperExpect };
     const parts = stream.parts.map((_, j) => partReader(ctx, j));
     const kids = [];
     const order = []; // void reasons in the order they happened; a part killed because another voided says so
@@ -240,12 +253,12 @@ const COUNTED = new WeakMap();
 export function streamCounted(r) { return r !== null && typeof r === 'object' && COUNTED.get(r) === r.digest && typeof r.digest === 'string'; }
 
 export function header(plan, bind, clone) {
-  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, bindings: bind, clone };
+  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, helper: plan.helper ?? null, bindings: bind, clone };
 }
 
 function realSpawnPart(plan) {
   return (stream, j, calls) => {
-    const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ENTROPY_BACKSTOP_CHANNEL;
+    const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ENTROPY_BACKSTOP_CHANNEL; env.ENTROPY_BACKSTOP_HELPER = HELPER_PLAN.mode;
     return spawn(process.execPath, ['--import', BACKSTOP, HELPER, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls)],
       { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
   };

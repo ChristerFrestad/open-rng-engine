@@ -52,7 +52,12 @@ switch (k.primitive) {
   default: throw new Error(`helper: unknown primitive ${k.primitive}`);
 }
 const codec = codecFor(k);
-out(jsonFrame(FRAME.H, { run_id: runId, stream, rep, j, calls, src_before: before.sha256, loaded }));
+// A25-3/A25-4: the preload reports its helper mode, k and its own digest; the launcher compares them with the plan
+// and the bound backstop file. The leak check (CTO change 3) aborts the helper if any src/index.ts export is the gate.
+const A25 = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.helper;
+const backstop = A25?.state ?? null;
+const gate_leak_check = A25 && backstop ? A25.assertNoGateLeak(E) : false;
+out(jsonFrame(FRAME.H, { run_id: runId, stream, rep, j, calls, src_before: before.sha256, loaded, backstop, gate_leak_check }));
 const per = Math.max(1, Math.floor((1 << 16) / codec.bytes));
 const buf = Buffer.allocUnsafe(per * codec.bytes);
 const h = createHash('sha256');
@@ -65,4 +70,4 @@ while (count < calls) {
   out(frame(FRAME.D, payload));
   count += m;
 }
-out(jsonFrame(FRAME.T, { count, payload_sha256: h.digest('hex'), src_after: srcManifest(ROOT).sha256 }));
+out(jsonFrame(FRAME.T, { count, payload_sha256: h.digest('hex'), src_after: srcManifest(ROOT).sha256, a25: A25 ? A25.counts() : null }));

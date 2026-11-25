@@ -3,7 +3,8 @@
 // sha256(seed:t). It writes the real frame format and the real H/T fields; --fault makes one integrity defect.
 // Never used for evidence: the launcher's real path spawns only the real helper.
 import { createHash } from 'node:crypto';
-import { writeSync } from 'node:fs';
+import { readFileSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -28,7 +29,10 @@ function outcome(t) {
 const out = (b) => { let o = 0; while (o < b.length) { try { o += writeSync(3, b, o); } catch (e) { if (e.code !== 'EAGAIN') throw e; } } };
 const src = P.srcManifest(ROOT);
 const loaded = src.list.filter(([f]) => ['src/index.ts', 'src/entropy/index.ts', 'src/mapping/index.ts', 'src/errors.ts'].includes(f)).map(([f, s]) => [f, fault === 'loaded' && f === 'src/entropy/index.ts' ? '0'.repeat(64) : s]);
-const H = { run_id: runId, stream, rep, j: fault === 'h-j' ? j + 1 : j, calls: fault === 'h-n' ? calls + 1 : calls, src_before: fault === 'src-before' ? 'f'.repeat(64) : src.sha256, loaded };
+// A25: the fixture reports the helper state the real preload would (mode, k, F and the backstop file digest).
+const bsSha = createHash('sha256').update(readFileSync(join(ROOT, 'tools/ci/entropy-backstop.mjs'))).digest('hex');
+const backstop = fault === 'h-nomode' ? null : { mode: P.HELPER_PLAN.mode, sample_k: P.HELPER_PLAN.sample_k + (fault === 'h-k' ? 1 : 0), first_walk: P.HELPER_PLAN.first_walk, backstop_sha256: fault === 'h-bs' ? 'b'.repeat(64) : bsSha };
+const H = { run_id: runId, stream, rep, j: fault === 'h-j' ? j + 1 : j, calls: fault === 'h-n' ? calls + 1 : calls, src_before: fault === 'src-before' ? 'f'.repeat(64) : src.sha256, loaded, backstop, gate_leak_check: fault !== 'h-leak' };
 if (fault === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000); // still running when a sibling voids
 if (fault !== 'no-h') out(F.jsonFrame(F.FRAME.H, H));
 const n = fault === 'short' ? calls - 1 : fault === 'extra' ? calls + 1 : calls;
@@ -42,6 +46,7 @@ for (let c = 0; c < n; c += per) {
   out(fault === 'ragged' && c === 0 ? F.frame(F.FRAME.D, b.subarray(1)) : F.frame(F.FRAME.D, b));
 }
 if (fault === 'garbage') out(Buffer.from([0x5a, 1, 0, 0, 0, 0]));
-const T = { count: fault === 't-count' ? n + 1 : n, payload_sha256: fault === 't-digest' ? '0'.repeat(64) : h.digest('hex'), src_after: fault === 'src-after' ? 'e'.repeat(64) : src.sha256 };
+const gc = 3 * Math.max(1, n) + 20000;
+const T = { count: fault === 't-count' ? n + 1 : n, payload_sha256: fault === 't-digest' ? '0'.repeat(64) : h.digest('hex'), src_after: fault === 'src-after' ? 'e'.repeat(64) : src.sha256, a25: { gate_calls: gc, walks: P.expectedWalks(gc) - (fault === 't-walks' ? 1 : 0) } };
 if (fault !== 'no-t') out(F.jsonFrame(F.FRAME.T, T));
 if (fault === 'exit') process.exitCode = 3;

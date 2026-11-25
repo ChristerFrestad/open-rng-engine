@@ -93,6 +93,20 @@ export function buildPlan({ runId, M, N, prefix = 'S', kTests = loadKTests(), co
   });
   const streamMap = {};
   for (const s of out) for (const e of s.entries) streamMap[e.id] = s.id;
-  return { v: PLAN_VERSION, run_id: runId, counting_rule: countingRule, M_per_entry: { ...M }, stream_map: streamMap, streams: out, ...extra };
+  return { v: PLAN_VERSION, run_id: runId, counting_rule: countingRule, M_per_entry: { ...M }, stream_map: streamMap, streams: out, ...extra, helper: { ...HELPER_PLAN } };
 }
 export const planDigest = (plan) => sha(JSON.stringify(plan));
+// A25-3/A25-4 (CTO change 4): the evidence-helper mode and its sample k are fixed here, in every plan and so in the
+// plan digest and the D22-7 header; the launcher refuses a plan or an H frame that differs. k is not a parameter:
+// it cannot change per run. Equal to tools/ci/entropy-backstop.mjs HELPER_* (test/r-g64-a25.test.mjs); k = 11 from
+// the A25 bench (verification/bench/r-g64-a25-run2-k11.json). Kept as literals so the helper never imports the preload.
+export const HELPER_PLAN = Object.freeze({ mode: 'a25', sample_k: 11, first_walk: 10000 });
+// Number of gate calls the A25-4 rule walks among the first n: all of the first F, then every index i >= F with
+// i mod 2^k = 0.
+export function expectedWalks(n, { sample_k, first_walk } = HELPER_PLAN) {
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error('expectedWalks: n');
+  if (n <= first_walk) return n;
+  const step = 2 ** sample_k;
+  const upTo = (m) => Math.floor((m - 1) / step) + 1; // multiples of step in [0, m)
+  return first_walk + upTo(n) - upTo(first_walk);
+}
