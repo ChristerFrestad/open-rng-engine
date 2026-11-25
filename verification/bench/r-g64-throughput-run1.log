@@ -1,0 +1,30 @@
+# r-g64-throughput sha256 7c35d9e4d3484a9da5ada4096fa5309821fa9ebc3bf6bc5781ec539aa10d3d23; src fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e (12 files); node v24.22.1; 8 x Intel(R) Xeon(R) Processor; load 1.43 3.26 3.53
+randomInt [0,2)                    A     1718 ns  B     1797 ns  C     1841 ns  10^9 calls    0.511 h/core  (6 entries)
+randomInt [1,7)                    A     2045 ns  B     2173 ns  C     2206 ns  10^9 calls    0.613 h/core  (6 entries)
+randomInt [1,38)                   A     2737 ns  B     2828 ns  C     2893 ns  10^9 calls    0.804 h/core  (6 entries)
+randomInt [1,53)                   A     1920 ns  B     2122 ns  C     2298 ns  10^9 calls    0.638 h/core  (6 entries)
+randomInt [0,100)                  A     2223 ns  B     2334 ns  C     2294 ns  10^9 calls    0.637 h/core  (6 entries)
+randomInt [0,2147483649)           A     3421 ns  B     3726 ns  C     3421 ns  10^9 calls     0.95 h/core  (6 entries)
+randomInt [0,4294967296)           A     1615 ns  B     1713 ns  C     1749 ns  10^9 calls    0.486 h/core  (6 entries)
+randomInt [0,38)                   A     2581 ns  B     2771 ns  C     2730 ns  10^9 calls    0.758 h/core  (7 entries)
+randomInt [0,54)                   A     1847 ns  B     2065 ns  C     2165 ns  10^9 calls    0.601 h/core  (6 entries)
+randomInt [0,4294967297)           A     3605 ns  B     3602 ns  C     4030 ns  10^9 calls    1.119 h/core  (6 entries)
+randomInt [0,281474976710656)      A     1775 ns  B     1857 ns  C     2235 ns  10^9 calls    0.621 h/core  (6 entries)
+randomInt [0,37)                   A     3106 ns  B     3086 ns  C     3131 ns  10^9 calls     0.87 h/core  (1 entries)
+shuffle n=52                       A   126633 ns  B   133421 ns  C   130404 ns  10^9 calls   36.223 h/core  (14 entries)
+shuffle n=54                       A   126507 ns  B   129273 ns  C   133649 ns  10^9 calls   37.125 h/core  (1 entries)
+shuffle n=104                      A   264002 ns  B   260319 ns  C   250798 ns  10^9 calls   69.666 h/core  (1 entries)
+shuffle n=312                      A   811767 ns  B   844102 ns  C   794771 ns  10^9 calls   220.77 h/core  (1 entries)
+shuffle n=416                      A  1047672 ns  B  1119124 ns  C  1025181 ns  10^9 calls  284.772 h/core  (1 entries)
+shuffle n=1000                     A  2376806 ns  B  2327589 ns  C  2333135 ns  10^9 calls  648.093 h/core  (1 entries)
+sample n=52 k=5                    A    10286 ns  B    10553 ns  C    10673 ns  10^9 calls    2.965 h/core  (7 entries)
+sample n=52 k=9                    A    19676 ns  B    21243 ns  C    21510 ns  10^9 calls    5.975 h/core  (11 entries)
+sample n=80 k=20                   A    54710 ns  B    58751 ns  C    62435 ns  10^9 calls   17.343 h/core  (22 entries)
+weightedPick [1,3,6]               A     2813 ns  B     2875 ns  C     2943 ns  10^9 calls    0.818 h/core  (6 entries)
+weightedPick W-A                   A     3808 ns  B     3942 ns  C     4300 ns  10^9 calls    1.194 h/core  (12 entries)
+weightedPick W-B                   A     2686 ns  B     2653 ns  C     2626 ns  10^9 calls    0.729 h/core  (12 entries)
+scale shuffle n=52 P=1: 7733 calls/s total; per-helper ns 129316
+scale shuffle n=52 P=2: 15195 calls/s total; per-helper ns 135604 127863
+scale shuffle n=52 P=4: 27100 calls/s total; per-helper ns 151611 150972 152876 136260
+scale shuffle n=52 P=8: 37909 calls/s total; per-helper ns 208186 206655 227656 175558 158472 267290 236368 256704
+# load end 6.34 3.96 3.72
