@@ -444,8 +444,12 @@ function installHelperMode(cryptoMod) {
         recordLoaded(v.rel);
         return r;
       }
+      // A6ii-M3 (CTO, int-v8): CommonJS with no source from nextLoad. Node compiles exactly the bytes handed here, never
+      // a re-read from fs; those bytes are hashed against the manifest at this hand-off too (not only inside
+      // verifyLoad), so the compiled bytes of a manifest .cjs either match its digest or the helper exits 90.
+      if (!Buffer.isBuffer(v.bytes) || createHash('sha256').update(v.bytes).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `load: CommonJS bytes of ${v.rel} differ from the manifest`);
       recordLoaded(v.rel);
-      return { ...r, source: v.bytes }; // CommonJS with no source from nextLoad: hand node the hashed bytes
+      return { ...r, source: v.bytes };
     },
   });
   // A25-2: the lockdown is the LAST preload hook (Addendum B). After it, installHookGuard (install()) refuses every
@@ -951,7 +955,8 @@ const PROOF_ENV = 'ENTROPY_BACKSTOP_PROOF_FILE';
 // A25-1: the proof path of each async node child, so a caller can tie the G-39 proof to one child (a helper part).
 const childProofs = new WeakMap();
 // null: not a node child spawned through this hook; false: no proof file; otherwise the proof the child's preload
-// wrote ({ pid, preload_sha256, token } or { invalid: true }) plus the file's mtime_ms.
+// wrote ({ pid, preload_sha256, token, manifest_sha256, sigusr1_disabled } or { invalid: true }) plus the file's mtime_ms.
+// int-v8: sigusr1_disabled is passed through (without it every header-bound part would void at the launcher's check).
 export function childPreloadProof(child) {
   const p = child !== null && typeof child === 'object' ? childProofs.get(child) : undefined;
   if (p === undefined) return null;
@@ -959,7 +964,7 @@ export function childPreloadProof(child) {
   let body;
   try { body = JSON.parse(readFileSync(p, 'utf8')); } catch { body = null; }
   const ok = body !== null && typeof body === 'object' && !Array.isArray(body);
-  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token, manifest_sha256: body.manifest_sha256 ?? null } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
+  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token, manifest_sha256: body.manifest_sha256 ?? null, sigusr1_disabled: body.sigusr1_disabled ?? null } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
 }
 let proofDir = null;
 let proofSeq = 0;
@@ -1134,7 +1139,9 @@ function writeProof() {
   if (!p) return;
   // A25-1: the proof names this process, the preload's own digest and the spawn token it was started with. 'wx':
   // a file that already exists is never overwritten, so a stale proof keeps its old pid and token (and voids).
-  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN, manifest_sha256: MANIFEST_SHA256 }); // A25-2: the grant-bound manifest digest (null outside helper mode)
+  // A25-2: the grant-bound manifest digest (null outside helper mode). int-v8 (CTO ruling (a), L-SEC-2): whether node
+  // was started with --disable-sigusr1 (process.execArgv is fixed at startup; this runs at install, before any user code).
+  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN, manifest_sha256: MANIFEST_SHA256, sigusr1_disabled: process.execArgv.includes('--disable-sigusr1') });
   try { writeFileSync(p, body, { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
   delete process.env[PROOF_ENV];
 }

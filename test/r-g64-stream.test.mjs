@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as F from '../verification/harness/stream-frames.mjs';
 import * as P from '../verification/harness/run-plan.mjs';
 import * as L from '../verification/harness/stream-launcher.mjs';
@@ -54,6 +54,7 @@ const expect = () => ({ src: P.srcManifest(ROOT) });
 // parent (no hook): there the default proof is the record the preload would write. The hook and the preload's proof
 // are tested through preloaded probe processes, and each launcher proof check through explicit views below.
 const MARKED = () => globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.evidence ?? null;
+const PRELOADED_PARENT = MARKED() !== null;
 const TOKEN = 'grant-1@test';
 const BS_SHA = createHash('sha256').update(readFileSync(join(ROOT, 'tools/ci/entropy-backstop.mjs'))).digest('hex');
 const SPAWNED = new WeakMap(); // child -> the token it was spawned with
@@ -332,7 +333,7 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
   const stream = plan.streams[0];
   const dir = tmp('real');
   const man = testManifest(mkdtempSync(join(tmpdir(), 'rg64-man-')));
-  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: L.helperSpawnEnv(env(), { token, ...man }), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
+  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--disable-sigusr1', '--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: L.helperSpawnEnv(env(), { token, ...man }), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
   try {
     const consumers = await L.wave1Consumers(stream);
     const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), grant: grantView() });
@@ -343,6 +344,44 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
     const bad = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: { src: { ...expect().src, list: expect().src.list.map(([f, s]) => [f, f === 'src/errors.ts' ? '1'.repeat(64) : s]) } }, maxAttempts: 1, grant: grantView() });
     assert.match(bad.attempts[0].void, /src\/errors\.ts as loaded differs .*D22-4/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async () => {
+  const { checkA4, checkA5, checkA8 } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40), true, 'A8-CHECK ok');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2838 }, 40), false, 'A8-CHECK walks differ');
+  assert.equal(checkA8({ gate_calls: 39, walks: 39 }, 40), false, 'A8-CHECK below calls');
+  assert.equal(checkA8({ gate_calls: 2839.5, walks: 2839.5 }, 40), false, 'A8-CHECK non-integer');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839, extra: 0 }, 40), false, 'A8-CHECK extra key');
+  assert.equal(checkA8({ gate_calls: 2839 }, 40), false, 'A8-CHECK missing key');
+  assert.equal(checkA8({ walks: 2839, gate_calls: 2839 }, 40), false, 'A8-CHECK key order');
+  assert.equal(checkA8(null, 40), false, 'A8-CHECK not an object');
+  const me = process.pid, kid = me + 7, d = 'a'.repeat(64);
+  assert.equal(checkA4(kid, kid, me), true, 'A4-CHECK ok');
+  assert.equal(checkA4(me, me, me), false, 'A4-CHECK parent pid');
+  assert.equal(checkA4(kid + 0.5, kid + 0.5, me), false, 'A4-CHECK non-integer');
+  assert.equal(checkA4(String(kid), String(kid), me), false, 'A4-CHECK non-integer');
+  assert.equal(checkA4(1, 1, me), false, 'A4-CHECK pid 1');
+  assert.equal(checkA4(kid, kid + 1, me), false, 'A4-CHECK other child');
+  assert.equal(checkA5(d, d), true, 'A5-CHECK ok');
+  assert.equal(checkA5(d, 'b'.repeat(64)), false, 'A5-CHECK recompute mismatch');
+  assert.equal(checkA5(d.toUpperCase(), d.toUpperCase()), false, 'A5-CHECK not lowercase hex');
+  assert.equal(checkA5(null, null), false, 'A5-CHECK not a string');
+});
+test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A8)', async (t) => {
+  const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
+  assert.ok(existsSync(gold), 'GOLDEN-MISSING: record it from a 9b7a1d8 checkout with tools/ci/a25-2-launcher-shape.mjs');
+  const { launcherShape } = await import(pathToFileURL(join(ROOT, 'tools/ci/a25-2-launcher-shape.mjs')).href);
+  const audit = {};
+  const now = await launcherShape(ROOT, process.env, audit);
+  // CTO A8 (3): the raw values the allowlist replaced are kept in the run record (this test's diagnostics), never discarded.
+  t.diagnostic(`A8-RAW ${JSON.stringify(audit)}`);
+  assert.ok(audit.raw && audit.raw.a25 && Number.isInteger(audit.raw.a25.gate_calls) && Number.isInteger(audit.raw.a25.walks), `A8-RAW: raw T.a25 not recorded (${JSON.stringify(audit.raw)})`);
+  // Harness fix (a): under a preloaded parent the childProof view was checked field-equal to the bare view of its file.
+  assert.equal(audit.proof_views?.mode, PRELOADED_PARENT ? 'preloaded' : 'bare', 'PROOF-VIEWS-EQUAL mode');
+  if (PRELOADED_PARENT) assert.equal(audit.proof_views.equal, true, 'PROOF-VIEWS-EQUAL');
+  assert.equal(now, readFileSync(gold, 'utf8'), 'SHAPE-9B7A1D8: launcher-facing output differs from 9b7a1d8');
+  assert.ok(JSON.parse(JSON.parse(now).H).loaded.some(([f]) => f === 'src/entropy/index.ts'));
 });
 
 // ---------- A25-4b: part floor for counted runs (CTO answer b) ----------
@@ -465,12 +504,23 @@ test('A25-1: each proof check voids the part on its own (missing, invalid, anoth
 test('W6 (A25-2): with a header-bound manifest digest, a proof whose manifest_sha256 differs (or is missing) voids the part; an equal one counts', async () => {
   const M = 'c'.repeat(64);
   for (const pm of ['d'.repeat(64), undefined, null]) {
-    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: pm }) }), { manifestSha256: M });
+    // slot 1: sigusr1_disabled true, so only the manifest digest is wrong (else the int-v8 L-SEC-2 check voids first and
+    // masks mutant M45).
+    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: pm, sigusr1_disabled: true }) }), { manifestSha256: M });
     assert.equal(res.counted, false, String(pm)); assert.match(res.attempts[0].void, /proof manifest digest differs from the header-bound manifest \(A25-2\)/);
   }
-  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M }) }), { manifestSha256: M });
+  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: true }) }), { manifestSha256: M });
   assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
   await assert.rejects(() => runGrant(grantView({ proof: goodProof }), { manifestSha256: 'C'.repeat(64) }), /manifestSha256 must be 64 lowercase hex/);
+});
+test('L-SEC-2 (int-v8): with a header-bound manifest, a helper proof without sigusr1_disabled === true voids the part; true counts', async () => {
+  const M = 'c'.repeat(64);
+  for (const v of [false, undefined, null, 'true', 1]) {
+    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: v }) }), { manifestSha256: M });
+    assert.equal(res.counted, false, `PROOF-SIGUSR1 ${String(v)}`); assert.match(res.attempts[0].void, /proof: helper was not started with --disable-sigusr1 \(A25-1, L-SEC-2\)/);
+  }
+  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: true }) }), { manifestSha256: M });
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
 });
 test('A25-1: the proof is written by the preload itself: child pid, preload sha256 and the spawn token (probe)', () => {
   const tok = 'grant-9@probe#00ff';
@@ -482,22 +532,28 @@ test('A25-1: the proof is written by the preload itself: child pid, preload sha2
     "c.on('close', () => { const p = ev.childProof(c); process.stdout.write(JSON.stringify({ p, pid: c.pid, fresh: p && p.mtime_ms >= t0 - 20, other: [ev.childProof({}), ev.childProof(null), ev.token({ grant: 1 }), ev.spawnToken({ grant: 1 })] })); });",
   ].join('\n'));
   assert.equal(got.p.pid, got.pid); assert.equal(got.p.preload_sha256, BS_SHA); assert.equal(got.p.token, tok); assert.equal(got.fresh, true);
+  assert.equal(got.p.sigusr1_disabled, false); // a child started without --disable-sigusr1 says so in its proof (int-v8)
   assert.deepEqual(got.other, [null, null, null, null]);
 });
-test('A25-1: a helper is spawned only as exactly --import <bound backstop> <helper> <args>, without NODE_OPTIONS', () => {
+test('A25-1: a helper is spawned only as exactly --disable-sigusr1 --import <bound backstop> <helper> <args>, without NODE_OPTIONS', () => {
   const plan = P.buildPlan({ runId: 'a', M: { [A25_1_ID]: 2 }, N: 1 });
   const want = L.helperSpawnArgs(plan, plan.streams[0], 0, 2);
   const BS = join(ROOT, 'tools/ci/entropy-backstop.mjs');
-  assert.equal(want[1], BS); assert.ok(want[1].startsWith('/'));
+  assert.equal(want[0], '--disable-sigusr1', 'ARGV-SIGUSR1: the helper argv must start with --disable-sigusr1 (int-v8, L-SEC-2)');
+  assert.equal(want[1], '--import'); assert.equal(want[2], BS); assert.ok(want[2].startsWith('/'));
   assert.deepEqual(L.assertHelperSpawn([...want], {}, want), want);
+  const old = want.slice(1); // the 9b7a1d8..d75175d shape (no --disable-sigusr1) is refused now
   const bad = [
-    [want.slice(2), {}], [['--require', ...want.slice(1)], {}], [[...want.slice(0, 2), '--require', '/tmp/x.cjs', ...want.slice(2)], {}],
-    [[...want.slice(0, 2), '--import', '/tmp/x.mjs', ...want.slice(2)], {}], [['--import', `${BS}x`, ...want.slice(2)], {}],
-    [['--require', '/tmp/x.cjs', ...want], {}], [['--import', '/tmp/x.mjs', ...want], {}],
-    [[want[0], want[1], FAKE, ...want.slice(3)], {}], [[...want.slice(0, -1), '3'], {}], [[...want, '--extra'], {}],
+    [old, old], [old, {}], [want.slice(3), {}], [['--require', ...want.slice(2)], {}], [[...want.slice(0, 3), '--require', '/tmp/x.cjs', ...want.slice(3)], {}],
+    [[...want.slice(0, 3), '--import', '/tmp/x.mjs', ...want.slice(3)], {}], [[want[0], '--import', `${BS}x`, ...want.slice(3)], {}],
+    [['--require', '/tmp/x.cjs', ...want], {}], [['--import', '/tmp/x.mjs', ...want], {}], [['--inspect', ...want.slice(1)], {}],
+    [[want[0], want[1], want[2], FAKE, ...want.slice(4)], {}], [[...want.slice(0, -1), '3'], {}], [[...want, '--extra'], {}],
     [[...want], { NODE_OPTIONS: '' }], [[...want], { NODE_OPTIONS: '--require /tmp/x.cjs' }], [null, {}], [[...want], null],
   ];
-  for (const [args, e] of bad) assert.throws(() => L.assertHelperSpawn(args, e, want), /not exactly --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused \(A25-1, A25-6 iv\)/);
+  for (const [args, e] of bad) {
+    const w = e === old ? old : want; // [old, old]: even a caller that passes the old shape as `want` is refused
+    assert.throws(() => L.assertHelperSpawn(args, e === old ? {} : e, w), /not exactly --disable-sigusr1 --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused \(A25-1, A25-6 iv\)/);
+  }
 });
 test('A25-1: liveGrant refuses no grant and a grant object the backstop never opened', () => {
   const why = MARKED() ? /no open evidence grant \(A25-1\)/ : /backstop preload is not loaded \(A25-1\)/;

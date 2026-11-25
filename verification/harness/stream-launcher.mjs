@@ -88,6 +88,7 @@ function partReader(ctx, j) {
     else if (pr.preload_sha256 !== ctx.helperExpect.backstop_sha256) fail('proof preload digest differs from the bound backstop (A25-1)');
     else if (pr.pid !== st.child.pid) fail('proof names another process (A25-1)');
     else if (ctx.helperExpect.manifest_sha256 !== null && pr.manifest_sha256 !== ctx.helperExpect.manifest_sha256) fail('proof manifest digest differs from the header-bound manifest (A25-2)');
+    else if (ctx.helperExpect.manifest_sha256 !== null && pr.sigusr1_disabled !== true) fail('proof: helper was not started with --disable-sigusr1 (A25-1, L-SEC-2)');
     else if (!(pr.mtime_ms >= st.spawnedAt - PROOF_CLOCK_SLACK_MS)) fail('proof older than the spawn (A25-1)');
     if (code !== 0 || signal) fail(`helper exit ${code}${signal ? ` signal ${signal}` : ''}`);
     if (!st.H) fail('no H frame');
@@ -290,18 +291,20 @@ export function preloadRecord(grantToken) {
   return { path: 'tools/ci/entropy-backstop.mjs', sha256: sha(readFileSync(BACKSTOP)), helper_mode: HELPER_PLAN.mode, grant: grantToken };
 }
 
-// A25-1 / A25-6 (iv): a helper is started only as `node --import <bound backstop, absolute> <helper> <helper args>`,
-// with no other node flag, and with no NODE_OPTIONS in the env the launcher builds. (Under the preload the G-39 hook
+// A25-1 / A25-6 (iv): a helper is started only as `node --disable-sigusr1 --import <bound backstop, absolute> <helper>
+// <helper args>`, with no other node flag (int-v8, CTO ruling (a) on Sec L-SEC-2: --disable-sigusr1 stops SIGUSR1
+// from starting the inspector even if helper code removes the preload's SIGUSR1 listener; the preload records the
+// flag in its proof and the launcher voids a helper proof without it), and with no NODE_OPTIONS in the env the launcher builds. (Under the preload the G-39 hook
 // then adds exactly its own `--import <backstop>` to the child's NODE_OPTIONS; nothing else can be injected there.)
 export const PROOF_CLOCK_SLACK_MS = 20; // file mtime vs Date.now(): kernel timestamps can trail by a tick
 export function helperSpawnArgs(plan, stream, j, calls) {
-  return ['--import', BACKSTOP, HELPER, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls)];
+  return ['--disable-sigusr1', '--import', BACKSTOP, HELPER, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls)];
 }
 export function assertHelperSpawn(args, env, want) {
   const ok = Array.isArray(args) && Array.isArray(want) && isAbsolute(BACKSTOP) && args.length === want.length && args.every((a, i) => a === want[i])
-    && args[0] === '--import' && args[1] === BACKSTOP && args[2] === HELPER
+    && args[0] === '--disable-sigusr1' && args[1] === '--import' && args[2] === BACKSTOP && args[3] === HELPER
     && env !== null && typeof env === 'object' && !Object.prototype.hasOwnProperty.call(env, 'NODE_OPTIONS');
-  if (!ok) throw new Error('helper spawn is not exactly --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused (A25-1, A25-6 iv)');
+  if (!ok) throw new Error('helper spawn is not exactly --disable-sigusr1 --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused (A25-1, A25-6 iv)');
   return args;
 }
 // A25-2 (split note Addendum C; interface to TE 22:01): the ONE builder of a helper's env. Drops NODE_OPTIONS, the

@@ -13,18 +13,23 @@ import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildManifest } from '../tools/ci/a25-manifest.mjs';
-import { helperSpawnEnv } from '../verification/harness/stream-launcher.mjs';
+import { helperSpawnEnv, helperSpawnArgs } from '../verification/harness/stream-launcher.mjs';
+import { buildPlan } from '../verification/harness/run-plan.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
 const PRELOAD = join(ROOT, 'tools/ci/entropy-backstop.mjs');
 const LOCKDOWN = join(ROOT, 'tools/ci/a25-lockdown.mjs');
 const HR = 'verification/harness/evidence-helper.mjs';
 const OUT = 'process.stdout.write("survived\\n");\n';
+// Under a preloaded parent (npm test) the parent's G-39 hook adds `--import <backstop>` to every node child's NODE_OPTIONS
+// (loaded before any command-line --import) and sets ENTROPY_BACKSTOP_PROOF_FILE in its exec env. The bare behaviour of
+// the mode-dependent cases is held by the bare gate (tools/ci/a25-2-bare-gate.mjs runs this file bare).
+const PARENT_PRELOADED = !!globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')];
 const baseEnv = () => { const e = { ...process.env }; delete e.NODE_OPTIONS; for (const k of Object.keys(e)) if (k.startsWith('ENTROPY_BACKSTOP') || k.startsWith('NODE_TEST')) delete e[k]; return e; };
 
 // files: { relpath: source } in the tree; extra: { name: source } beside the tree (outside the manifest).
 // Returns status/stdout/stderr and `dir` facts read before cleanup (marker: the content of extra file 'marker', if written).
-function run(files, main, { listed = Object.keys(files), extra = {}, preImport = null, normal = false } = {}) {
+function run(files, main, { listed = Object.keys(files), extra = {}, preImport = null, normal = false, flags = [] } = {}) {
   const d = mkdtempSync(join(tmpdir(), 'a25sec-'));
   try {
     const root = join(d, 'tree');
@@ -35,9 +40,9 @@ function run(files, main, { listed = Object.keys(files), extra = {}, preImport =
     writeFileSync(manifestPath, bytes);
     const env = normal ? baseEnv() : helperSpawnEnv(baseEnv(), { token: 'grant-9@9#sec', manifestPath, manifestSha256: sha256 });
     const pre = preImport ? (() => { const f = join(d, 'pre-hooks.mjs'); writeFileSync(f, preImport); return ['--import', f]; })() : [];
-    const r = spawnSync(process.execPath, [...pre, '--import', PRELOAD, join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 30000 });
+    const r = spawnSync(process.execPath, [...flags, ...pre, '--import', PRELOAD, join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 30000 });
     const marker = existsSync(join(d, 'marker')) ? readFileSync(join(d, 'marker'), 'utf8') : null;
-    return { status: r.status, stdout: r.stdout, stderr: r.stderr, marker };
+    return { status: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr, marker };
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 const expect = (r, code, re = null) => {
@@ -93,14 +98,17 @@ test('SEC p8/p8b (item 2): the helper-mode allowlist is empty: every binding nam
     expect(run({ 'm.mjs': `process.binding(${JSON.stringify(n)});\nprocess.stdout.write('pwn-binding ${n}\\n');\n` }, 'm.mjs'), 92, new RegExp(`process\\.binding\\('${n}'\\)`));
   }
 });
-test('SEC item 2 (one guard): the lockdown aborts 92 at install when process.binding is non-configurable but not the backstop guard', (t) => {
-  if (globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]) { t.skip('needs a child without the backstop preload; run this file bare (node --test)'); return; }
+test('SEC item 2 (one guard): the lockdown aborts 92 at install when process.binding is non-configurable but not the backstop guard', () => {
+  // No skip (M-130, CTO test-33 ruling): bare (the bare gate) the lockdown sees the forged binding and aborts 92. Under a
+  // preloaded parent the child's backstop (via NODE_OPTIONS) installs its own non-configurable guard first, so the forged
+  // definition itself cannot be made: the child dies on the redefine, before the lockdown, and prints nothing.
   const d = mkdtempSync(join(tmpdir(), 'a25sec-ld-'));
   try {
     const f = join(d, 'm.mjs');
     writeFileSync(f, `Object.defineProperty(process, 'binding', { value: function binding() { return {}; }, writable: false, configurable: false });\nconst { installLockdown } = await import(${JSON.stringify(pathToFileURL(LOCKDOWN).href)});\ninstallLockdown({ isManifestUrl: () => true, abort: (c, w) => { process.stderr.write(String(w) + '\\n'); }, registerRefuseHook: () => {} });\n${OUT}`);
     const r = spawnSync(process.execPath, [f], { cwd: d, env: baseEnv(), encoding: 'utf8', timeout: 30000 });
-    assert.equal(r.status, 92, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /not the backstop G-39 guard/);
+    if (PARENT_PRELOADED) { assert.notEqual(r.status, 0, 'ONE-GUARD-PRELOADED'); assert.equal(r.stdout, ''); assert.match(r.stderr, /Cannot redefine property: binding/, 'ONE-GUARD-PRELOADED'); }
+    else { assert.equal(r.status, 92, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /not the backstop G-39 guard/); }
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -108,14 +116,62 @@ test('SEC item 2 (one guard): the lockdown aborts 92 at install when process.bin
 test('SEC L-SEC-2 (found closing item 3): SIGUSR1 in helper mode exits 92 instead of starting the inspector', () => {
   expect(run({ 'm.mjs': `process.kill(process.pid, 'SIGUSR1');\nsetTimeout(() => process.stdout.write('pwn-inspector ' + (globalThis.process.getBuiltinModule ? 'up' : '') + '\\n'), 500);\n` }, 'm.mjs'), 92, /SIGUSR1 \(inspector activation\)/);
 });
+// CTO ruling (a) (int-v8): the launcher's evidence spawn argv carries --disable-sigusr1. The node flags are taken from
+// the launcher's own helperSpawnArgs (everything before '--import'), so dropping the flag there fails this test.
+// The helper code removes the preload's SIGUSR1 listener first: only the flag then keeps SIGUSR1 from starting the
+// inspector. Accepted: the child keeps running (survived, 0) or ends on SIGUSR1 / its code; never a ws listener.
+test('SEC L-SEC-2b (CTO a): with the launcher\'s helper flags, SIGUSR1 to the child opens no inspector even with the preload listener removed', (t) => {
+  const plan = buildPlan({ runId: 'sig', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+  const a = helperSpawnArgs(plan, plan.streams[0], 0, 2);
+  const flags = a.slice(0, a.indexOf('--import'));
+  assert.deepEqual(flags, ['--disable-sigusr1'], 'SIGUSR1-SPAWN: the launcher helper argv must carry --disable-sigusr1');
+  const r = run({ 'm.mjs': `process.debugPort = 0; process.removeAllListeners('SIGUSR1');\nprocess.kill(process.pid, 'SIGUSR1');\nawait new Promise((s) => setTimeout(s, 500));\n${OUT}` }, 'm.mjs', { flags });
+  assert.doesNotMatch(r.stderr, /Debugger listening|ws:\/\//, 'SIGUSR1-SPAWN: an inspector started');
+  assert.doesNotMatch(r.stdout, /pwn/);
+  assert.ok((r.status === 0 && r.stdout === 'survived\n') || r.signal === 'SIGUSR1' || r.status === 92, `SIGUSR1-SPAWN: status ${r.status} signal ${r.signal} stderr ${r.stderr}`);
+  t.diagnostic(`L-SEC-2b outcome with the flag: status ${r.status} signal ${r.signal}`);
+  // control (slot 1): in NORMAL mode without the flag the same body starts the inspector, so the test can see one. In
+  // helper mode without the flag it cannot serve as the control: the preload's 92 listener replaced Node's native
+  // SIGUSR1 handler, and removing every listener resets the signal to its default action, so the process dies by
+  // SIGUSR1 with no inspector (observed in slot 1; recorded below, not relied on).
+  const body = `process.debugPort = 0; process.removeAllListeners('SIGUSR1');\nprocess.kill(process.pid, 'SIGUSR1');\nawait new Promise((s) => setTimeout(s, 500));\nprocess._rawDebug('ctl-done');\nprocess.exit(0);\n`;
+  const hm = run({ 'm.mjs': body }, 'm.mjs');
+  assert.doesNotMatch(hm.stderr, /Debugger listening|ws:\/\//, 'SIGUSR1-HELPER-NOFLAG: an inspector started');
+  t.diagnostic(`L-SEC-2b helper mode without the flag: status ${hm.status} signal ${hm.signal}`);
+  const ctl = run({ 'm.mjs': body }, 'm.mjs', { normal: true });
+  assert.match(ctl.stderr, /Debugger listening/, `control: without --disable-sigusr1 the inspector must start (status ${ctl.status} signal ${ctl.signal})`);
+});
+test('SEC L-SEC-2c (int-v8): the hook-recorded child proof carries sigusr1_disabled, true only for a child started with the flag', () => {
+  // The launcher reads proofs through the backstop's childProof (grantView in stream-launcher.mjs), not the raw file;
+  // a dropped field there would void every header-bound part. Normal mode: the G-39 hook records each node child's proof.
+  const main = [
+    "import { spawn } from 'node:child_process';",
+    "const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;",
+    'const out = {};',
+    "for (const [k, a] of [['flag', ['--disable-sigusr1', '-e', '0']], ['plain', ['-e', '0']]]) {",
+    "  const c = spawn(process.execPath, a, { stdio: 'ignore' });",
+    "  await new Promise((r) => c.once('exit', r));",
+    '  const p = ev.childProof(c);',
+    '  out[k] = p && typeof p === "object" ? p.sigusr1_disabled : p;',
+    '}',
+    "process.stdout.write(JSON.stringify(out) + '\\n');",
+  ].join('\n') + '\n';
+  const r = run({ 'm.mjs': main }, 'm.mjs', { normal: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { flag: true, plain: false }, 'CHILDPROOF-SIGUSR1');
+});
 test('SEC p9/p9b (item 3): process._debugProcess and process._debugEnd exit 92 (no ws inspector)', () => {
   expect(run({ 'm.mjs': `process.debugPort = 0; process._debugProcess(process.pid);\nawait new Promise((s) => setTimeout(s, 300));\nprocess.stdout.write('pwn-debug\\n');\n` }, 'm.mjs'), 92, /process\._debugProcess refused in helper mode/);
   expect(run({ 'm.mjs': `process._debugEnd();\nprocess.stdout.write('pwn-debugend\\n');\n` }, 'm.mjs'), 92, /process\._debugEnd refused in helper mode/);
 });
-test('SEC p6/p6b/p6c/p6d (item 3): node:test run() with process isolation (also with env and execArgv) exits 92 and its child never runs', () => {
+// CTO ruling (c): a refused spawn must abort at the refusal with 92, never fall through to the post-exit proof check.
+// Both node:test variants: the default env (no env option) and the PATH-only env with execArgv: []. Mutant M67 lets
+// node:test load and turns the child_process refusal into a catchable throw (the fall-through): both must then fail.
+test('SEC p6/p6b/p6c/p6d (item 3, CTO c): node:test run() with process isolation, default env and PATH-only env + execArgv [], exits 92 and its child never runs', () => {
   const evil = { 'evil.test.mjs': `import { writeFileSync } from 'node:fs'; writeFileSync(@MARK@, 'child ran ' + process.pid);\n` };
   for (const opts of ["{ files: [process.cwd() + '/../evil.test.mjs'], isolation: 'process' }", "{ files: [process.cwd() + '/../evil.test.mjs'], isolation: 'process', env: { PATH: process.env.PATH }, execArgv: [] }"]) {
-    expect(run({ 'm.mjs': `import { run } from 'node:test';\nconst s = run(${opts});\nfor await (const _ of s) {}\n${OUT}` }, 'm.mjs', { extra: evil }), 92);
+    const r = run({ 'm.mjs': `import { run } from 'node:test';\nconst s = run(${opts});\nfor await (const _ of s) {}\n${OUT}` }, 'm.mjs', { extra: evil });
+    expect(r, 92); assert.doesNotMatch(r.stderr, /did not prove the backstop is loaded/, 'SPAWN-FALLTHROUGH: reached the post-exit proof check');
   }
 });
 test('SEC item 3: node:test is a forbidden builtin: process.getBuiltinModule(\'node:test\') and import \'node:test/reporters\' exit 92', () => {
@@ -132,11 +188,18 @@ test('SEC item 3: in helper mode every child_process export dies 92 before spawn
 // ---- item 4: node: load results ----
 test('SEC item 4: a node: load result carrying a source, or a format other than builtin, exits 89 (hook below ours)', () => {
   const pre = (ret) => `import { registerHooks } from 'node:module';\nregisterHooks({ load: (u, c, n) => (u === 'node:zlib' ? ${ret} : n(u, c)) });\n`;
-  expect(run({ 'm.mjs': `import 'node:zlib';\n${OUT}` }, 'm.mjs', { preImport: pre(`{ format: 'module', source: 'process.stdout.write("pwn-swap\\\\n"); export default 1;', shortCircuit: true }`) }), 89, /load: node:zlib came back as module with a source/);
-  expect(run({ 'm.mjs': `import 'node:zlib';\n${OUT}` }, 'm.mjs', { preImport: pre(`{ format: 'builtin', source: 'x', shortCircuit: true }`) }), 89, /with a source/);
-  expect(run({ 'm.mjs': `import 'node:zlib';\n${OUT}` }, 'm.mjs', { preImport: pre(`{ format: 'commonjs', shortCircuit: true }`) }), 89, /came back as commonjs/);
+  // Preloaded parent: the backstop arrives first via NODE_OPTIONS, so the earlier --import (outside the manifest) is
+  // itself refused at our load hook with 89 before it can register anything (every variant, the benign one too).
+  // Bare parent (bare gate): the foreign hook sits below ours and each forged result is caught as before.
+  const cases = [
+    [`{ format: 'module', source: 'process.stdout.write("pwn-swap\\\\n"); export default 1;', shortCircuit: true }`, /load: node:zlib came back as module with a source/],
+    [`{ format: 'builtin', source: 'x', shortCircuit: true }`, /with a source/],
+    [`{ format: 'commonjs', shortCircuit: true }`, /came back as commonjs/],
+  ];
+  for (const [ret, re] of cases) expect(run({ 'm.mjs': `import 'node:zlib';\n${OUT}` }, 'm.mjs', { preImport: pre(ret) }), 89, PARENT_PRELOADED ? /load: not in manifest: file:\/\/\S*\/pre-hooks\.mjs/ : re);
   const ok = run({ 'm.mjs': `import 'node:zlib';\n${OUT}` }, 'm.mjs', { preImport: pre('n(u, c)') });
-  expect(ok, 0); assert.equal(ok.stdout, 'survived\n');
+  if (PARENT_PRELOADED) expect(ok, 89, /load: not in manifest: file:\/\/\S*\/pre-hooks\.mjs/);
+  else { expect(ok, 0); assert.equal(ok.stdout, 'survived\n'); }
 });
 
 // ---- item 5: WebAssembly (SEC-A25-6) ----
@@ -162,10 +225,20 @@ test('SEC p11 (item 7): no ENTROPY_BACKSTOP_* variable is left in process.env in
   expect(r, 0);
   const o = JSON.parse(r.stdout);
   assert.deepEqual(o.live, [], 'ENV-LIVE: grant, locator and helper env vars must be gone from process.env');
-  assert.deepEqual(o.environ, ['ENTROPY_BACKSTOP_GRANT', 'ENTROPY_BACKSTOP_HELPER', 'ENTROPY_BACKSTOP_MANIFEST'], 'residual L-SEC-1: exec-time environ (named in design v1.5)');
+  // Preloaded parent: its G-39 hook also puts ENTROPY_BACKSTOP_PROOF_FILE in the exec env (the preload deletes it from
+  // process.env after writing the proof), so /proc/self/environ carries it too (R-ENVIRON, slot 1).
+  assert.deepEqual(o.environ, ['ENTROPY_BACKSTOP_GRANT', 'ENTROPY_BACKSTOP_HELPER', 'ENTROPY_BACKSTOP_MANIFEST', ...(PARENT_PRELOADED ? ['ENTROPY_BACKSTOP_PROOF_FILE'] : [])], 'residual R-ENVIRON: exec-time environ (named in design v1.5)');
 });
 
 // ---- holding (Security: holds at 7f8908e) ----
+// CTO ruling (d): the contextify refusal must not break the normal CommonJS path: a manifest .cjs required from the
+// helper main loads (node compiles it through its internal loader, not through process.binding), runs once, and is
+// listed by its manifest digest. The tamper case (bytes differ from the manifest -> 90) is TE's, in r-g64-a25-2.test.mjs.
+test('SEC item 2 (CTO d): require() of a manifest .cjs still works under the contextify refusal', () => {
+  const cjs = 'module.exports = { v: 41 + 1 };\n';
+  const r = run({ 'm.mjs': `import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nprocess.stdout.write('cjs ' + req('./lib/y.cjs').v + '\\n');\n`, 'lib/y.cjs': cjs }, 'm.mjs');
+  expect(r, 0); assert.equal(r.stdout, 'cjs 42\n', 'CJS-UNDER-CONTEXTIFY'); assert.equal(r.stderr, '');
+});
 test('SEC p2/p3 holding: Module._extensions[\'.js\'] and Module.prototype.load on a file outside the manifest exit 89', () => {
   const evil = { 'evil.cjs': 'process.stdout.write("pwn-ext\\n");' };
   expect(run({ 'm.mjs': `import { createRequire } from 'node:module';\nconst Module = createRequire(import.meta.url)('node:module');\nconst f = process.cwd() + '/../evil.cjs';\nconst m = new Module(f); m.filename = f; m.paths = [];\nModule._extensions['.js'](m, f);\n${OUT}` }, 'm.mjs', { extra: evil }), 89);

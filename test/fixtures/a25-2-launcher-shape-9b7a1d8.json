@@ -1,0 +1,18 @@
+{
+ "fixture": {
+  "run": "golden",
+  "stream": "golden-s0",
+  "rep": "shuffle/adjacency-mod4/n-52",
+  "j": 0,
+  "calls": 40,
+  "token": "grant-1@golden#0001"
+ },
+ "exit": 0,
+ "frame_order": "HDT",
+ "H": "{\"run_id\":\"golden\",\"stream\":\"golden-s0\",\"rep\":\"shuffle/adjacency-mod4/n-52\",\"j\":0,\"calls\":40,\"src_before\":\"fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e\",\"loaded\":[[\"src/index.ts\",\"2e3e63fc4886018763f4bb4dfbfb43fd74a69c4c36efffd4d67931ef3610fe2c\"],[\"src/entropy/index.ts\",\"91f08be8ac4f304b65de9f4dd70201aff4affe511a2670508b903f58a398c3ca\"],[\"src/mapping/index.ts\",\"39e56146ed6db322c26c7eaf63b3ed05678ca38d4cda4b3469ceb7dd08ceeac2\"],[\"src/errors.ts\",\"6d263683bf3f7a5dcc1eb754579fea298cfd7458d039ba5157c5993805655a88\"]],\"backstop\":{\"mode\":\"a25\",\"sample_k\":12,\"first_walk\":10000,\"part_floor\":91920,\"backstop_sha256\":\"<ALLOW:A1>\",\"grant\":\"grant-1@golden#0001\"},\"gate_leak_check\":true}",
+ "D": [
+  2080
+ ],
+ "T": "{\"count\":40,\"payload_sha256\":\"<ALLOW:A3>\",\"src_after\":\"fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e\",\"a25\":{\"gate_calls\":\"<ALLOW:A8>\",\"walks\":\"<ALLOW:A8>\"}}",
+ "proof": "{\"pid\":\"<ALLOW:A4>\",\"preload_sha256\":\"<ALLOW:A1>\",\"token\":\"grant-1@golden#0001\",\"manifest_sha256\":\"<ALLOW:A5>\"}"
+}

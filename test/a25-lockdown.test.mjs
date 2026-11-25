@@ -17,6 +17,14 @@ import { helperSpawnEnv } from '../verification/harness/stream-launcher.mjs';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const LOCKDOWN = join(ROOT, 'tools/ci/a25-lockdown.mjs');
 const BACKSTOP = join(ROOT, 'tools/ci/entropy-backstop.mjs');
+// AI Eng note 1 (int-v8 r4): the backstop's marker key is read from the backstop source (exactly one
+// `export const MARK = Symbol.for('...')`), never re-typed here, so a renamed key cannot make a preloaded run read 'bare'.
+// The source is read, not imported: importing the backstop would install it in this process.
+const MARK_KEY = (() => {
+  const m = [...readFileSync(BACKSTOP, 'utf8').matchAll(/^export const MARK = Symbol\.for\('([^'\\]+)'\);$/gm)];
+  assert.equal(m.length, 1, 'MARK-KEY: the backstop must declare exactly one MARK = Symbol.for(...)');
+  return m[0][1];
+})();
 const DIR = mkdtempSync(join(tmpdir(), 'a25-lockdown-'));
 process.on('exit', () => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
 const url = (f) => pathToFileURL(join(DIR, f)).href;
@@ -32,7 +40,7 @@ writeFileSync(join(DIR, 'f.cjs'), "module.exports = require('./c.cjs');\n");
 const MANIFEST = [url('a.mjs'), url('d.cjs'), url('e.mjs'), url('f.cjs')];
 
 let n = 0;
-function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload = false, pre = '', refuse = 'stub' } = {}) {
+function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload = false, pre = '', refuse = 'stub', bare = false } = {}) {
   const f = join(DIR, `case-${++n}.mjs`);
   const pred = isManifest ?? `(u) => M.has(u)`;
   writeFileSync(f, [
@@ -42,6 +50,10 @@ function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload =
     `import Module from 'node:module';`,
     `const require = createRequire(import.meta.url);`,
     `const M = new Set(${JSON.stringify(manifest)});`,
+    // test 33 root cause (int-v8): a stub-hook case is only meaningful in a child WITHOUT the backstop. Under a
+    // preloaded parent the G-39 hook puts the preload into every node child, the backstop's dlopen/binding/execve
+    // refusals throw (catchable) and never call the stub hook, so the case "survives" with exit 0.
+    bare ? `if (globalThis[Symbol.for(${JSON.stringify(MARK_KEY)})]) { writeSync(2, 'NOT-BARE: backstop preload present in a bare case\\n'); process.reallyExit(3); }` : '',
     refuse === 'backstop'
       ? `import { registerRefuseHook as R } from ${JSON.stringify(pathToFileURL(BACKSTOP).href)};`
       : `const __refuseHooks = globalThis.__refuseHooks = []; const R = ${refuse === 'stub' ? '(fn) => { __refuseHooks.push(fn); }' : refuse};`,
@@ -52,7 +64,9 @@ function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload =
     `writeSync(1, 'SURVIVED\\n');`,
   ].join('\n'));
   const args = preload ? ['--import', pathToFileURL(BACKSTOP).href, f] : [f];
-  const r = spawnSync(process.execPath, args, { cwd: DIR, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 30000 });
+  const e = { ...process.env, ...env };
+  if (bare) delete e.NODE_OPTIONS; // CTO r2 (2): a bare child gets no NODE_OPTIONS and no execArgv; NOT-BARE asserts the rest
+  const r = spawnSync(process.execPath, args, { cwd: DIR, encoding: 'utf8', env: e, timeout: 30000 });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 function expectAbort(code, body, opts) {
@@ -130,8 +144,47 @@ const DIRECT = {
   "process.binding('process_wrap')": [92, "process.binding('process_wrap');"],
   'process.execve': [92, "process.execve(process.execPath, [process.execPath, '-e', '0']);"],
 };
-test('A25-2 direct native/spawn entry points abort, not throw (bare)', () => {
-  for (const [code, body] of Object.values(DIRECT)) expectAbort(code, body);
+// Test 33. Root cause of its failure under the preload (int-v8): harness, not head. Under `node --import backstop --test`
+// the children were not bare (see run(): bare); the same entry points under the preload, through the real
+// registerRefuseHook, are the next test ('real backstop refusal sites ... (normal mode)') and the helper-mode SEC tests.
+// CTO int-v8 ruling (2): NO SKIP, runs in both modes. Under a preloaded parent no node child can be bare (G-39 puts the
+// preload into every node child and refuses commands that strip it), so there it asserts the same codes through the
+// real backstop hook; the bare stub path (NOT-BARE asserted in each child) is covered by the gate's separate bare run,
+// tools/ci/a25-2-bare-gate.mjs, with its own log and SUMS.
+const PARENT_PRELOADED = Boolean(globalThis[Symbol.for(MARK_KEY)]);
+// AI Eng note 1: a run that was started with the backstop (execArgv or NODE_OPTIONS names it) must see the marker, so a
+// key mismatch fails loudly instead of sending test 33 down the stub path under the preload.
+const CLAIMS_PRELOAD = [...process.execArgv, process.env.NODE_OPTIONS ?? ''].some((a) => a.includes('entropy-backstop.mjs'));
+// AI Eng note 1 / mutant M70 (slot 1): the lockdown must register through the registerHooks it captured when it was
+// evaluated, not through the live binding. Bare: after the lockdown module is imported, the live node:module
+// registerHooks is swapped for a function that exits 7 (syncBuiltinESMExports updates named imports). Preloaded: the
+// backstop's guard is non-configurable, so the swap is refused and the live binding is the guard (94). Either way the
+// capture installs and the case survives; the live binding does not.
+test('A25-2 lockdown registers its hooks through the evaluation-time registerHooks capture, not the live binding (bare or preloaded)', () => {
+  const pre = [
+    'try {',
+    "  Object.defineProperty(Module, 'registerHooks', { value: () => { writeSync(2, 'LIVE-BINDING\\n'); process.reallyExit(7); }, configurable: true, writable: true });",
+    "  require('node:module').syncBuiltinESMExports();",
+    '} catch { /* preloaded: the guard cannot be replaced (W-late(d)) */ }',
+  ].join('\n');
+  const r = run('', { pre });
+  assert.equal(r.code, 0, `LD-CAPTURE: exit ${r.code}\nstdout: ${r.out}\nstderr: ${r.err}`);
+  assert.match(r.out, /SURVIVED/, 'LD-CAPTURE');
+  assert.doesNotMatch(r.err, /LIVE-BINDING/, 'LD-CAPTURE');
+});
+test('A25-2 marker key: a child started with the backstop sees globalThis[Symbol.for(MARK_KEY)]; a preloaded run sees it here', () => {
+  if (CLAIMS_PRELOAD) assert.equal(PARENT_PRELOADED, true, 'MARK-KEY: this run was started with the backstop but does not see its marker');
+  const e = { ...process.env }; delete e.NODE_OPTIONS;
+  for (const k of Object.keys(e)) if (k.startsWith('NODE_TEST') || k.startsWith('ENTROPY_BACKSTOP')) delete e[k];
+  const r = spawnSync(process.execPath, ['--import', pathToFileURL(BACKSTOP).href, '-e', `process.stdout.write(String(Boolean(globalThis[Symbol.for(${JSON.stringify(MARK_KEY)})])))`], { cwd: DIR, encoding: 'utf8', env: e, timeout: 30000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'true', 'MARK-KEY: a backstop-preloaded child does not carry the marker under MARK_KEY');
+});
+test('A25-2 direct native/spawn entry points abort, not throw (bare or preloaded)', () => {
+  for (const [code, body] of Object.values(DIRECT)) {
+    if (PARENT_PRELOADED) expectAbort(code, body, { preload: true, refuse: 'backstop' });
+    else expectAbort(code, body, { bare: true });
+  }
 });
 // Addendum B refuse hook, with a stub registerRefuseHook: __refuseSite(kind, detail) plays a backstop refusal site
 // (call the registered hook, then throw the catchable refusal). The hook must exit before the throw.
@@ -150,7 +203,8 @@ test('A25-2 refuse hook: install aborts 92 when registerRefuseHook is missing, n
 const BACKSTOP_HAS_HOOK = /^export function registerRefuseHook\(/m.test(readFileSync(BACKSTOP, 'utf8'));
 // Normal mode only: in helper mode the backstop refuses being imported by user code (87), so there the preload itself
 // passes its registerRefuseHook to installLockdown; that wiring is Backend's integration test.
-test('A25-2 real backstop refusal sites abort through the hook (normal mode)', { skip: BACKSTOP_HAS_HOOK ? false : 'waits on Backend: entropy-backstop.mjs registerRefuseHook (Addendum B)' }, () => {
+test('A25-2 real backstop refusal sites abort through the hook (normal mode)', () => {
+  assert.ok(BACKSTOP_HAS_HOOK, 'entropy-backstop.mjs must export registerRefuseHook (Addendum B); M-130: no skip');
   for (const [code, body] of Object.values(DIRECT)) expectAbort(code, body, { preload: true, refuse: 'backstop' });
 });
 test('A25-2 node version pin: install aborts 95 (NODE_VERSION, Addendum D) unless node is v24.22.1', () => {

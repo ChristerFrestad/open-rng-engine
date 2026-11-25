@@ -17,7 +17,12 @@
 //   95 EXIT_A25_NODE_VERSION     at install, node is not NODE_VERSION_PIN (the import() detection reads node-internal
 //                                frame names, so another node version fails closed instead of silently)
 // Under the backstop preload, process.dlopen / process.binding('spawn_sync'|'process_wrap') / process.execve are the
-// backstop's non-configurable G-39/G-46 refusals, which throw (catchable). Split note Addendum B: the backstop exports a
+// backstop's non-configurable G-39/G-46 refusals. In normal mode they throw (catchable). In helper mode (CTO ruling (e),
+// int-v8 header correction): process.binding is the backstop's empty allowlist, which aborts 92 AT the binding call for
+// every name (spawn_sync, process_wrap and contextify included; contextify is NOT reachable to this file's own
+// compileFunction/Script guards there), and every node:child_process export aborts 92 before it spawns, for any holder
+// of the exports (node:test's runner included), so no refusal falls through to the post-exit proof check. The refuse
+// hook below covers the remaining throwing sites (dlopen, execve, and the normal-mode guards). Split note Addendum B: the backstop exports a
 // one-shot registerRefuseHook(fn) and every such refusal site calls fn(kind, detail) before it throws. The preload passes
 // registerRefuseHook in; the lockdown registers a hook that aborts (kind 'dlopen' -> 93, 'spawn' or anything else -> 92)
 // so the throw is never reached. A missing or failing registerRefuseHook aborts 92 at install.
