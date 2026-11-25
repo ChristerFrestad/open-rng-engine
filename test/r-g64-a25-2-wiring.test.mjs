@@ -68,6 +68,14 @@ test('W1 (load side): the late load hook cannot hand node bytes other than the m
   const vm = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:vm' ? { url: 'node:vm', shortCircuit: true } : n(s, c)), load: (u, c, n) => (u === 'node:vm' ? { format: 'builtin', shortCircuit: true } : n(u, c)) });\nawait import('virt:vm');\n${OUT}`), HELPER_REL);
   assert.equal(vm.status, 92, vm.stderr); assert.equal(vm.stdout, '');
 });
+test('W-scheme (CTO 22:20 ruling): a late resolve hook returning a data: module exits 89 (scheme check), as do static data:/http: imports', () => {
+  const late = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:x' ? { url: 'data:text/javascript,process.stdout.write("data\\n")', shortCircuit: true } : n(s, c)) });\nawait import('virt:x');\n${OUT}`), HELPER_REL);
+  assert.equal(late.status, 89, late.stderr); assert.equal(late.stdout, ''); assert.match(late.stderr, /late resolve: scheme not allowed in helper mode: data:/);
+  const st = run({ 'm.mjs': `import 'data:text/javascript,process.stdout.write("data\\n")';\n${OUT}` }, 'm.mjs');
+  assert.equal(st.status, 89, st.stderr); assert.equal(st.stdout, ''); assert.match(st.stderr, /resolve: scheme not allowed in helper mode: data:/);
+  const blob = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:y' ? { url: 'https://example.invalid/x.mjs', shortCircuit: true } : n(s, c)) });\nawait import('virt:y');\n${OUT}`), HELPER_REL);
+  assert.equal(blob.status, 89, blob.stderr); assert.match(blob.stderr, /late resolve: scheme not allowed in helper mode: https:/);
+});
 test('W1b (CTO ruling 2): in helper mode importing node:vm exits 92, statically and dynamically', () => {
   for (const src of [`import 'node:vm';\n${OUT}`, `await import('node:vm');\n${OUT}`]) {
     const r = run({ 'm.mjs': src }, 'm.mjs');

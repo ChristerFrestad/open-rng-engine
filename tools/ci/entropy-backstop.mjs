@@ -384,8 +384,16 @@ function installHelperMode(cryptoMod) {
     if (ADDON_SET.has(b)) helperAbort(EXIT_A25_ADDON, `${where}: addon builtin ${url}`);
   };
   const GATE_SOURCE = `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n`;
+  // A25-2 (CTO 22:20 ruling): in helper mode a resolved URL may only be file: (then held to the manifest at load),
+  // node: (builtin checks) or the virtual gate. data:, blob:, http(s): and any other scheme are code outside the
+  // manifest: 89, wherever the resolve came from (our hook, the lockdown chain or the one allowed late hook).
+  const SCHEME_OK = (u) => u === HELPER_GATE_URL || u.startsWith('file:') || u.startsWith('node:');
+  const schemeCheck = (u, where) => {
+    if (typeof u !== 'string' || !SCHEME_OK(u)) helperAbort(EXIT_A25_MANIFEST_OUTSIDE, `${where}: scheme not allowed in helper mode: ${String(u).slice(0, 40)}`);
+  };
   // Bytes a late load hook hands node for a file URL are held to the manifest like ours; node: results get the builtin check.
   const checkLoadResult = (url, r) => {
+    schemeCheck(url, 'late load');
     if (url === HELPER_GATE_URL) { // the virtual gate: only our exact source may come back
       if (!r || r.format !== 'module' || r.source !== GATE_SOURCE) helperAbort(EXIT_A25_GATE, 'late load: the gate module was altered (A25-2)');
       return r;
@@ -405,6 +413,7 @@ function installHelperMode(cryptoMod) {
       if (specifier === HELPER_GATE_URL) helperAbort(EXIT_A25_GATE, `resolve: ${HELPER_GATE_URL} requested by ${parent}`);
       if (parent === ENTROPY_URL && (specifier === 'node:crypto' || specifier === 'crypto')) return { url: HELPER_GATE_URL, format: 'module', shortCircuit: true };
       const r = nextResolve(specifier, context);
+      schemeCheck(r && r.url, 'resolve');
       // Before the main entry resolves, a second top-level --import of the preload (NODE_OPTIONS and argv both name it)
       // is resolved from undefined or the startup cwd; from the main entry on, only the gate URL may import it.
       if (r.url === MAIN_URL) mainStarted = true;
@@ -418,6 +427,7 @@ function installHelperMode(cryptoMod) {
       }
       // A25-2: every non-builtin load must be a manifest file whose bytes match its entry. The check runs on the
       // bytes node will compile (r.source), not on a second read, so a swap between check and compile is caught.
+      schemeCheck(url, 'load');
       if (typeof url === 'string' && url.startsWith('node:')) { builtinLoadCheck(url, 'load'); return nextLoad(url, context); }
       const v = verifyLoad(VIEW, url);
       if (!v.ok) helperAbort(v.code, `load: ${v.why}`);
@@ -445,7 +455,8 @@ function installHelperMode(cryptoMod) {
     const wrapped = {};
     if (typeof lr === 'function') wrapped.resolve = (specifier, context, next) => {
       const r = lr(specifier, context, next);
-      if (r && typeof r.url === 'string' && r.url.startsWith('node:')) builtinLoadCheck(r.url, 'late resolve');
+      schemeCheck(r && r.url, 'late resolve');
+      if (r.url.startsWith('node:')) builtinLoadCheck(r.url, 'late resolve');
       return r;
     };
     if (typeof ll === 'function') wrapped.load = (url, context, next) => checkLoadResult(url, ll(url, context, next));
