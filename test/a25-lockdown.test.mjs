@@ -30,7 +30,7 @@ writeFileSync(join(DIR, 'f.cjs'), "module.exports = require('./c.cjs');\n");
 const MANIFEST = [url('a.mjs'), url('d.cjs'), url('e.mjs'), url('f.cjs')];
 
 let n = 0;
-function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload = false } = {}) {
+function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload = false, pre = '' } = {}) {
   const f = join(DIR, `case-${++n}.mjs`);
   const pred = isManifest ?? `(u) => M.has(u)`;
   writeFileSync(f, [
@@ -40,6 +40,7 @@ function run(body, { manifest = MANIFEST, isManifest = null, env = {}, preload =
     `import Module from 'node:module';`,
     `const require = createRequire(import.meta.url);`,
     `const M = new Set(${JSON.stringify(manifest)});`,
+    pre,
     `installLockdown({ isManifestUrl: ${pred}, abort: (code, why) => { writeSync(2, 'ABORT ' + code + ' ' + why + '\\n'); process.reallyExit(code); } });`,
     `try {`, body, `} catch (e) { writeSync(1, 'CAUGHT ' + (e && e.message) + '\\n'); }`,
     `writeSync(1, 'SURVIVED\\n');`,
@@ -116,14 +117,31 @@ const IMPORTS = {
 
 for (const [name, body] of Object.entries(CODEGEN)) test(`A25-2 codegen -> 91: ${name}`, () => { expectAbort(91, body); });
 for (const [name, body] of Object.entries(FORBIDDEN)) test(`A25-2 forbidden module -> 92: ${name}`, () => { expectAbort(92, body); });
-test('A25-2 forbidden module -> 92: process.binding(spawn_sync) when process.binding is replaceable', () => {
-  const r = run("process.binding('spawn_sync');");
-  // Bare: the lockdown owns process.binding (92). Under the backstop, its G-39 guard refuses it first (throws).
-  assert.ok(r.code === 92 || /CAUGHT .*refused/.test(r.out), `${r.code} ${r.out} ${r.err}`);
+// Direct process.dlopen / binding('spawn_sync'|'process_wrap') / execve: an abort (process exit), never a catchable
+// refusal, bare (the lockdown's own stubs) and under the backstop in both modes (its refusal line becomes the abort).
+const DIRECT = {
+  'process.dlopen': [93, `process.dlopen({ exports: {} }, ${JSON.stringify(join(DIR, 'fake.node'))});`],
+  "process.binding('spawn_sync')": [92, "process.binding('spawn_sync');"],
+  "process.binding('process_wrap')": [92, "process.binding('process_wrap');"],
+  'process.execve': [92, "process.execve(process.execPath, [process.execPath, '-e', '0']);"],
+};
+for (const [mode, opts] of [['bare', {}], ['backstop normal', { preload: true }], ['backstop helper', { preload: true, env: { ENTROPY_BACKSTOP_HELPER: 'a25' } }]]) {
+  test(`A25-2 direct native/spawn entry points abort, not throw (${mode})`, () => {
+    for (const [code, body] of Object.values(DIRECT)) expectAbort(code, body, opts);
+    // Swapping the console out (or console.error) first must not turn the abort back into a catchable throw.
+    expectAbort(93, `try { globalThis.console = { error() {} }; } catch {} try { console.error = () => {}; } catch {} ${DIRECT['process.dlopen'][1]}`, opts);
+    expectAbort(92, `try { Object.defineProperty(globalThis, 'console', { value: { error() {} } }); } catch {} ${DIRECT["process.binding('spawn_sync')"][1]}`, opts);
+  });
+}
+test('A25-2 console.error keeps working for ordinary lines', () => {
+  const r = expectSurvive("console.error('hello from main'); console.error('entropy-backstop: something else');");
+  assert.match(r.err, /hello from main/);
 });
-test('A25-2 addon -> 93: process.dlopen when process.dlopen is replaceable (bare)', () => {
-  const r = run(`process.dlopen({ exports: {} }, ${JSON.stringify(join(DIR, 'fake.node'))});`);
-  assert.ok(r.code === 93 || /CAUGHT .*dlopen refused/.test(r.out), `${r.code} ${r.out} ${r.err}`);
+test('A25-2 node version pin: install aborts 94 unless node is v24.22.1', () => {
+  expectAbort(94, '', { pre: "Object.defineProperty(process, 'version', { value: 'v24.22.2' });" });
+  expectAbort(94, '', { pre: "Object.defineProperty(process.versions, 'node', { value: '25.0.0' });" });
+  expectAbort(94, '', { pre: "Object.defineProperty(process, 'versions', { value: undefined });" });
+  expectSurvive("if (process.version !== 'v24.22.1') throw new Error('pin');");
 });
 for (const [name, body] of Object.entries(ADDONS)) test(`A25-2 addon -> 93: ${name}`, () => { expectAbort(93, body); });
 for (const [name, body] of Object.entries(IMPORTS)) test(`A25-2 dynamic import -> 94: ${name}`, () => { expectAbort(94, body); });
@@ -179,8 +197,9 @@ test('A25-2 under the backstop preload (normal mode): every class still aborts w
   expectAbort(91, "process.binding('contextify').compileFunction('return 1');", { preload: true });
   expectAbort(92, "require('child_process');", { preload: true });
   expectAbort(93, `require(${JSON.stringify(join(DIR, 'fake.node'))});`, { preload: true });
-  // process.dlopen is the backstop's non-configurable refusal here, so only the lockdown's own stub gives 93.
-  expectAbort(93, `Module._extensions['.node']({ exports: {} }, ${JSON.stringify(join(DIR, 'fake.node'))});`, { preload: true });
+  // process.dlopen is the backstop's non-configurable refusal here (turned into 93 via its refusal line).
+  // The lockdown's own _extensions['.node'] stub must fire first (its reason names it), not the dlopen layer behind it.
+  assert.match(expectAbort(93, `Module._extensions['.node']({ exports: {} }, ${JSON.stringify(join(DIR, 'fake.node'))});`, { preload: true }).err, /Module\._extensions\[\.node\] called after boot/);
   expectAbort(94, "await import('./b.mjs');", { preload: true });
   expectSurvive(`await import(${JSON.stringify(url('a.mjs'))}); require('./c.cjs');`, { preload: true });
 });
@@ -196,7 +215,9 @@ test('A25-2 source rules: no import from the backstop, no node:crypto, no wrappe
   const src = readFileSync(LOCKDOWN, 'utf8');
   const code = src.replace(/^\s*\/\/.*$/gm, '');
   assert.deepEqual([...code.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]), ['node:module']);
-  assert.doesNotMatch(code, /entropy-backstop|node:crypto|['"]crypto['"]|randomBytes|randomFill|randomInt|randomUUID|getRandomValues|webcrypto|subtle|generateKey|generatePrime/);
+  // The backstop's refusal-line text is matched as data; importing or requiring the backstop is not allowed.
+  assert.doesNotMatch(code, /(?:import\s*\(|require\s*\(|from\s*)['"][^'"]*entropy-backstop/);
+  assert.doesNotMatch(code, /node:crypto|['"]crypto['"]|randomBytes|randomFill|randomInt|randomUUID|getRandomValues|webcrypto|subtle|generateKey|generatePrime/);
   assert.match(code, /^export function installLockdown\(\{ isManifestUrl, abort \} = \{\}\)/m);
   for (const [k, v] of [['EXIT_A25_CODEGEN', 91], ['EXIT_A25_FORBIDDEN_MODULE', 92], ['EXIT_A25_ADDON', 93], ['EXIT_A25_IMPORT', 94]]) assert.match(code, new RegExp(`^export const ${k} = ${v};$`, 'm'));
 });

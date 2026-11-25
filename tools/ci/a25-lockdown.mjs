@@ -8,7 +8,13 @@
 //                                import, import(), require or process.getBuiltinModule
 //   93 EXIT_A25_ADDON            native addons: process.dlopen, a resolved .node file or 'addon' format,
 //                                Module._extensions['.node'], process._linkedBinding, node:sqlite (loadExtension)
-//   94 EXIT_A25_IMPORT           a dynamic import() whose resolved URL isManifestUrl() rejects (or that throws)
+//   94 EXIT_A25_IMPORT           a dynamic import() whose resolved URL isManifestUrl() rejects (or that throws);
+//                                also at install when node is not NODE_VERSION_PIN (the import() detection reads
+//                                node-internal frame names, so another node version fails closed instead of silently)
+// Under the backstop preload, process.dlopen / process.binding('spawn_sync'|'process_wrap') / process.execve are the
+// backstop's non-configurable G-39/G-46 refusals, which throw (catchable). Each of them writes its refusal line with
+// console.error before throwing, so the lockdown locks globalThis.console and console.error and turns those exact
+// lines into an abort (93 dlopen, 92 the others) before the throw can be caught.
 // Codegen is blocked in JS because argv is fixed (A25-1: exact helper argv, no NODE_OPTIONS), so the
 // --disallow-code-generation-from-strings flag cannot be passed, and v8.setFlagsFromString() after boot does not
 // change the already-created main context (checked on node v24.22.1: eval still runs).
@@ -24,6 +30,14 @@ export const EXIT_A25_ADDON = 93;
 export const EXIT_A25_IMPORT = 94;
 export const FORBIDDEN_BUILTINS = Object.freeze(['vm', 'worker_threads', 'child_process', 'cluster', 'inspector', 'inspector/promises', 'repl']);
 export const ADDON_BUILTINS = Object.freeze(['sqlite']);
+export const NODE_VERSION_PIN = 'v24.22.1';
+// The backstop's refusal lines (tools/ci/entropy-backstop.mjs installBindingGuard) and the abort each one becomes.
+export const BACKSTOP_REFUSALS = Object.freeze([
+  Object.freeze(['entropy-backstop: process.dlopen refused', 93]),
+  Object.freeze(["entropy-backstop: process.binding('spawn_sync') refused", 92]),
+  Object.freeze(["entropy-backstop: process.binding('process_wrap') refused", 92]),
+  Object.freeze(['entropy-backstop: process.execve refused', 92]),
+]);
 
 // Intrinsics saved at module evaluation (boot), before any main-entry code runs.
 const SavedError = Error;
@@ -127,6 +141,11 @@ export function installLockdown({ isManifestUrl, abort } = {}) {
     try { abort(code, `A25-2 lockdown: ${why}`); } catch { /* exit below regardless */ }
     reallyExit(code);
   };
+  // (0) Node version pin, before anything else.
+  const versions = process.versions;
+  if (process.version !== NODE_VERSION_PIN || !versions || versions.node !== apply(strSlice, NODE_VERSION_PIN, [1])) {
+    die(EXIT_A25_IMPORT, `install: node ${String(process.version)} is not the pinned ${NODE_VERSION_PIN} (import() detection is version-bound)`);
+  }
   const manifestOk = (url) => { try { return isManifestUrl(url) === true; } catch { return false; } };
 
   // (1) Module resolution: covers static import, import(), require, require.resolve, import.meta.resolve.
@@ -205,12 +224,26 @@ export function installLockdown({ isManifestUrl, abort } = {}) {
   }
   if (canReplace(process, 'execve') && typeof process.execve === 'function') lockProperty(process, 'execve', function execve() { die(EXIT_A25_FORBIDDEN_MODULE, 'process.execve'); });
 
-  // (4) Native addons. Under the backstop, process.dlopen is already a non-configurable refusal (G-39, throws);
-  // then the resolver (.node / addon format) and Module._extensions['.node'] give 93 before dlopen is reached.
+  // (4) Native addons. Under the backstop, process.dlopen is already a non-configurable refusal (G-39, throws), made
+  // an abort by (5); the resolver (.node / addon format) and Module._extensions['.node'] give 93 before it is reached.
   const addonStub = (name) => function () { die(EXIT_A25_ADDON, `${name} called after boot`); };
   if (canReplace(process, 'dlopen')) lockProperty(process, 'dlopen', addonStub('process.dlopen'));
   if (canReplace(process, '_linkedBinding')) lockProperty(process, '_linkedBinding', addonStub('process._linkedBinding'));
   if (!lockProperty(Module._extensions, '.node', addonStub('Module._extensions[.node]'))) die(EXIT_A25_ADDON, 'install: could not lock Module._extensions[.node]');
+
+  // (5) The backstop's catchable refusals become aborts. console and console.error are locked so main-entry code can
+  // not swap the console out to silence the refusal line and then catch the throw.
+  const con = globalThis.console;
+  const origError = con && con.error;
+  if (typeof origError !== 'function') die(EXIT_A25_FORBIDDEN_MODULE, 'install: console.error is not a function');
+  const errorGuard = function error(...args) {
+    const m = args[0];
+    if (typeof m === 'string') {
+      for (const [prefix, code] of BACKSTOP_REFUSALS) if (starts(m, prefix)) die(code, `backstop refusal is an abort after boot: ${m}`);
+    }
+    return apply(origError, this, args);
+  };
+  if (!lockProperty(globalThis, 'console', con) || !lockProperty(con, 'error', errorGuard)) die(EXIT_A25_FORBIDDEN_MODULE, 'install: could not lock console.error');
 
   try { syncBuiltinESMExports(); } catch { /* namespaces already live */ }
 }
