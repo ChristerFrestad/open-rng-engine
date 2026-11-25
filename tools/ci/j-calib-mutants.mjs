@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const RS_TEST = 'test/r-g64-stream.test.mjs';
 const RP_TEST = 'test/r-g64-positional.test.mjs';
+const RD_TEST = 'test/r-g64-decision.test.mjs';
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/calibration/wave1-source.mjs';
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
@@ -78,6 +79,18 @@ const MUTANTS = [
   ['RP-2 df n²-1 instead of (n-1)²', [['verification/statistic/positional-statistic.mjs', 'export const df = (n) => (n - 1) * (n - 1);', 'export const df = (n) => n * n - 1;']], RP_TEST],
   ['RP-3 row/column sums not checked', [['verification/statistic/positional-statistic.mjs', 'if (rows[i] !== M || cols[i] !== M) throw', 'if (false) throw']], RP_TEST],
   ['RP-4 merge drops the last cell', [['verification/statistic/positional-statistic.mjs', 'for (let i = 0; i < C.length; i++) C[i] += o.C[i];', 'for (let i = 0; i < C.length - 1; i++) C[i] += o.C[i];']], RP_TEST],
+  // R-G64 item 3 (A23 R118-1..3, A23.1 M-R118-2b): RC decision with the stream-collapsed flag count.
+  ['RD-1 re-run result ignored (M-R118-2b i)', [['verification/harness/rc-decision.mjs', "  if (again.length) return { ...report, reruns: rerunReport, verdict: 'FAIL'", "  if (false) return { ...report, reruns: rerunReport, verdict: 'FAIL'"]], RD_TEST],
+  ['RD-2 a flagged entry without a re-run accepted (M-R118-2b ii)', [['verification/harness/rc-decision.mjs', '    if (!r) throw new Error(`decision refused: flagged', '    if (!r) continue; if (0) throw new Error(`decision refused: flagged']], RD_TEST],
+  ['RD-3 hard-FAIL count per entry, not per stream (R118-2)', [['verification/harness/rc-decision.mjs', 'if (t.flags_collapsed >= HARD_FLAGS) return', 'if (t.flags_per_entry >= HARD_FLAGS) return']], RD_TEST],
+  ['RD-4 threshold 0.01/161 instead of 0.01/157 (R118-1)', [['verification/harness/rc-decision.mjs', 'export const THRESHOLD = 0.01 / K_FROZEN;', 'export const THRESHOLD = 0.01 / K_COUNT;']], RD_TEST],
+  ['RD-5 re-run on the flagged stream accepted', [['verification/harness/rc-decision.mjs', '    if (firstStreams.has(r.stream)) throw', '    if (false) throw']], RD_TEST],
+  ['RD-6 re-run at another M accepted', [['verification/harness/rc-decision.mjs', '    if (r.M !== e.M) throw', '    if (false) throw']], RD_TEST],
+  ['RD-7 failure band not hard FAIL', [['verification/harness/rc-decision.mjs', '  if (t.hard.length) return', '  if (false) return']], RD_TEST],
+  ['RD-8 uncounted stream taken as evidence', [['verification/harness/rc-decision.mjs', '    if (!streamCounted(r)) throw', '    if (false) throw']], RD_TEST],
+  ['RD-9 flags collapsed per run, not per stream', [['verification/harness/rc-decision.mjs', '    const sk = `${t.run}\\0${t.stream}`;', '    const sk = t.run;']], RD_TEST],
+  ['RD-10 missing evidence not FAIL', [['verification/harness/rc-decision.mjs', '  if (tests.length !== expectK) return', '  if (false) return']], RD_TEST],
+  ['RD-11 SUSPECT without re-runs decided as PASS-WITH-NOTE', [['verification/harness/rc-decision.mjs', "  if (reruns === null) return { ...report, verdict: 'SUSPECT'", "  if (reruns === null) return { ...report, verdict: 'PASS-WITH-NOTE'"]], RD_TEST],
   // R-G64 streamed harness (HoQ addendum 1, A22 and D22-1..8).
   ['RS-1 H j/n_j not checked against the plan (A22)', [['verification/harness/stream-launcher.mjs', 'if (h.j !== j || h.calls !== want) return fail(', 'if (false) return fail(']], RS_TEST],
   ["RS-2 merge uses the result's part count, not the plan's N (A22)", [['verification/harness/stream-launcher.mjs', "  const N = stream.parts.length; // the plan's N", "  const N = res.parts.length; // the plan's N"]], RS_TEST],

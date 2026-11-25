@@ -42,6 +42,7 @@ export const BOUND_FILES = Object.freeze([
   'verification/harness/stream-launcher.mjs', 'verification/harness/evidence-helper.mjs',
   'verification/harness/stream-frames.mjs', 'verification/harness/run-plan.mjs',
   'verification/statistic/wave1-statistic.mjs', 'verification/statistic/positional-statistic.mjs',
+  'verification/harness/rc-decision.mjs',
 ]);
 export function bindings(root = ROOT) {
   const files = {};
