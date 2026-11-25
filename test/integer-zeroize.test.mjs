@@ -1,10 +1,10 @@
-// HoQ A14 (b), PLAN R-23 / QR-08: integerWithFill zeroes its target buffer, and the buffer the fill
+// HoQ A14 (b), PLAN R-23 / QR-08: the shared draw routine (integer, shuffle, sample, weightedPick) zeroes its target buffer, and the buffer the fill
 // returned when that is a different Uint8Array, on every path: return, reject-and-retry, and throw.
 // Spy fills keep every buffer they saw and the tests check each one is all zero afterwards.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RngEntropyError, RngHealthError } from '../src/index.ts';
-import { integerWithFill, shuffleWithFill, sampleWithFill, TRY_LIMIT } from '../src/mapping/index.ts';
+import { integerWithFill, shuffleWithFill, sampleWithFill, weightedPickWithFill, TRY_LIMIT } from '../src/mapping/index.ts';
 
 const allZero = (b) => b.every((x) => x === 0);
 
@@ -74,4 +74,24 @@ test('shuffle and sample buffers are zeroed too (they draw through integerWithFi
   const g = spyFill([0, 0, 0]);
   sampleWithFill(52, 3, g);
   assert.ok([...f.seen, ...g.seen].every(allZero));
+});
+
+test('weightedPick buffers are zeroed on return, reject, 7-byte and throw paths', () => {
+  // T = 6, 4-byte read, m = 3: x = 5, running sums [0, 1, 3] -> index 2
+  const a = spyFill([5], { separate: true });
+  assert.equal(weightedPickWithFill([1, 2, 3], a), 2);
+  assert.equal(a.seen.length, 2);
+  // T = 5: 7 and 6 rejected, then x = 1 -> index 1
+  const b = spyFill([7, 6, 1]);
+  assert.equal(weightedPickWithFill([1, 2, 2], b), 1);
+  assert.equal(b.seen.length, 3);
+  // T = 2^49 > 2^32: 7-byte read, x = 2^49 - 256 + 3 >= 2^48 -> index 1
+  const c = spyFill([3]);
+  assert.equal(weightedPickWithFill([2 ** 48, 2 ** 48], c), 1);
+  assert.equal(c.seen[0].length, 7);
+  // 128 rejects -> RngHealthError
+  const d = spyFill(new Array(TRY_LIMIT).fill(7));
+  assert.throws(() => weightedPickWithFill([1, 2, 2], d), RngHealthError);
+  assert.equal(d.seen.length, TRY_LIMIT);
+  assert.ok([...a.seen, ...b.seen, ...c.seen, ...d.seen].every(allZero));
 });
