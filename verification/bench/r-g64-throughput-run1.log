@@ -28,3 +28,33 @@ scale shuffle n=52 P=2: 15195 calls/s total; per-helper ns 135604 127863
 scale shuffle n=52 P=4: 27100 calls/s total; per-helper ns 151611 150972 152876 136260
 scale shuffle n=52 P=8: 37909 calls/s total; per-helper ns 208186 206655 227656 175558 158472 267290 236368 256704
 # load end 6.34 3.96 3.72
+
+## WITH preload (append-only block, 2026-11-25 13:18-13:23 CET; CTO option 1). Stage A per call, startup excluded; plain vs --import tools/ci/entropy-backstop.mjs.
+## Build: head d808142c, src identical to item 1 @87b60dd7 (git diff 87b60dd7 -- src empty), src digest fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e. Bench verification/bench/r-g64-preload-stageA.mjs; data r-g64-preload-run1.json.
+## An earlier attempt at 13:06 stopped at load1 4.38 after 9 shapes (another gate on the box); this is the full re-run, load stayed under 4.
+# r-g64-preload-stageA WITH preload; sha256 f8317bb04e06d5cf0815b8bd103b681641f570ccbc1bdad5bc168470e4dc001a; head d808142c53803c77268b52054c157a1d92167e4a; src fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e; backstop e046dbb2dbfbdf371834a0c9f4cc888d5f0c85e924e50aab8c55be75dc7cae57; node v24.22.1; 8 x Intel(R) Xeon(R) Processor; load 1.78 3.07 3.99
+randomInt [0,2)                plain med      1525 p95      1881 ns | WITH preload med     34419 p95     38493 ns | factor 22.58x (p95 20.46x) | startup 64/35 ms | load 1.97
+randomInt [1,7)                plain med      1992 p95      2130 ns | WITH preload med     46152 p95     50371 ns | factor 23.17x (p95 23.65x) | startup 39/32 ms | load 2.06
+randomInt [1,38)               plain med      2605 p95      2980 ns | WITH preload med     59416 p95     66316 ns | factor 22.81x (p95 22.25x) | startup 35/33 ms | load 2.05
+randomInt [1,53)               plain med      1914 p95      2267 ns | WITH preload med     41205 p95     45854 ns | factor 21.53x (p95 20.22x) | startup 41/42 ms | load 2.04
+randomInt [0,100)              plain med      1962 p95      2180 ns | WITH preload med     45932 p95     51238 ns | factor 23.42x (p95 23.5x) | startup 34/51 ms | load 2.03
+randomInt [0,2147483649)       plain med      3032 p95      4052 ns | WITH preload med     67977 p95     73141 ns | factor 22.42x (p95 18.05x) | startup 34/33 ms | load 2.32
+randomInt [0,4294967296)       plain med      1545 p95      1696 ns | WITH preload med     34066 p95     43692 ns | factor 22.05x (p95 25.75x) | startup 35/33 ms | load 2.34
+randomInt [0,38)               plain med      2592 p95      3124 ns | WITH preload med     58298 p95     63790 ns | factor 22.49x (p95 20.42x) | startup 40/33 ms | load 2.2
+randomInt [0,54)               plain med      1868 p95      2421 ns | WITH preload med     40969 p95     62957 ns | factor 21.93x (p95 26.01x) | startup 34/68 ms | load 2.16
+randomInt [0,4294967297)       plain med      3267 p95      3583 ns | WITH preload med     71735 p95     78965 ns | factor 21.96x (p95 22.04x) | startup 37/39 ms | load 2.65
+randomInt [0,281474976710656)  plain med      1754 p95      1860 ns | WITH preload med     35228 p95     47615 ns | factor 20.08x (p95 25.6x) | startup 35/35 ms | load 2.63
+randomInt [0,37)               plain med      2775 p95      3143 ns | WITH preload med     62518 p95     67781 ns | factor 22.53x (p95 21.57x) | startup 34/36 ms | load 2.94
+shuffle n=52                   plain med    121828 p95    150062 ns | WITH preload med   2690629 p95   2989578 ns | factor 22.09x (p95 19.92x) | startup 34/35 ms | load 3.02
+shuffle n=54                   plain med    124735 p95    141552 ns | WITH preload med   2959699 p95   3244133 ns | factor 23.73x (p95 22.92x) | startup 36/34 ms | load 2.8
+shuffle n=104                  plain med    257596 p95    340075 ns | WITH preload med   5628099 p95   6634581 ns | factor 21.85x (p95 19.51x) | startup 37/34 ms | load 2.67
+shuffle n=312                  plain med    745276 p95    844114 ns | WITH preload med  16912329 p95  20677589 ns | factor 22.69x (p95 24.5x) | startup 36/35 ms | load 2.57
+shuffle n=416                  plain med   1005973 p95   1117245 ns | WITH preload med  22056710 p95  25445939 ns | factor 21.93x (p95 22.78x) | startup 37/34 ms | load 2.51
+shuffle n=1000                 plain med   2420122 p95   2711500 ns | WITH preload med  49850699 p95  54241890 ns | factor 20.6x (p95 20x) | startup 39/42 ms | load 2.43
+sample n=52 k=5                plain med     10465 p95     13083 ns | WITH preload med    259876 p95    344158 ns | factor 24.83x (p95 26.31x) | startup 36/34 ms | load 2.48
+sample n=52 k=9                plain med     19719 p95     24888 ns | WITH preload med    479616 p95    533487 ns | factor 24.32x (p95 21.44x) | startup 45/34 ms | load 2.41
+sample n=80 k=20               plain med     55663 p95     64284 ns | WITH preload med   1314013 p95   1510844 ns | factor 23.61x (p95 23.5x) | startup 34/36 ms | load 2.39
+weightedPick [1,3,6]           plain med      2652 p95      3038 ns | WITH preload med     59716 p95     66489 ns | factor 22.52x (p95 21.89x) | startup 38/36 ms | load 2.63
+weightedPick W-A               plain med      3989 p95      4491 ns | WITH preload med     78043 p95     86986 ns | factor 19.57x (p95 19.37x) | startup 37/41 ms | load 2.57
+weightedPick W-B               plain med      2465 p95      2718 ns | WITH preload med     44509 p95     49179 ns | factor 18.05x (p95 18.09x) | startup 37/37 ms | load 2.86
+# load end 2.86 2.82 3.62
