@@ -24,13 +24,26 @@ export const ALLOW = Object.freeze({
   A4: 'proof.pid: the OS pid of the helper, different on every spawn; typed (CTO): integer > 1, not the parent pid, equal to the spawned child pid',
   A5: 'proof.manifest_sha256: the digest of the manifest over this tree; typed (CTO): 64 lowercase hex, equal to an independent recompute',
   A6: 'proof.sigusr1_disabled: absent at 9b7a1d8; int-v8 adds it and it must be exactly true (removed only when true)',
-  A8: 'T.a25.gate_calls and T.a25.walks: the gate/walk count follows the rejection-sampling draws of the A2 entropy, so it differs per run (found in slot 1: two goldens 2839 vs 2854); typed (CTO-approved 2026-11-26, not final until the Sec code read at the committed head): keys exactly {gate_calls, walks}, integers, equal to each other, >= calls; the raw value is kept in the audit record (CTO A8 (3)), never discarded',
+  A8: 'T.a25.gate_calls and T.a25.walks: the gate/walk count follows the rejection-sampling draws of the A2 entropy, so it differs per run (found in slot 1: two goldens 2839 vs 2854); typed (CTO-approved 2026-11-26, not final until the Sec code read at the committed head): keys exactly {gate_calls, walks}, integers, equal to each other, >= A8_LOWER 2040 (the exact minimum; CTO r5); gate_calls > A8_UPPER 3084 is an A8-UB FINDING+HOLD (thrown, never a substitution; CTO r5, Sec N-A8-UB); the raw value and gate_calls/calls are kept in the audit record (CTO A8 (3)), never discarded',
   A7: 'spawn argv: int-v8 adds --disable-sigusr1 (taken from each tree\'s own helperSpawnArgs; not part of the output)',
 });
 // CTO int-v8 r2 (1): A4/A5 are typed, constrained substitutions, not wildcards. A value that fails its check is
 // swapped for <REJECT:id>, never <ALLOW:id>, so the byte compare fails.
 export function checkA4(pid, childPid, parentPid) { return Number.isInteger(pid) && pid > 1 && pid !== parentPid && pid === childPid; }
-export function checkA8(a25, calls) { return !!a25 && typeof a25 === 'object' && Object.keys(a25).join() === 'gate_calls,walks' && Number.isInteger(a25.gate_calls) && a25.walks === a25.gate_calls && a25.gate_calls >= calls; }
+// A8 bounds for FIXTURE (40 calls of shuffle n=52; CTO r5 ruling on Sec N-A8-UB). Each shuffle is the pinned
+// Fisher-Yates loop over spans s = 2..52 (src/mapping shuffleWithFill); each draw is one 4-byte fill, i.e. one gate
+// call, per try, accepted with p_s = s / 2^bitlen(s-1) (drawBelowWithFill), at most 128 tries. So gate_calls is a sum
+// of 40 * 51 = 2040 independent geometric variables: minimum exactly 2040 (one try per draw), mean
+// 40 * sum 2^bitlen(s-1)/s = 2855.80, sd 35.86. The exact distribution (convolution, truncated at 128 tries) gives
+// P(gate_calls > 3084) = 9.10e-10 <= 1e-9. Derivation: a8-ub-derivation.py sha256 e17d4714..., its output
+// a8-ub-derivation.out sha256 9ada03d0... (rng-backup a25-2/backend/int-v8-wip). Observed in runs: 2802..2862.
+// Below A8_LOWER is impossible, so it is a typed <REJECT:A8> (fail-closed). Above A8_UPPER is possible but
+// improbable: an A8-UB FINDING+HOLD, thrown, never a silent REJECT, so the golden stays clean. The bounds hold for
+// FIXTURE.calls only, so checkA8 refuses any other calls (A8_LOWER >= calls replaces the earlier '>= calls').
+export const A8_LOWER = 2040;
+export const A8_UPPER = 3084;
+export function checkA8(a25, calls) { return !!a25 && typeof a25 === 'object' && Object.keys(a25).join() === 'gate_calls,walks' && Number.isInteger(a25.gate_calls) && a25.walks === a25.gate_calls && calls === FIXTURE.calls && a25.gate_calls >= A8_LOWER; }
+export function assertA8Upper(a25) { if (a25.gate_calls > A8_UPPER) throw new Error(`A8-UB FINDING+HOLD: gate_calls ${a25.gate_calls} > A8_UPPER ${A8_UPPER} (P <= 1e-9 for a correct tree): hold the run and report, do not re-record the golden`); }
 export function checkA5(v, recomputed) { return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) && v === recomputed; }
 // Independent of the tree's own a25-manifest.mjs: the manifest format (version 1, root, sorted entries, indent 1, '\n')
 // rebuilt here with node:crypto; it must also equal the sha256 of the manifest bytes the helper was given.
@@ -113,8 +126,11 @@ export async function launcherShape(tree, baseEnv = process.env, audit = null) {
     }
     if (audit) audit.raw = { a25: 'a25' in t ? t.a25 : null, payload_sha256: t.payload_sha256 ?? null, backstop_sha256: h.backstop?.backstop_sha256 ?? null,
       pid: pr.pid ?? null, child_pid: r.pid, preload_sha256: pr.preload_sha256 ?? null, manifest_sha256: pr.manifest_sha256 ?? null };
+    // CTO r5: the ratio gate_calls/calls goes to the record too (mean 71.40 for FIXTURE).
+    if (audit && audit.raw.a25 && Number.isInteger(audit.raw.a25.gate_calls)) audit.raw.gate_calls_per_call = audit.raw.a25.gate_calls / FIXTURE.calls;
     if (h.backstop && typeof h.backstop === 'object' && 'backstop_sha256' in h.backstop) h.backstop.backstop_sha256 = '<ALLOW:A1>';
     if ('payload_sha256' in t) t.payload_sha256 = '<ALLOW:A3>';
+    if ('a25' in t && checkA8(t.a25, FIXTURE.calls)) assertA8Upper(t.a25);
     if ('a25' in t) t.a25 = checkA8(t.a25, FIXTURE.calls) ? { gate_calls: '<ALLOW:A8>', walks: '<ALLOW:A8>' } : '<REJECT:A8>';
     if ('pid' in pr) pr.pid = checkA4(pr.pid, r.pid, process.pid) ? '<ALLOW:A4>' : '<REJECT:A4>';
     if ('preload_sha256' in pr) pr.preload_sha256 = '<ALLOW:A1>';
@@ -129,8 +145,9 @@ export async function launcherShape(tree, baseEnv = process.env, audit = null) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const at = (n) => { const i = process.argv.indexOf(`--${n}`); if (i < 0 || !process.argv[i + 1]) { process.stderr.write(`usage: --tree <dir> --out <file>\n`); process.exit(2); } return process.argv[i + 1]; };
   const out = at('out'), audit = {};
-  writeFileSync(out, await launcherShape(at('tree'), process.env, audit), { flag: 'wx' });
-  // CTO A8 (3): the substituted raw values go to the run record next to the golden (out + '.raw.json'), never discarded.
-  writeFileSync(`${out}.raw.json`, JSON.stringify(audit, null, 1) + '\n', { flag: 'wx' });
+  // CTO A8 (3): the substituted raw values go to the run record next to the golden (out + '.raw.json'), never discarded,
+  // also when the shape throws (an A8-UB hold writes the raw record and no golden).
+  try { writeFileSync(out, await launcherShape(at('tree'), process.env, audit), { flag: 'wx' }); }
+  finally { writeFileSync(`${out}.raw.json`, JSON.stringify(audit, null, 1) + '\n', { flag: 'wx' }); }
   process.stdout.write(`wrote ${out} and ${out}.raw.json\n`);
 }

@@ -161,13 +161,23 @@ const CLAIMS_PRELOAD = [...process.execArgv, process.env.NODE_OPTIONS ?? ''].som
 // backstop's guard is non-configurable, so the swap is refused and the live binding is the guard (94). Either way the
 // capture installs and the case survives; the live binding does not.
 test('A25-2 lockdown registers its hooks through the evaluation-time registerHooks capture, not the live binding (bare or preloaded)', () => {
+  // AI Eng review: the swap is made observable per mode, so a silently failed swap in a bare child cannot make the
+  // case vacuous. The child reports its own mode (marker present or not) and whether the live binding is now the swap.
   const pre = [
+    "const __swap = () => { writeSync(2, 'LIVE-BINDING\\n'); process.reallyExit(7); };",
     'try {',
-    "  Object.defineProperty(Module, 'registerHooks', { value: () => { writeSync(2, 'LIVE-BINDING\\n'); process.reallyExit(7); }, configurable: true, writable: true });",
+    "  Object.defineProperty(Module, 'registerHooks', { value: __swap, configurable: true, writable: true });",
     "  require('node:module').syncBuiltinESMExports();",
-    '} catch { /* preloaded: the guard cannot be replaced (W-late(d)) */ }',
+    "  writeSync(2, (Module.registerHooks === __swap ? 'SWAPPED' : 'SWAP-REFUSED') + '\\n');",
+    "} catch { writeSync(2, 'SWAP-REFUSED\\n'); }",
+    `writeSync(2, 'MODE ' + (globalThis[Symbol.for(${JSON.stringify(MARK_KEY)})] ? 'preloaded' : 'bare') + '\\n');`,
   ].join('\n');
   const r = run('', { pre });
+  const mode = (/^MODE (bare|preloaded)$/m.exec(r.err) || [])[1];
+  assert.ok(mode, `LD-CAPTURE-MODE: the child did not report its mode\nstderr: ${r.err}`);
+  assert.equal(mode, PARENT_PRELOADED ? 'preloaded' : 'bare', `LD-CAPTURE-MODE: child mode ${mode} differs from the parent's`);
+  if (mode === 'bare') assert.match(r.err, /^SWAPPED$/m, `LD-CAPTURE-SWAP: bare child did not swap the live registerHooks\nstderr: ${r.err}`);
+  else assert.match(r.err, /^SWAP-REFUSED$/m, `LD-CAPTURE-SWAP: preloaded child replaced the guarded registerHooks\nstderr: ${r.err}`);
   assert.equal(r.code, 0, `LD-CAPTURE: exit ${r.code}\nstdout: ${r.out}\nstderr: ${r.err}`);
   assert.match(r.out, /SURVIVED/, 'LD-CAPTURE');
   assert.doesNotMatch(r.err, /LIVE-BINDING/, 'LD-CAPTURE');

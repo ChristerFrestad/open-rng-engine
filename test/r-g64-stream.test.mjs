@@ -347,7 +347,7 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
 });
 
 test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async () => {
-  const { checkA4, checkA5, checkA8 } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const { checkA4, checkA5, checkA8, assertA8Upper, A8_LOWER, A8_UPPER } = await import('../tools/ci/a25-2-launcher-shape.mjs');
   assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40), true, 'A8-CHECK ok');
   assert.equal(checkA8({ gate_calls: 2839, walks: 2838 }, 40), false, 'A8-CHECK walks differ');
   assert.equal(checkA8({ gate_calls: 39, walks: 39 }, 40), false, 'A8-CHECK below calls');
@@ -356,6 +356,14 @@ test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async
   assert.equal(checkA8({ gate_calls: 2839 }, 40), false, 'A8-CHECK missing key');
   assert.equal(checkA8({ walks: 2839, gate_calls: 2839 }, 40), false, 'A8-CHECK key order');
   assert.equal(checkA8(null, 40), false, 'A8-CHECK not an object');
+  // CTO r5 (Sec N-A8-UB): exact bounds for FIXTURE; derivation in tools/ci/a25-2-launcher-shape.mjs above checkA8.
+  assert.deepEqual([A8_LOWER, A8_UPPER], [2040, 3084], 'A8-BOUNDS pinned');
+  assert.equal(checkA8({ gate_calls: 2040, walks: 2040 }, 40), true, 'A8-CHECK at the minimum 2040');
+  assert.equal(checkA8({ gate_calls: 2039, walks: 2039 }, 40), false, 'A8-CHECK below the minimum 2040');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 41), false, 'A8-CHECK other fixture calls');
+  assert.doesNotThrow(() => assertA8Upper({ gate_calls: 3084, walks: 3084 }), 'A8-UB at U');
+  assert.equal(checkA8({ gate_calls: 3085, walks: 3085 }, 40), true, 'A8-UB is not a REJECT');
+  assert.throws(() => assertA8Upper({ gate_calls: 3085, walks: 3085 }), /^Error: A8-UB FINDING\+HOLD: gate_calls 3085 > A8_UPPER 3084/, 'A8-UB above U is a FINDING+HOLD');
   const me = process.pid, kid = me + 7, d = 'a'.repeat(64);
   assert.equal(checkA4(kid, kid, me), true, 'A4-CHECK ok');
   assert.equal(checkA4(me, me, me), false, 'A4-CHECK parent pid');
@@ -368,15 +376,32 @@ test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async
   assert.equal(checkA5(d.toUpperCase(), d.toUpperCase()), false, 'A5-CHECK not lowercase hex');
   assert.equal(checkA5(null, null), false, 'A5-CHECK not a string');
 });
+test('Sec N-BG-1: the bare gate refuses a parent whose NODE_OPTIONS carries -r, --loader or --experimental-loader', async () => {
+  const { notBare } = await import('../tools/ci/a25-2-bare-gate.mjs');
+  const nb = (o) => notBare(o, [], {});
+  assert.equal(nb(''), false, 'N-BG-1 empty is bare'); assert.equal(nb(undefined), false, 'N-BG-1 unset is bare');
+  assert.equal(nb('--max-old-space-size=64 --no-warnings'), false, 'N-BG-1 harmless flags are bare');
+  assert.equal(nb('-r ./x.cjs'), true, 'N-BG-1 -r');
+  assert.equal(nb('--no-warnings -r=./x.cjs'), true, 'N-BG-1 -r (after another flag)');
+  assert.equal(nb('--loader ./l.mjs'), true, 'N-BG-1 --loader');
+  assert.equal(nb('--loader=./l.mjs'), true, 'N-BG-1 --loader=');
+  assert.equal(nb('--experimental-loader ./l.mjs'), true, 'N-BG-1 --experimental-loader');
+  assert.equal(nb('--experimental-loader=./l.mjs'), true, 'N-BG-1 --experimental-loader=');
+  assert.equal(nb('--import ./i.mjs'), true, 'N-BG-1 --import (kept)'); assert.equal(nb('--require=./x.cjs'), true, 'N-BG-1 --require (kept)');
+  assert.equal(notBare('', ['--no-warnings'], {}), true, 'N-BG-1 execArgv (kept)');
+  assert.equal(notBare('', [], { [Symbol.for('open-rng-engine/entropy-backstop/v1')]: {} }), true, 'N-BG-1 backstop marker (kept)');
+});
 test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A8)', async (t) => {
   const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
   assert.ok(existsSync(gold), 'GOLDEN-MISSING: record it from a 9b7a1d8 checkout with tools/ci/a25-2-launcher-shape.mjs');
   const { launcherShape } = await import(pathToFileURL(join(ROOT, 'tools/ci/a25-2-launcher-shape.mjs')).href);
   const audit = {};
-  const now = await launcherShape(ROOT, process.env, audit);
-  // CTO A8 (3): the raw values the allowlist replaced are kept in the run record (this test's diagnostics), never discarded.
-  t.diagnostic(`A8-RAW ${JSON.stringify(audit)}`);
+  let now;
+  // CTO A8 (3): the raw values the allowlist replaced are kept in the run record (this test's diagnostics), never
+  // discarded, also when the shape throws (an A8-UB FINDING+HOLD).
+  try { now = await launcherShape(ROOT, process.env, audit); } finally { t.diagnostic(`A8-RAW ${JSON.stringify(audit)}`); }
   assert.ok(audit.raw && audit.raw.a25 && Number.isInteger(audit.raw.a25.gate_calls) && Number.isInteger(audit.raw.a25.walks), `A8-RAW: raw T.a25 not recorded (${JSON.stringify(audit.raw)})`);
+  assert.equal(audit.raw.gate_calls_per_call, audit.raw.a25.gate_calls / 40, 'A8-RAW ratio gate_calls/calls recorded');
   // Harness fix (a): under a preloaded parent the childProof view was checked field-equal to the bare view of its file.
   assert.equal(audit.proof_views?.mode, PRELOADED_PARENT ? 'preloaded' : 'bare', 'PROOF-VIEWS-EQUAL mode');
   if (PRELOADED_PARENT) assert.equal(audit.proof_views.equal, true, 'PROOF-VIEWS-EQUAL');

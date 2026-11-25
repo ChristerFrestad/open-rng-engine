@@ -48,7 +48,7 @@ export const MUTANTS = Object.freeze([
   { id: 'M67', what: 'CTO (c): node:test allowed AND the helper-mode child_process refusal falls through (catchable throw, not 92 at the spawn)', edits: [[LD, "'repl', 'test', 'test/reporters']);", "'repl']);"], [BS, '      if (HELPER_MODE) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `child_process.${name} refused in helper mode`);', '      if (HELPER_MODE) throw new NativeError(`child_process.${name} refused in helper mode`);']], test: [SEC, 'p6/p6b'], killOn: onCode(92) },
   { id: 'M68', what: 'CTO (a): --disable-sigusr1 dropped from the launcher helper argv', file: SL, from: "  return ['--disable-sigusr1', '--import', BACKSTOP, HELPER,", to: "  return ['--import', BACKSTOP, HELPER,", test: [SEC, 'L-SEC-2b'], killOn: /SIGUSR1-SPAWN/ },
   { id: 'M69', what: 'CTO (a): launcher does not check the proof\'s sigusr1_disabled', file: SL, from: "    else if (ctx.helperExpect.manifest_sha256 !== null && pr.sigusr1_disabled !== true)", to: '    else if (false)', test: [ST, 'L-SEC-2 \\(int-v8\\)'], killOn: /PROOF-SIGUSR1/ },
-  { id: 'M70', what: 'AI Eng note 1: lockdown registers its hooks through the live (guarded) registerHooks instead of the evaluation-time capture', file: LD, from: '  REGISTER_HOOKS({', to: '  registerHooks({', test: [LDT, 'evaluation-time registerHooks capture'], killOn: /LD-CAPTURE/ }, // slot 1: survived on the SEC test (bare runner; helper mode installs the lockdown before the guard)
+  { id: 'M70', what: 'AI Eng note 1: lockdown registers its hooks through the live (guarded) registerHooks instead of the evaluation-time capture', file: LD, from: '  REGISTER_HOOKS({', to: '  registerHooks({', test: [LDT, 'evaluation-time registerHooks capture'], killOn: /LD-CAPTURE/, modes: { bare: /LD-CAPTURE: exit 7\b/, preloaded: /LD-CAPTURE: exit 94\b/ } }, // slot 1: survived on the SEC test (bare runner; helper mode installs the lockdown before the guard)
   { id: 'M71', what: 'test 33 cause: the stub-hook direct cases run in a child that carries the backstop preload', file: LDT, from: '    else expectAbort(code, body, { bare: true });', to: '    else expectAbort(code, body, { bare: true, preload: true });', test: [LDT, 'direct native/spawn entry points abort'], killOn: /NOT-BARE/ },
   { id: 'M72', what: 'int-v8 (found in the allowlist work): the backstop\'s childProof drops sigusr1_disabled, so the launcher reads none', file: BS, from: ', sigusr1_disabled: body.sigusr1_disabled ?? null } : { invalid: true }', to: ' } : { invalid: true }', test: [SEC, 'L-SEC-2c'], killOn: /CHILDPROOF-SIGUSR1/ },
   { id: 'M73', what: 'CTO int-v8 (1)(iii): one non-allowlisted launcher-facing field changes (T gains a field)', file: 'verification/harness/evidence-helper.mjs', from: 'out(jsonFrame(FRAME.T, { count, payload_sha256:', to: 'out(jsonFrame(FRAME.T, { count, extra: 0, payload_sha256:', test: [ST, 'CTO \\(1\\) on helper'], killOn: /SHAPE-9B7A1D8/ },
@@ -56,7 +56,9 @@ export const MUTANTS = Object.freeze([
   { id: 'M75', what: 'CTO int-v8 r2: allowlist A4 accepts a non-integer pid', file: 'tools/ci/a25-2-launcher-shape.mjs', from: 'return Number.isInteger(pid) && pid > 1', to: 'return pid > 1', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A4-CHECK non-integer/ },
   { id: 'M76', what: 'CTO int-v8 r2: allowlist A5 accepts a digest that does not match the recomputed manifest', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && v === recomputed; }', to: '; }', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A5-CHECK recompute mismatch/ },
   { id: 'M78', what: 'slot-1 A8: allowlist A8 accepts walks != gate_calls', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && a25.walks === a25.gate_calls && ', to: ' && ', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK walks differ/ },
-  { id: 'M79', what: 'CTO A8 (2): allowlist A8 accepts gate_calls < calls', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && a25.gate_calls >= calls; }', to: '; }', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK below calls/ },
+  { id: 'M79', what: 'CTO A8 (2): allowlist A8 accepts gate_calls < calls (lower bound removed)', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && a25.gate_calls >= A8_LOWER; }', to: '; }', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK below calls/ },
+  { id: 'M81', what: 'CTO r5 (Sec N-A8-UB): the A8 upper bound is removed, so gate_calls > U is no FINDING+HOLD', file: 'tools/ci/a25-2-launcher-shape.mjs', from: '{ if (a25.gate_calls > A8_UPPER) throw new Error(', to: '{ if (false) throw new Error(', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-UB above U is a FINDING\+HOLD/ },
+  { id: 'M82', what: 'CTO r5: the A8 lower bound goes back to >= calls instead of the exact minimum 2040', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && a25.gate_calls >= A8_LOWER; }', to: ' && a25.gate_calls >= calls; }', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK below the minimum 2040/ },
   { id: 'M80', what: 'CTO A8 (4b): the raw frame split reads the length big-endian', file: 'tools/ci/a25-2-launcher-shape.mjs', from: 'len = raw.readUInt32LE(o + 1)', to: 'len = raw.readUInt32BE(o + 1)', test: [ST, 'CTO \\(1\\) on helper'], killOn: /FRAME-SPLIT/ },
   { id: 'M77', what: 'AI Eng note 1: the lockdown test re-types a stale backstop marker key instead of reading it', file: LDT, from: '  return m[0][1];\n})();', to: "  return 'open-rng-engine/entropy-backstop/v0';\n})();", test: [LDT, 'marker key'], killOn: /MARK-KEY/ },
 ]);
@@ -82,13 +84,22 @@ for (const m of list) {
     for (const f of files) { mkdirSync(dirname(join(d, f)), { recursive: true }); copyFileSync(join(ROOT, f), join(d, f)); }
     for (const [file, from, to] of editsOf(m)) { const p = join(d, file); writeFileSync(p, readFileSync(p, 'utf8').replace(from, to)); }
     const env = { ...process.env }; delete env.NODE_OPTIONS;
-    const r = spawnSync(process.execPath, ['--test', '--test-name-pattern', m.test[1], m.test[0]], { cwd: d, env, encoding: 'utf8', timeout: 300000 });
-    const pass = Number((/^ℹ pass (\d+)/m.exec(r.stdout) || [])[1] ?? -1), fail = Number((/^ℹ fail (\d+)/m.exec(r.stdout) || [])[1] ?? -1);
-    // HoQ 22:22: a kill counts only on the named exit-code assertion (killOn), not on any failure.
-    const onTarget = m.killOn ? m.killOn.test(r.stdout + r.stderr) : true;
-    const verdict = pass + fail <= 0 ? 'NO-TESTS' : fail === 0 ? 'SURVIVED' : onTarget ? 'KILLED' : 'KILLED-OTHER';
-    results.push({ id: m.id, what: m.what, verdict, pass, fail });
-    process.stdout.write(`${m.id} ${verdict} (pass ${pass}, fail ${fail}) ${m.what}\n`);
+    // modes (AI Eng review, M70): a mutant with modes must be killed in EACH named mode, bare and under the backstop
+    // preload, each on its own mode-specific assertion; the log names the mode of every kill.
+    const runs = m.modes ? Object.entries(m.modes) : [['bare', m.killOn ?? null]];
+    const per = runs.map(([mode, killOn]) => {
+      const pre = mode === 'preloaded' ? ['--import', './tools/ci/entropy-backstop.mjs'] : [];
+      const r = spawnSync(process.execPath, [...pre, '--test', '--test-name-pattern', m.test[1], m.test[0]], { cwd: d, env, encoding: 'utf8', timeout: 300000 });
+      const pass = Number((/^ℹ pass (\d+)/m.exec(r.stdout) || [])[1] ?? -1), fail = Number((/^ℹ fail (\d+)/m.exec(r.stdout) || [])[1] ?? -1);
+      // HoQ 22:22: a kill counts only on the named exit-code assertion (killOn), not on any failure.
+      const onTarget = killOn ? killOn.test(r.stdout + r.stderr) : true;
+      return { mode, pass, fail, verdict: pass + fail <= 0 ? 'NO-TESTS' : fail === 0 ? 'SURVIVED' : onTarget ? 'KILLED' : 'KILLED-OTHER' };
+    });
+    const verdict = per.every((x) => x.verdict === 'KILLED') ? 'KILLED' : (per.find((x) => x.verdict !== 'KILLED') ?? per[0]).verdict;
+    const pass = per.reduce((a, x) => a + x.pass, 0), fail = per.reduce((a, x) => a + x.fail, 0);
+    results.push({ id: m.id, what: m.what, verdict, pass, fail, per });
+    const how = m.modes ? ` [${per.map((x) => `${x.mode}: ${x.verdict}`).join(', ')}]` : '';
+    process.stdout.write(`${m.id} ${verdict} (pass ${pass}, fail ${fail})${how} ${m.what}\n`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 const killed = results.filter((r) => r.verdict === 'KILLED').length;
