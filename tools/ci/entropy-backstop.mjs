@@ -14,6 +14,10 @@ import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep
 import { mkdtempSync, writeFileSync, writeSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+// A25-2 (split note v1 + Addenda A-D): helper-mode manifest check and post-boot lockdown. Both modules are pure (no
+// backstop import, no CSPRNG use) and are loaded before any hook exists, like this file.
+import { EXIT_A25_MANIFEST_DIGEST, EXIT_A25_MANIFEST_OUTSIDE, MANIFEST_ENV, makeIsManifestUrl, parseGrant, readManifest, verifyLoad } from './a25-manifest.mjs';
+import { EXIT_A25_IMPORT, installLockdown } from './a25-lockdown.mjs';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -243,9 +247,32 @@ const HELPER_MODE = process.env[HELPER_MODE_ENV] === HELPER_MODE_ID;
 // is not a proof of preload (a child without the preload could echo it); the proof file, written by the preload
 // itself and checked per spawn by the launcher, is.
 export const HELPER_GRANT_ENV = 'ENTROPY_BACKSTOP_GRANT';
-const SPAWN_TOKEN = typeof process.env[HELPER_GRANT_ENV] === 'string' ? process.env[HELPER_GRANT_ENV] : null;
+// A25-2: in helper mode the grant is '<token>|m=<manifest sha256>' (helperSpawnEnv); the sha reaches the preload ONLY
+// here. The token part is what the proof and the H frame carry (A25-1 unchanged). The preload does not verify the
+// token (the launcher does, from the proof file). A missing or malformed m= part exits 90 before any module loads.
+const RAW_GRANT = typeof process.env[HELPER_GRANT_ENV] === 'string' ? process.env[HELPER_GRANT_ENV] : null;
+const GRANT_PARTS = HELPER_MODE ? parseGrant(RAW_GRANT) : null;
+if (HELPER_MODE && GRANT_PARTS === null) {
+  try { writeSync(2, `entropy-backstop[A25]: grant carries no manifest digest (exit ${EXIT_A25_MANIFEST_DIGEST})\n`); } catch { /* stderr closed */ }
+  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_MANIFEST_DIGEST);
+}
+const SPAWN_TOKEN = HELPER_MODE ? GRANT_PARTS.token : RAW_GRANT;
 const HELPER_GRANT = HELPER_MODE ? SPAWN_TOKEN : null;
+const MANIFEST_SHA256 = HELPER_MODE ? GRANT_PARTS.sha256 : null;
+const MANIFEST_PATH = HELPER_MODE && typeof process.env[MANIFEST_ENV] === 'string' ? process.env[MANIFEST_ENV] : null;
 delete process.env[HELPER_GRANT_ENV];
+delete process.env[MANIFEST_ENV];
+// Addendum B: one-shot refusal hook. Each backstop refusal site (dlopen, spawn_sync/process_wrap and the other refused
+// bindings, execve) calls it before its throw, so in helper mode the lockdown turns the refusal into an abort.
+let REFUSE_HOOK = null;
+export function registerRefuseHook(fn) {
+  if (REFUSE_HOOK !== null || typeof fn !== 'function') {
+    try { writeSync(2, `entropy-backstop[A25]: registerRefuseHook ${REFUSE_HOOK !== null ? 'called twice' : 'needs a function'} (exit ${EXIT_A25_GATE})\n`); } catch { /* stderr closed */ }
+    (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_GATE);
+  }
+  REFUSE_HOOK = fn;
+}
+function refused(kind, detail) { const h = REFUSE_HOOK; if (h !== null) h(kind, detail); }
 if (process.env[HELPER_MODE_ENV] !== undefined && !HELPER_MODE) {
   writeSync(2, `entropy-backstop: ${HELPER_MODE_ENV}=${process.env[HELPER_MODE_ENV]} is not a known helper mode\n`);
   process.exit(EXIT_A25_GATE);
@@ -332,7 +359,10 @@ function installHelperMode(cryptoMod) {
   if (!Object.isFrozen(TAP) || !Object.isFrozen(U8P)) throw new NativeError('entropy-backstop: helper mode could not freeze the TypedArray prototypes');
   HELPER = makeHelperGate(origFill);
   HELPER_GATE = HELPER.gate;
-  const { registerHooks } = require('node:module');
+  // A25-2: the manifest the grant binds (exits 90 on a missing, unreadable, swapped or malformed file).
+  const VIEW = readManifest(MANIFEST_PATH, MANIFEST_SHA256, (c) => helperAbort(c, 'manifest header check failed'));
+  const nodeModule = require('node:module');
+  const { registerHooks } = nodeModule;
   const MAIN_URL = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
   const STARTUP_CWD_URL = pathToFileURL(process.cwd() + sep).href;
   let mainStarted = false;
@@ -354,10 +384,40 @@ function installHelperMode(cryptoMod) {
         return { format: 'module', shortCircuit: true,
           source: `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n` };
       }
-      return nextLoad(url, context);
+      // A25-2: every non-builtin load must be a manifest file whose bytes match its entry. The check runs on the
+      // bytes node will compile (r.source), not on a second read, so a swap between check and compile is caught.
+      if (typeof url === 'string' && url.startsWith('node:')) return nextLoad(url, context);
+      const v = verifyLoad(VIEW, url);
+      if (!v.ok) helperAbort(v.code, `load: ${v.why}`);
+      const r = nextLoad(url, context);
+      if (r && r.source != null) {
+        const src = typeof r.source === 'string' ? Buffer.from(r.source, 'utf8') : Buffer.from(r.source.buffer ?? r.source, r.source.byteOffset ?? 0, r.source.byteLength);
+        if (createHash('sha256').update(src).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `load: compiled bytes of ${v.rel} differ from the manifest`);
+        return r;
+      }
+      return { ...r, source: v.bytes }; // CommonJS with no source from nextLoad: hand node the hashed bytes
     },
   });
+  // A25-2: the lockdown is the LAST preload hook (Addendum B). Then late hook registration is refused (94), except
+  // one registerHooks call by the evidence helper main (its D22-4 observing load hook), which runs above ours.
+  installLockdown({ isManifestUrl: makeIsManifestUrl(VIEW, A25_DYNAMIC_BUILTINS), abort: helperAbort, registerRefuseHook });
+  const HELPER_MAIN_REL = 'verification/harness/evidence-helper.mjs';
+  const mainIsHelper = MAIN_URL !== null && VIEW.entries.has(HELPER_MAIN_REL) && MAIN_URL === pathToFileURL(join(VIEW.root, HELPER_MAIN_REL)).href;
+  let lateHookUsed = false;
+  const lateRegisterHooks = function registerHooks(hooks) {
+    if (!mainIsHelper || lateHookUsed) helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2)');
+    lateHookUsed = true;
+    return registerHooks(hooks);
+  };
+  const lateRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2)'); };
+  Object.defineProperty(nodeModule, 'registerHooks', { value: lateRegisterHooks, writable: false, configurable: false, enumerable: true });
+  Object.defineProperty(nodeModule, 'register', { value: lateRegister, writable: false, configurable: false, enumerable: true });
+  try { nodeModule.syncBuiltinESMExports(); } catch { helperAbort(EXIT_A25_IMPORT, 'could not sync node:module exports'); }
+  if (nodeModule.registerHooks !== lateRegisterHooks || nodeModule.register !== lateRegister) helperAbort(EXIT_A25_IMPORT, 'late-hook guard not in place');
 }
+// import() of a builtin in helper mode: none today (the helper's dynamic imports are manifest files); the trace at
+// the A31 prereg re-pins this list together with HELPER_PLAN.manifest_relpaths.
+const A25_DYNAMIC_BUILTINS = Object.freeze([]);
 
 function wrapFn(id, orig) {
   if (typeof orig !== 'function') {
@@ -1037,6 +1097,7 @@ function installBindingGuard() {
   const guarded = function (name) {
     if (REFUSED_BINDINGS.includes(String(name))) {
       const msg = `entropy-backstop: process.binding('${String(name)}') refused (G-39)`;
+      refused(String(name) === 'spawn_sync' || String(name) === 'process_wrap' ? 'spawn' : 'binding', msg);
       console.error(msg);
       throw new NativeError(msg);
     }
@@ -1048,6 +1109,7 @@ function installBindingGuard() {
   if (typeof process.dlopen === 'function' && !process.dlopen._backstopBinding) {
     const dl = function () {
       const msg = 'entropy-backstop: process.dlopen refused (G-39: native addons bypass every hook)';
+      refused('dlopen', msg);
       console.error(msg);
       throw new NativeError(msg);
     };
@@ -1059,6 +1121,7 @@ function installBindingGuard() {
   if (typeof process.execve === 'function' && !process.execve._backstopBinding) {
     const ex = function () {
       const msg = 'entropy-backstop: process.execve refused (G-46: replaces the process with an unhooked program)';
+      refused('spawn', msg);
       console.error(msg);
       throw new NativeError(msg);
     };

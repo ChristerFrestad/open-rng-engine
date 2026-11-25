@@ -16,6 +16,7 @@ import { FRAME, FrameReader, codecFor } from './stream-frames.mjs';
 import { outcomeShapeError } from './collector.mjs';
 import { HELPER_PLAN, ROOT, bindings, expectedWalks, loadKTests, planDigest, reuseMismatches, srcManifest } from './run-plan.mjs';
 import { assertEvidenceRunReady } from './evidence-entry.mjs';
+import { GRANT_MANIFEST_SEP, MANIFEST_ENV, buildManifest } from '../../tools/ci/a25-manifest.mjs';
 
 const BACKSTOP = join(ROOT, 'tools/ci/entropy-backstop.mjs');
 const HELPER = join(ROOT, 'verification/harness/evidence-helper.mjs');
@@ -299,10 +300,36 @@ export function assertHelperSpawn(args, env, want) {
   if (!ok) throw new Error('helper spawn is not exactly --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused (A25-1, A25-6 iv)');
   return args;
 }
-function realSpawnPart(plan) {
+// A25-2 (split note Addendum C; interface to TE 22:01): the ONE builder of a helper's env. Drops NODE_OPTIONS, the
+// channel, any inherited grant/locator and any inherited *MANIFEST*/*DIGEST* name; sets helper mode, the manifest
+// locator and the grant '<token>|m=<manifest sha256>' (the grant is the only carrier of the sha).
+export function helperSpawnEnv(baseEnv, { token, manifestPath, manifestSha256 } = {}) {
+  if (typeof token !== 'string' || token === '' || token.includes('|')) throw new TypeError('helperSpawnEnv: token must be a non-empty string without "|"');
+  if (typeof manifestSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(manifestSha256)) throw new TypeError('helperSpawnEnv: manifestSha256 must be 64 lowercase hex');
+  if (typeof manifestPath !== 'string' || !isAbsolute(manifestPath)) throw new TypeError('helperSpawnEnv: manifestPath must be absolute');
+  const env = { ...(baseEnv ?? {}) };
+  for (const k of Object.keys(env)) if (/MANIFEST|DIGEST/i.test(k)) delete env[k];
+  delete env.NODE_OPTIONS; delete env.ENTROPY_BACKSTOP_CHANNEL; delete env.ENTROPY_BACKSTOP_GRANT; delete env[MANIFEST_ENV];
+  env.ENTROPY_BACKSTOP_HELPER = HELPER_PLAN.mode;
+  env[MANIFEST_ENV] = manifestPath;
+  env.ENTROPY_BACKSTOP_GRANT = `${token}${GRANT_MANIFEST_SEP}${manifestSha256}`;
+  return env;
+}
+// A25-2: the helper manifest for this clone, from the frozen traced closure HELPER_PLAN.manifest_relpaths. Written
+// into runDir; its sha256 is bound in the header (preload.manifest_sha256) and in every grant.
+export function writeHelperManifest(runDir) {
+  const rel = HELPER_PLAN.manifest_relpaths;
+  if (!Array.isArray(rel) || rel.length === 0) throw new Error('evidence refused: HELPER_PLAN.manifest_relpaths is not pinned (A25-2)');
+  const { bytes, sha256 } = buildManifest(ROOT, rel);
+  const path = join(runDir, 'helper-manifest.json');
+  if (!existsSync(path)) writeFileSync(path, bytes, { flag: 'wx' }); // a resumed run re-checks the existing file below
+  if (sha(readFileSync(path)) !== sha256) throw new Error('helper manifest changed while writing (A25-2)');
+  return { path, sha256 };
+}
+function realSpawnPart(plan, manifest) {
+  if (!manifest || typeof manifest.path !== 'string' || typeof manifest.sha256 !== 'string') throw new Error('realSpawnPart: no helper manifest (A25-2)');
   return (stream, j, calls, token) => {
-    const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ENTROPY_BACKSTOP_CHANNEL; env.ENTROPY_BACKSTOP_HELPER = HELPER_PLAN.mode;
-    env.ENTROPY_BACKSTOP_GRANT = token;
+    const env = helperSpawnEnv(process.env, { token, manifestPath: manifest.path, manifestSha256: manifest.sha256 });
     const want = helperSpawnArgs(plan, stream, j, calls);
     return spawn(process.execPath, assertHelperSpawn([...want], env, want), { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
   };
@@ -328,6 +355,8 @@ export async function runStreamPlan(plan, { runDir, pinned, observations = {}, m
   const head = header(plan, bind, { head: clone.head, tree: clone.tree, clean: clone.clean }, preloadRecord(grant.base));
   if (head.preload.sha256 !== bind.files['tools/ci/entropy-backstop.mjs']) throw new Error('preload changed while binding (A25-1)');
   mkdirSync(runDir, { recursive: true });
+  const manifest = writeHelperManifest(runDir); // A25-2: bound in the header; reaches each helper only via its grant
+  head.preload.manifest_sha256 = manifest.sha256;
   writeFileSync(join(runDir, 'header.json'), JSON.stringify(head, null, 1));
   const expect = { src: srcManifest(ROOT) };
   if (expect.src.sha256 !== bind.src_digest) throw new Error('src changed while binding');
@@ -341,7 +370,7 @@ export async function runStreamPlan(plan, { runDir, pinned, observations = {}, m
       if (bad.length) throw new Error(`${stream.id}: checkpoint not reusable: ${bad.join(', ')} (D22-7)`);
     }
     assertDisk(runDir, payloadBytes(stream, consumers));
-    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan), runDir, consumers, expect, maxAttempts, grant });
+    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan, manifest), runDir, consumers, expect, maxAttempts, grant });
     const out = { stream: stream.id, counted: res.counted, attempts: res.attempts, d: res.d, digest: res.digest, entries: stream.entries.map((e) => e.id), bindings: bind };
     if (res.counted) {
       COUNTED.set(out, out.digest);

@@ -1,13 +1,16 @@
 // A25-2 manifest (Backend). Pure helpers: no backstop import, no CSPRNG use. Design: verification/a25-2-design-v1.md.
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const EXIT_A25_MANIFEST_OUTSIDE = 89; // a loaded module is not in the manifest
 export const EXIT_A25_MANIFEST_DIGEST = 90;  // a module's bytes, or the manifest file itself, differ from the bound digest
 export const MANIFEST_ENV = 'ENTROPY_BACKSTOP_MANIFEST';
-export const MANIFEST_SHA_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
+// The manifest sha256 reaches the preload ONLY inside the grant (ENTROPY_BACKSTOP_GRANT = '<token>|m=<sha256>'),
+// never as a standalone env var (CTO 21:29; split note Addendum C). Any other env name offering a sha is ignored.
+export const GRANT_MANIFEST_SEP = '|m=';
+const SHA_RE = /^[0-9a-f]{64}$/;
 
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const posix = (p) => p.split(sep).join('/');
@@ -73,4 +76,31 @@ export function makeIsManifestUrl(view, builtins = []) {
     const rel = relOf(view.root, abs);
     return rel !== null && view.entries.has(rel);
   };
+}
+
+// Split '<token>|m=<sha256>'. Returns { token, sha256 } or null (missing or malformed m= part).
+export function parseGrant(raw) {
+  if (typeof raw !== 'string') return null;
+  const i = raw.lastIndexOf(GRANT_MANIFEST_SEP);
+  if (i <= 0) return null;
+  const token = raw.slice(0, i), sha256 = raw.slice(i + GRANT_MANIFEST_SEP.length);
+  if (token.includes('|') || !SHA_RE.test(sha256)) return null;
+  return { token, sha256 };
+}
+
+// The preload's header check: read the located manifest, check its exact bytes against the grant-bound sha.
+// Returns a frozen view { root, entries: Map }. On any failure: one stderr line, then exit 90 (before main).
+export function readManifest(path, expectedSha256, exit = (c) => process.exit(c)) {
+  const fail = (why) => {
+    try { writeSync(2, `entropy-backstop[A25]: manifest ${why} (exit ${EXIT_A25_MANIFEST_DIGEST})\n`); } catch { /* stderr closed */ }
+    exit(EXIT_A25_MANIFEST_DIGEST);
+    throw new Error(`readManifest: ${why}`); // only reached when a test passes a non-exiting exit
+  };
+  if (typeof path !== 'string' || !isAbsolute(path)) return fail('locator missing or not absolute');
+  if (typeof expectedSha256 !== 'string' || !SHA_RE.test(expectedSha256)) return fail('no grant-bound digest');
+  let bytes;
+  try { bytes = readFileSync(path); } catch { return fail(`unreadable: ${path}`); }
+  const r = parseManifest(bytes, expectedSha256);
+  if (!r.ok) return fail(r.why);
+  return Object.freeze({ root: r.root, entries: r.entries });
 }
