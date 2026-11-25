@@ -45,6 +45,7 @@ function partReader(ctx, j) {
       const hx = ctx.helperExpect, b = h.backstop;
       if (!b || typeof b !== 'object') return fail('H has no backstop helper state: helper not in A25 mode');
       if (b.mode !== hx.mode || b.sample_k !== hx.sample_k || b.first_walk !== hx.first_walk) return fail(`H helper mode ${b.mode}/k=${b.sample_k}/F=${b.first_walk} differs from the plan ${hx.mode}/k=${hx.sample_k}/F=${hx.first_walk} (A25-4)`);
+      if (b.part_floor !== hx.part_floor) return fail(`H helper part floor ${b.part_floor} differs from the plan ${hx.part_floor} (A25-4b)`);
       if (b.backstop_sha256 !== hx.backstop_sha256) return fail('H backstop digest differs from the bound preload (A25-1)');
       if (h.gate_leak_check !== true) return fail('H gate leak check did not run (A25-3)');
       return;
@@ -88,6 +89,7 @@ function partReader(ctx, j) {
     const a = st.T.a25;
     if (!a || !Number.isSafeInteger(a.gate_calls) || a.gate_calls < 1) return fail('trailer has no A25 gate count');
     if (a.walks !== expectedWalks(a.gate_calls, ctx.helperExpect)) return fail(`trailer A25 walks ${a.walks} != ${expectedWalks(a.gate_calls, ctx.helperExpect)} for ${a.gate_calls} gate calls (A25-4)`);
+    if (ctx.counted && a.gate_calls < ctx.helperExpect.part_floor) return fail(`trailer A25 gate calls ${a.gate_calls} below the part floor ${ctx.helperExpect.part_floor} in a counted run (A25-4b)`);
     if (win.some(({ buf }) => buf.length)) return fail('a window straddles the part end');
   };
   return st;
@@ -101,12 +103,15 @@ export async function runStreamCore(plan, stream, opts) {
   if (codec.bytes !== stream.outcome_bytes) throw new Error(`${stream.id}: codec ${codec.bytes} B != plan ${stream.outcome_bytes} B`);
   // A25-4 / CTO change 4: k is fixed by the code, never by the run; a plan with another helper block is refused.
   const hp = plan.helper;
-  if (!hp || hp.mode !== HELPER_PLAN.mode || hp.sample_k !== HELPER_PLAN.sample_k || hp.first_walk !== HELPER_PLAN.first_walk) throw new Error(`${stream.id}: plan helper block ${JSON.stringify(hp ?? null)} differs from ${JSON.stringify(HELPER_PLAN)} (A25-4)`);
+  if (!hp || hp.mode !== HELPER_PLAN.mode || hp.sample_k !== HELPER_PLAN.sample_k || hp.first_walk !== HELPER_PLAN.first_walk || hp.min_sampled_hits !== HELPER_PLAN.min_sampled_hits || hp.part_floor !== HELPER_PLAN.part_floor) throw new Error(`${stream.id}: plan helper block ${JSON.stringify(hp ?? null)} differs from ${JSON.stringify(HELPER_PLAN)} (A25-4)`);
   const helperExpect = { ...HELPER_PLAN, backstop_sha256: sha(readFileSync(BACKSTOP)) };
+  // A25-4b: in a counted plan every part must be able to reach the sampled-walk floor; refused before any spawn.
+  const counted = plan.counted === true;
+  if (counted) { const j = stream.parts.findIndex((n) => n < HELPER_PLAN.part_floor); if (j >= 0) throw new Error(`${stream.id}: counted plan part ${j} has ${stream.parts[j]} outcomes, below the A25 part floor ${HELPER_PLAN.part_floor} gate calls (A25-4b)`); }
   mkdirSync(runDir, { recursive: true });
   const attempts = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers, helperExpect };
+    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers, helperExpect, counted };
     const parts = stream.parts.map((_, j) => partReader(ctx, j));
     const kids = [];
     const order = []; // void reasons in the order they happened; a part killed because another voided says so
@@ -253,7 +258,7 @@ const COUNTED = new WeakMap();
 export function streamCounted(r) { return r !== null && typeof r === 'object' && COUNTED.get(r) === r.digest && typeof r.digest === 'string'; }
 
 export function header(plan, bind, clone) {
-  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, helper: plan.helper ?? null, bindings: bind, clone };
+  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, counted: plan.counted === true, helper: plan.helper ?? null, bindings: bind, clone };
 }
 
 function realSpawnPart(plan) {
@@ -266,6 +271,8 @@ function realSpawnPart(plan) {
 
 // Runs every stream of the plan from the dedicated pinned clone this module is loaded from.
 export async function runStreamPlan(plan, { runDir, pinned, observations = {}, maxAttempts = 3, onStream = null } = {}) {
+  // A25-4b: the evidence path runs counted plans only, so the part floor always applies to it.
+  if (plan === null || typeof plan !== 'object' || plan.counted !== true) throw new Error('runStreamPlan runs counted plans only (plan.counted !== true, A25-4b)');
   assertEvidenceRunReady(ROOT);
   const clone = pinnedCloneState(ROOT, pinned);
   if (!clone.ok) throw new Error(`evidence refused (D22-5): ${clone.why.join('; ')}`);

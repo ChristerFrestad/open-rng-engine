@@ -67,8 +67,9 @@ export function loadKTests(root = ROOT) { return JSON.parse(readFileSync(join(ro
 
 // M: { [entryId]: units } for exactly the entries in this run. N: parts per stream (or { [streamId]: N }).
 // prefix names this run's streams; run 2 uses its own prefix, so it never shares a stream with run 1.
-export function buildPlan({ runId, M, N, prefix = 'S', kTests = loadKTests(), countingRule = null, extra = {} }) {
+export function buildPlan({ runId, M, N, prefix = 'S', kTests = loadKTests(), countingRule = null, counted = false, extra = {} }) {
   if (typeof runId !== 'string' || !runId) throw new Error('plan: runId required');
+  if (typeof counted !== 'boolean') throw new Error('plan: counted must be true or false (A25-4b)');
   if (!M || typeof M !== 'object') throw new Error('plan: M per entry required (a parameter, never hard-coded)');
   const byId = new Map(kTests.map((k) => [k.id, k]));
   const streams = new Map();
@@ -93,14 +94,17 @@ export function buildPlan({ runId, M, N, prefix = 'S', kTests = loadKTests(), co
   });
   const streamMap = {};
   for (const s of out) for (const e of s.entries) streamMap[e.id] = s.id;
-  return { v: PLAN_VERSION, run_id: runId, counting_rule: countingRule, M_per_entry: { ...M }, stream_map: streamMap, streams: out, ...extra, helper: { ...HELPER_PLAN } };
+  return { v: PLAN_VERSION, run_id: runId, counting_rule: countingRule, M_per_entry: { ...M }, stream_map: streamMap, streams: out, ...extra, counted, helper: { ...HELPER_PLAN } };
 }
 export const planDigest = (plan) => sha(JSON.stringify(plan));
 // A25-3/A25-4 (CTO change 4): the evidence-helper mode and its sample k are fixed here, in every plan and so in the
 // plan digest and the D22-7 header; the launcher refuses a plan or an H frame that differs. k is not a parameter:
-// it cannot change per run. Equal to tools/ci/entropy-backstop.mjs HELPER_* (test/r-g64-a25.test.mjs); k = 11 from
-// the A25 bench (verification/bench/r-g64-a25-run2-k11.json). Kept as literals so the helper never imports the preload.
-export const HELPER_PLAN = Object.freeze({ mode: 'a25', sample_k: 11, first_walk: 10000 });
+// it cannot change per run. Equal to tools/ci/entropy-backstop.mjs HELPER_* (test/r-g64-a25.test.mjs); k = 12 from
+// the A25 bench (HoQ A29-1: max <= 10% per entry; k = 11 runs and verification/bench/r-g64-a25-run5-k12-*.json). Kept as literals so the helper never imports the preload.
+// A25-4b: part_floor = first_walk + min_sampled_hits * 2^sample_k = 10000 + 20 * 4096 = 91920 gate calls; a counted
+// plan (counted: true) may have no part with fewer planned outcomes (one gate call per outcome at least), and a counted
+// part whose trailer reports fewer gate calls voids. Non-counted plans (tests) keep tiny parts.
+export const HELPER_PLAN = Object.freeze({ mode: 'a25', sample_k: 12, first_walk: 10000, min_sampled_hits: 20, part_floor: 91920 });
 // Number of gate calls the A25-4 rule walks among the first n: all of the first F, then every index i >= F with
 // i mod 2^k = 0.
 export function expectedWalks(n, { sample_k, first_walk } = HELPER_PLAN) {

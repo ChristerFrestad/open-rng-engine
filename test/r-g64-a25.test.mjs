@@ -21,7 +21,10 @@ test('A25 constants: the plan k, F and mode equal the preload\'s; expectedWalks 
   // Read from the preload's text: importing it here would install it in this (possibly bare) process.
   const t = readFileSync(BACKSTOP, 'utf8');
   const c = (n) => { const m = new RegExp(`^export const ${n} = ('?)([\\w-]+)\\1;`, 'm').exec(t); assert.ok(m, n); return m[1] ? m[2] : Number(m[2]); };
-  assert.deepEqual({ ...P.HELPER_PLAN }, { mode: c('HELPER_MODE_ID'), sample_k: c('HELPER_SAMPLE_K'), first_walk: c('HELPER_FIRST_WALK') });
+  assert.deepEqual({ ...P.HELPER_PLAN }, { mode: c('HELPER_MODE_ID'), sample_k: c('HELPER_SAMPLE_K'), first_walk: c('HELPER_FIRST_WALK'), min_sampled_hits: c('HELPER_MIN_SAMPLED_HITS'), part_floor: c('HELPER_PART_FLOOR') });
+  assert.equal(c('HELPER_PART_FLOOR'), c('HELPER_FIRST_WALK') + c('HELPER_MIN_SAMPLED_HITS') * 2 ** c('HELPER_SAMPLE_K'));
+  // The fault-injection seam: the shipped install builds the gate only from the saved original, with no overrides.
+  assert.deepEqual([...t.matchAll(/makeHelperGate\(([^)]*)\)/g)].map((m) => m[1]).filter((a) => !a.startsWith('fill,')), ['origFill']);
   assert.equal(P.buildPlan({ runId: 'a', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 }).helper.sample_k, c('HELPER_SAMPLE_K'));
   const F = P.HELPER_PLAN.first_walk, s = 2 ** P.HELPER_PLAN.sample_k;
   const brute = (n) => { let w = 0; for (let i = 0; i < n; i++) if (i < F || i % s === 0) w++; return w; };
@@ -33,7 +36,7 @@ test('A25 mode: src runs through the gate; state, leak check and walk counts are
 process.stdout.write(JSON.stringify({ state: M().state, leak: M().assertNoGateLeak(E), counts: M().counts() }));`);
   assert.equal(r.status, 0, r.err);
   const o = JSON.parse(r.out);
-  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, backstop_sha256: sha(readFileSync(BACKSTOP)) });
+  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor, backstop_sha256: sha(readFileSync(BACKSTOP)) });
   assert.equal(o.leak, true);
   assert.ok(o.counts.gate_calls >= 30003, JSON.stringify(o.counts));
   assert.equal(o.counts.walks, P.expectedWalks(o.counts.gate_calls));

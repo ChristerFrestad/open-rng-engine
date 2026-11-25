@@ -146,7 +146,7 @@ const FAULTS = [
   ['extra', /more than n_j/], ['t-count', /trailer count/], ['t-digest', /trailer digest differs/], ['shape', /outcome 0: /],
   ['ragged', /not whole outcomes/], ['garbage', /unknown type/], ['h-j', /H frame j\/n_j/], ['h-n', /H frame j\/n_j/],
   ['src-before', /src_before/], ['src-after', /srcDigest_after/], ['loaded', /as loaded differs .*D22-4/],
-  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['t-walks', /trailer A25 walks .*A25-4/],
+  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['t-walks', /trailer A25 walks .*A25-4/], ['h-floor', /part floor \d+ differs from the plan .*A25-4b/],
 ];
 for (const [fault, why] of FAULTS) {
   test(`D22-8 integrity void: ${fault} voids the attempt, the void reason is kept, no statistic is computed`, async () => {
@@ -273,7 +273,7 @@ test('D22-5: evidence only from a dedicated, clean clone at the pinned HEAD and 
 test('runStreamPlan checks readiness before anything else (NOT-READY: nothing spawned, nothing written)', async () => {
   const d = tmp('nr');
   try {
-    const plan = P.buildPlan({ runId: 'nr', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+    const plan = P.buildPlan({ runId: 'nr', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: true });
     await assert.rejects(L.runStreamPlan(plan, { runDir: join(d, 'run') }), /harness NOT-READY/);
     assert.equal(existsSync(join(d, 'run')), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -295,4 +295,46 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
     const bad = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: { src: { ...expect().src, list: expect().src.list.map(([f, s]) => [f, f === 'src/errors.ts' ? '1'.repeat(64) : s]) } }, maxAttempts: 1 });
     assert.match(bad.attempts[0].void, /src\/errors\.ts as loaded differs .*D22-4/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------- A25-4b: part floor for counted runs (CTO answer b) ----------
+test('A25-4b: the plan carries the part floor F + 20 * 2^k and a counted flag (default false); the header shows both', () => {
+  const H = P.HELPER_PLAN;
+  assert.equal(H.part_floor, H.first_walk + H.min_sampled_hits * 2 ** H.sample_k);
+  assert.equal(H.part_floor, 91920);
+  const a = P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+  assert.equal(a.counted, false); assert.equal(a.helper.part_floor, 91920);
+  assert.equal(P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: true }).counted, true);
+  assert.throws(() => P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: 'yes' }), /counted must be true or false/);
+  assert.equal(L.header(a, {}, {}).counted, false); assert.equal(L.header(a, {}, {}).helper.part_floor, 91920);
+});
+test('A25-4b: a counted plan with a part below the floor is refused before any part is spawned', async () => {
+  const plan = P.buildPlan({ runId: 'cf', M: { 'shuffle/adjacency-mod4/n-52': 40 }, N: 2, counted: true });
+  const stream = plan.streams[0]; const dir = tmp('cf'); let spawned = 0;
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    await assert.rejects(L.runStreamCore(plan, stream, { spawnPart: (...a) => { spawned++; return fakeSpawn(plan)(...a); }, runDir: dir, consumers, expect: expect() }), /counted plan part 0 has 20 outcomes, below the A25 part floor 91920 .*A25-4b/);
+    assert.equal(spawned, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('A25-4b: a counted part at the floor counts; one whose trailer reports fewer gate calls than the floor voids', async () => {
+  const id = 'randomInt/chi2/min-0-max-38';
+  const plan = P.buildPlan({ runId: 'cf2', M: { [id]: P.HELPER_PLAN.part_floor }, N: 1, counted: true });
+  const stream = plan.streams[0]; const dir = tmp('cf2');
+  assert.equal(stream.parts[0], P.HELPER_PLAN.part_floor);
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    const ok = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), maxAttempts: 1 });
+    assert.equal(ok.counted, true, JSON.stringify(ok.attempts));
+    const bad = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults: { '1:0': 't-floor' } }), runDir: dir, consumers, expect: expect(), maxAttempts: 1 });
+    assert.equal(bad.counted, false); assert.match(bad.attempts[0].void, /gate calls 91919 below the part floor 91920 in a counted run .*A25-4b/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('A25-4b: runStreamPlan (the evidence path) refuses a plan that is not counted; nothing is written', async () => {
+  const d = tmp('nc');
+  try {
+    const plan = P.buildPlan({ runId: 'nc', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+    await assert.rejects(L.runStreamPlan(plan, { runDir: join(d, 'run') }), /counted plans only .*A25-4b/);
+    assert.equal(existsSync(join(d, 'run')), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
