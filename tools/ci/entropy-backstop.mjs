@@ -624,6 +624,19 @@ export function launchEvidenceTool(g, file, args = [], options = {}) {
   try { return cp.spawnSync(file, args, { ...options, shell: false }); } finally { launching = null; }
 }
 
+// R-G64 (design §3, Q3 a): the same launch, asynchronous, so a battery tool can read one helper's outcomes as
+// they are counted (stdin piped by the launcher). Every check above runs unchanged: open grant, guard re-run,
+// absolute path, pinned binary (G-55), no shell; the spawn-layer G-45 check sees launching set for this call.
+export function launchEvidenceToolStream(g, file, args = [], options = {}) {
+  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');
+  grantEntry.assertEvidenceRunReady();
+  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream: ${String(file)} is not an absolute path to an evidence tool (G-45)`);
+  const real = pinnedBinary(file);
+  const cp = require('node:child_process');
+  launching = { grant: g, file, real };
+  try { return cp.spawn(file, args, { ...options, shell: false }); } finally { launching = null; }
+}
+
 export const CHILD_EXECUTABLE_ALLOWLIST = Object.freeze(['node', 'git', 'mkdir', 'ln']);
 const TRUSTED_DIRS = Object.freeze([...new Set(['/usr/bin', '/bin', '/usr/local/bin', dirname(process.execPath)].map((d) => { try { return realpathSync(d); } catch { return d; } }))]);
 const PLAIN_WORD = /^[A-Za-z0-9_./:,@%+=-]+$/;
@@ -983,7 +996,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });

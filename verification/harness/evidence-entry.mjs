@@ -44,13 +44,15 @@ function backstopEvidence() {
   return ev;
 }
 
-// The sanctioned (and only) runner entry. fn receives { launch(file, args, options) } and may be async.
+// The sanctioned (and only) runner entry. fn receives { launch(file, args, options), launchStream(file, args,
+// options) } (launchStream: R-G64 asynchronous spawn, same checks) and may be async.
 export async function startEvidenceRun(fn) {
   const ev = backstopEvidence();
   assertEvidenceRunReady();
   const g = await ev.open();
   try {
-    return await fn(Object.freeze({ launch: (file, args, options) => ev.launch(g, file, args, options) }));
+    const launchStream = typeof ev.launchStream === 'function' ? (file, args, options) => ev.launchStream(g, file, args, options) : null;
+    return await fn(Object.freeze({ launch: (file, args, options) => ev.launch(g, file, args, options), launchStream }));
   } finally {
     ev.close(g);
   }

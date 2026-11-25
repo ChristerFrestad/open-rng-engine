@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const RS_TEST = 'test/r-g64-stream.test.mjs';
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/calibration/wave1-source.mjs';
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
@@ -71,6 +72,25 @@ const MUTANTS = [
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],
+  // R-G64 streamed harness (HoQ addendum 1, A22 and D22-1..8).
+  ['RS-1 H j/n_j not checked against the plan (A22)', [['verification/harness/stream-launcher.mjs', 'if (h.j !== j || h.calls !== want) return fail(', 'if (false) return fail(']], RS_TEST],
+  ["RS-2 merge uses the result's part count, not the plan's N (A22)", [['verification/harness/stream-launcher.mjs', "  const N = stream.parts.length; // the plan's N", "  const N = res.parts.length; // the plan's N"]], RS_TEST],
+  ['RS-3 statistic computed on a voided attempt (A22)', [['verification/harness/stream-launcher.mjs', ' || res.attempts.at(-1)?.void !== null) throw', ') throw']], RS_TEST],
+  ['RS-4 reuse ignores the k-tests sha256 (A22)', [['verification/harness/run-plan.mjs', '    if ((prev.files || {})[f] !== (cur.files || {})[f]) out.push(', "    if (!f.includes('k-tests') && (prev.files || {})[f] !== (cur.files || {})[f]) out.push("]], RS_TEST],
+  ['RS-5 outcomes of <=128 bits go through the hash path (A22, D22-6)', [['verification/harness/stream-frames.mjs', 'return bytes.length <= 16 ?', 'return bytes.length < 16 ?']], RS_TEST],
+  ['RS-6 trailer digest not compared', [['verification/harness/stream-launcher.mjs', 'if (st.T.payload_sha256 !== st.d) return fail(', 'if (false) return fail(']], RS_TEST],
+  ['RS-7 part count not checked', [['verification/harness/stream-launcher.mjs', 'if (st.count !== want) return fail(', 'if (false) return fail(']], RS_TEST],
+  ['RS-8 outcome shape not checked', [['verification/harness/stream-launcher.mjs', 'const bad = outcomeShapeError(kRep, v);', 'const bad = null;']], RS_TEST],
+  ['RS-9 helper exit status ignored', [['verification/harness/stream-launcher.mjs', 'if (code !== 0 || signal) fail(', 'if (false) fail(']], RS_TEST],
+  ['RS-10 load-hook digests not compared (D22-4)', [['verification/harness/stream-launcher.mjs', 'for (const [p, s] of h.loaded) if (man.get(p) !== s) return fail(', 'for (const [p, s] of h.loaded) if (false) return fail(']], RS_TEST],
+  ['RS-11 payload file not re-hashed against d_j (Q3 b)', [['verification/harness/stream-launcher.mjs', 'if (sha(buf) !== res.d[j]) throw new Error(', 'if (false) throw new Error(']], RS_TEST],
+  ["RS-12 window offset ignores the part's global position (D22-3)", [['verification/harness/stream-launcher.mjs', 'const call = off + st.count + i;', 'const call = st.count + i;']], RS_TEST],
+  ['RS-13 clone clean check off (D22-5)', [['verification/harness/stream-launcher.mjs', "if (dirty !== '') why.push(", 'if (false) why.push(']], RS_TEST],
+  ['RS-14 runStreamPlan skips the readiness check', [['verification/harness/stream-launcher.mjs', '  assertEvidenceRunReady(ROOT);\n  const clone = pinnedCloneState(ROOT, pinned);', '  const clone = pinnedCloneState(ROOT, pinned);']], RS_TEST],
+  ['RS-15 parts merged in reverse order', [['verification/harness/stream-launcher.mjs', 'for (let j = 0; j < N; j++) merged.merge(res.parts[j].accs[x]);', 'for (let j = N - 1; j >= 0; j--) merged.merge(res.parts[j].accs[x]);']], RS_TEST],
+  ['RS-16 srcDigest_after not compared', [['verification/harness/stream-launcher.mjs', 'if (st.T.src_after !== expect.src.sha256) return fail(', 'if (false) return fail(']], RS_TEST],
+  ["RS-17 a killed sibling's reason is listed before the cause", [['verification/harness/stream-launcher.mjs', '    for (const p of parts) noteVoid(p);\n    if (order.length) {', '    order.sort();\n    if (order.length) {']], RS_TEST],
+  ['RS-18 voided attempt kept as counted', [['verification/harness/stream-launcher.mjs', "      continue; // the voided attempt's accumulators", "      attempts.at(-1).void = null; // the voided attempt's accumulators"]], RS_TEST],
 ];
 
 const sha = (d, rel) => createHash('sha256').update(readFileSync(join(d, rel))).digest('hex');
