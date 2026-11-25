@@ -4,24 +4,16 @@
 // shape (the K entry `rep`, read from this tree's k-tests) and writes them, exactly encoded, as frames:
 //   H { run_id, stream, rep, j, calls, src_before, loaded }   D <outcome bytes>...   T { count, payload_sha256, src_after }
 // D22-4: a module load hook hashes every src/ file AS LOADED (the bytes node compiles), before the engine is
-// imported; the launcher compares that list with its own srcDigest_before. The helper asserts nothing the
+// imported; the launcher compares that list with its own srcDigest_before. R-A25-2-SEC item 1: that hook is the
+// preload's own load hook (helper mode, keyed on this main); this file reads the list from helper.loaded() and
+// registers no hook (a runtime registerHooks call exits 94). The helper asserts nothing the
 // launcher believes: H and T are claims the launcher re-derives or checks against its own reading.
-import { registerHooks } from 'node:module';
-import { createHash } from 'node:crypto';
 import { writeSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const SRC = pathToFileURL(join(ROOT, 'src')).href + '/';
-const loaded = [];
-registerHooks({
-  load(url, context, nextLoad) {
-    const r = nextLoad(url, context);
-    if (url.startsWith(SRC)) loaded.push([relative(ROOT, fileURLToPath(url)), createHash('sha256').update(r.source ?? '').digest('hex')]);
-    return r;
-  },
-});
 
 const { FRAME, frame, jsonFrame, codecFor, weightsFor } = await import('./stream-frames.mjs');
 const { srcManifest, loadKTests } = await import('./run-plan.mjs');
@@ -57,6 +49,7 @@ const codec = codecFor(k);
 const A25 = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.helper;
 const backstop = A25?.state ?? null;
 const gate_leak_check = A25 && backstop ? A25.assertNoGateLeak(E) : false;
+const loaded = A25 && typeof A25.loaded === 'function' ? A25.loaded() : [];
 out(jsonFrame(FRAME.H, { run_id: runId, stream, rep, j, calls, src_before: before.sha256, loaded, backstop, gate_leak_check }));
 const per = Math.max(1, Math.floor((1 << 16) / codec.bytes));
 const buf = Buffer.allocUnsafe(per * codec.bytes);

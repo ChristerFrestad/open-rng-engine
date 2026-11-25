@@ -3,14 +3,17 @@
 // runs. From then on each of these aborts the process with its own exit code (abort() first, then reallyExit):
 //   91 EXIT_A25_CODEGEN          eval, new Function / Function(), the Async/Generator/AsyncGenerator Function
 //                                constructors, Module.prototype._compile from outside node's loader, and the
-//                                contextify binding (process.binding('contextify') compileFunction/Script/makeContext)
-//   92 EXIT_A25_FORBIDDEN_MODULE vm, worker_threads, child_process, plus cluster, inspector(/promises) and repl, by
-//                                import, import(), require or process.getBuiltinModule
+//                                contextify binding's compileFunction/Script/makeContext when this file guards
+//                                process.binding itself (no backstop). Under the backstop in helper mode,
+//                                process.binding('contextify') is refused outright with 92 (R-A25-2-SEC item 2).
+//   92 EXIT_A25_FORBIDDEN_MODULE vm, worker_threads, child_process, plus cluster, inspector(/promises), repl and
+//                                test(/reporters) (R-A25-2-SEC item 3), by import, import(), require or
+//                                process.getBuiltinModule
 //   93 EXIT_A25_ADDON            native addons: process.dlopen, a resolved .node file or 'addon' format,
 //                                Module._extensions['.node'], process._linkedBinding, node:sqlite (loadExtension)
 //   94 EXIT_A25_IMPORT           a dynamic import() whose resolved URL isManifestUrl() rejects (or that throws).
-//                                (Split note Addendum D: 94 also covers a refused late registerHooks call; that
-//                                refusal is Backend's preload wiring, not this file.)
+//                                (R-A25-2-SEC item 1: 94 also covers ANY module.registerHooks/register call after
+//                                the preload, in both modes; that refusal is the backstop's installHookGuard.)
 //   95 EXIT_A25_NODE_VERSION     at install, node is not NODE_VERSION_PIN (the import() detection reads node-internal
 //                                frame names, so another node version fails closed instead of silently)
 // Under the backstop preload, process.dlopen / process.binding('spawn_sync'|'process_wrap') / process.execve are the
@@ -18,11 +21,18 @@
 // one-shot registerRefuseHook(fn) and every such refusal site calls fn(kind, detail) before it throws. The preload passes
 // registerRefuseHook in; the lockdown registers a hook that aborts (kind 'dlopen' -> 93, 'spawn' or anything else -> 92)
 // so the throw is never reached. A missing or failing registerRefuseHook aborts 92 at install.
+// R-A25-2-SEC item 2 (one guard): under the backstop, process.binding is the backstop's G-39 guard, the ONLY binding
+// guard; in helper mode it is an allowlist (empty) once this file is installed, so every name gives 92 (contextify,
+// inspector and natives included). This file's own process.binding branch runs only when there is no backstop; a
+// non-configurable process.binding that is not the backstop's guard aborts 92 at install instead of being skipped.
 // Codegen is blocked in JS because argv is fixed (A25-1: exact helper argv, no NODE_OPTIONS), so the
 // --disallow-code-generation-from-strings flag cannot be passed, and v8.setFlagsFromString() after boot does not
 // change the already-created main context (checked on node v24.22.1: eval still runs).
 // This file imports nothing from the backstop and never touches node:crypto or any wrapped CSPRNG entry point.
 import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module';
+// R-A25-2-SEC item 1: the real registerHooks, read when this module is evaluated. The backstop imports this file
+// before it installs its hook guard, so this is node's function; every later runtime call reaches the guard (94).
+const REGISTER_HOOKS = registerHooks;
 
 const require = createRequire(import.meta.url);
 const Module = require('node:module');
@@ -32,7 +42,7 @@ export const EXIT_A25_FORBIDDEN_MODULE = 92;
 export const EXIT_A25_ADDON = 93;
 export const EXIT_A25_IMPORT = 94;
 export const EXIT_A25_NODE_VERSION = 95;
-export const FORBIDDEN_BUILTINS = Object.freeze(['vm', 'worker_threads', 'child_process', 'cluster', 'inspector', 'inspector/promises', 'repl']);
+export const FORBIDDEN_BUILTINS = Object.freeze(['vm', 'worker_threads', 'child_process', 'cluster', 'inspector', 'inspector/promises', 'repl', 'test', 'test/reporters']);
 export const ADDON_BUILTINS = Object.freeze(['sqlite']);
 export const NODE_VERSION_PIN = 'v24.22.1';
 
@@ -149,13 +159,13 @@ export function installLockdown({ isManifestUrl, abort, registerRefuseHook } = {
     let d = '';
     try { d = String(detail); } catch { d = '?'; }
     if (kind === 'dlopen') die(EXIT_A25_ADDON, `backstop refused process.dlopen after boot (${d})`);
-    die(EXIT_A25_FORBIDDEN_MODULE, `backstop refused ${kind === 'spawn' ? 'a spawn entry point' : 'an unknown kind'} after boot (${d})`);
+    die(EXIT_A25_FORBIDDEN_MODULE, `backstop refused ${kind === 'spawn' ? 'a spawn entry point' : kind === 'binding' ? 'a binding' : 'an unknown kind'} after boot (${d})`);
   };
   try { registerRefuseHook(refuseHook); } catch { die(EXIT_A25_FORBIDDEN_MODULE, 'install: registerRefuseHook threw'); }
   const manifestOk = (url) => { try { return isManifestUrl(url) === true; } catch { return false; } };
 
   // (1) Module resolution: covers static import, import(), require, require.resolve, import.meta.resolve.
-  registerHooks({
+  REGISTER_HOOKS({
     resolve(specifier, context, nextResolve) {
       const r = nextResolve(specifier, context);
       const url = r && typeof r.url === 'string' ? r.url : '';
@@ -198,8 +208,8 @@ export function installLockdown({ isManifestUrl, abort, registerRefuseHook } = {
     return apply(origCompile, this, args);
   };
   if (!lockProperty(Module.prototype, '_compile', compileGuard)) die(EXIT_A25_CODEGEN, 'install: could not lock Module.prototype._compile');
-  // The contextify binding compiles and runs source without vm. process.binding is locked by the backstop's G-39
-  // guard (non-configurable) and forwards 'contextify', so the binding object's code entry points are replaced.
+  // The contextify binding compiles and runs source without vm. Its code entry points are replaced here (defence in
+  // depth); under the backstop, helper-mode process.binding('contextify') is refused 92 after install anyway.
   let ctx = null;
   try { ctx = process.binding('contextify'); } catch { ctx = null; }
   if (ctx && typeof ctx === 'object') {
@@ -215,6 +225,8 @@ export function installLockdown({ isManifestUrl, abort, registerRefuseHook } = {
       if (n === 'spawn_sync' || n === 'process_wrap') die(EXIT_A25_FORBIDDEN_MODULE, `process.binding('${n}')`);
       return apply(origBinding, process, [name]);
     });
+  } else if (!(typeof process.binding === 'function' && process.binding._backstopBinding === true)) {
+    die(EXIT_A25_FORBIDDEN_MODULE, 'install: process.binding is locked by a guard that is not the backstop G-39 guard');
   }
 
   // (3) Built-ins reached without the resolver.

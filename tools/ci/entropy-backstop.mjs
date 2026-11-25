@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto';
 // A25-2 (split note v1 + Addenda A-D): helper-mode manifest check and post-boot lockdown. Both modules are pure (no
 // backstop import, no CSPRNG use) and are loaded before any hook exists, like this file.
 import { EXIT_A25_MANIFEST_DIGEST, EXIT_A25_MANIFEST_OUTSIDE, MANIFEST_ENV, makeIsManifestUrl, parseGrant, readManifest, verifyLoad } from './a25-manifest.mjs';
-import { ADDON_BUILTINS, EXIT_A25_ADDON, EXIT_A25_FORBIDDEN_MODULE, EXIT_A25_IMPORT, FORBIDDEN_BUILTINS, installLockdown } from './a25-lockdown.mjs';
+import { ADDON_BUILTINS, EXIT_A25_ADDON, EXIT_A25_CODEGEN, EXIT_A25_FORBIDDEN_MODULE, EXIT_A25_IMPORT, FORBIDDEN_BUILTINS, installLockdown } from './a25-lockdown.mjs';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -252,10 +252,15 @@ export const HELPER_GRANT_ENV = 'ENTROPY_BACKSTOP_GRANT';
 // token (the launcher does, from the proof file). A missing or malformed m= part exits 90 before any module loads.
 const RAW_GRANT = typeof process.env[HELPER_GRANT_ENV] === 'string' ? process.env[HELPER_GRANT_ENV] : null;
 const GRANT_PARTS = HELPER_MODE ? parseGrant(RAW_GRANT) : null;
-if (HELPER_MODE && GRANT_PARTS === null) {
-  try { writeSync(2, `entropy-backstop[A25]: grant carries no manifest digest (exit ${EXIT_A25_MANIFEST_DIGEST})\n`); } catch { /* stderr closed */ }
-  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_MANIFEST_DIGEST);
+// F-W5 (found while re-running W5 under the preload): an exit before install still leaves the parent's G-39 proof,
+// marked early_exit with no token or digest, so a preloaded parent sees the preload ran (the exit code voids the run).
+function earlyExit(code, why) {
+  try { writeSync(2, `entropy-backstop[A25]: ${why} (exit ${code})\n`); } catch { /* stderr closed */ }
+  const pf = process.env.ENTROPY_BACKSTOP_PROOF_FILE;
+  if (pf) { try { writeFileSync(pf, JSON.stringify({ pid: process.pid, preload_sha256: null, token: null, manifest_sha256: null, early_exit: code }), { flag: 'wx' }); } catch { /* no proof: red */ } }
+  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(code);
 }
+if (HELPER_MODE && GRANT_PARTS === null) earlyExit(EXIT_A25_MANIFEST_DIGEST, 'grant carries no manifest digest');
 const SPAWN_TOKEN = HELPER_MODE ? GRANT_PARTS.token : RAW_GRANT;
 const HELPER_GRANT = HELPER_MODE ? SPAWN_TOKEN : null;
 const MANIFEST_SHA256 = HELPER_MODE ? GRANT_PARTS.sha256 : null;
@@ -267,10 +272,7 @@ delete process.env[MANIFEST_ENV];
 export const MANIFEST_SHA256_ADVISORY_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
 const ADVISORY_SHA256 = Object.prototype.hasOwnProperty.call(process.env, MANIFEST_SHA256_ADVISORY_ENV) ? process.env[MANIFEST_SHA256_ADVISORY_ENV] : null;
 delete process.env[MANIFEST_SHA256_ADVISORY_ENV];
-if (HELPER_MODE && ADVISORY_SHA256 !== null && ADVISORY_SHA256 !== MANIFEST_SHA256) {
-  try { writeSync(2, `entropy-backstop[A25]: advisory manifest digest differs from the grant digest (exit ${EXIT_A25_MANIFEST_DIGEST})\n`); } catch { /* stderr closed */ }
-  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_MANIFEST_DIGEST);
-}
+if (HELPER_MODE && ADVISORY_SHA256 !== null && ADVISORY_SHA256 !== MANIFEST_SHA256) earlyExit(EXIT_A25_MANIFEST_DIGEST, 'advisory manifest digest differs from the grant digest');
 // Addendum B: one-shot refusal hook. Each backstop refusal site (dlopen, spawn_sync/process_wrap and the other refused
 // bindings, execve) calls it before its throw, so in helper mode the lockdown turns the refusal into an abort.
 let REFUSE_HOOK = null;
@@ -286,6 +288,9 @@ if (process.env[HELPER_MODE_ENV] !== undefined && !HELPER_MODE) {
   writeSync(2, `entropy-backstop: ${HELPER_MODE_ENV}=${process.env[HELPER_MODE_ENV]} is not a known helper mode\n`);
   process.exit(EXIT_A25_GATE);
 }
+// R-A25-2-SEC item 7: in helper mode the helper-mode variable leaves process.env too (grant, locator and advisory are
+// deleted above). /proc/self/environ keeps the exec-time environment: a named residual (design v1.5).
+if (HELPER_MODE) delete process.env[HELPER_MODE_ENV];
 const SELF_URL = import.meta.url;
 const ENTROPY_URL = pathToFileURL(join(ENTROPY_ROOT, 'index.ts')).href;
 const INDEX_URL = pathToFileURL(join(SRC_ROOT, 'index.ts')).href;
@@ -309,6 +314,11 @@ const hasOwn = Object.hasOwn;
 const gopd = Object.getOwnPropertyDescriptor;
 let origFill = null;
 let HELPER = null; // the one installed gate instance (installHelperMode); never exported
+let HELPER_LOADED = () => Object.freeze([]); // R-A25-2-SEC item 1: D22-4 load digests (installHelperMode)
+// R-A25-2-SEC item 2: helper-mode process.binding allowlist, active once the lockdown is installed. Empty: the helper
+// closure makes no process.binding call and node's own modules use internalBinding (design v1.5, with evidence).
+export const HELPER_BINDING_ALLOW = Object.freeze([]);
+let BINDING_ALLOWLIST_ON = false;
 function helperWalk(i) {
   assertMarkerIdentity('helper-walk');
   assertIdentitiesAndStack('helper-walk');
@@ -375,8 +385,7 @@ function installHelperMode(cryptoMod) {
   const MAIN_URL = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
   const STARTUP_CWD_URL = pathToFileURL(process.cwd() + sep).href;
   let mainStarted = false;
-  // A25-2 (W1): the lockdown refuses forbidden builtins at resolve. A hook above it (the helper's one allowed late hook)
-  // could short-circuit a resolve to one, so the load step re-checks every node: URL, and the late hook is wrapped.
+  // A25-2 (W1): the lockdown refuses forbidden builtins at resolve; the load step re-checks every node: URL as well.
   const FORBIDDEN_SET = new Set(FORBIDDEN_BUILTINS), ADDON_SET = new Set(ADDON_BUILTINS);
   const builtinLoadCheck = (url, where) => {
     const b = String(url).slice(5);
@@ -386,27 +395,18 @@ function installHelperMode(cryptoMod) {
   const GATE_SOURCE = `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n`;
   // A25-2 (CTO 22:20 ruling): in helper mode a resolved URL may only be file: (then held to the manifest at load),
   // node: (builtin checks) or the virtual gate. data:, blob:, http(s): and any other scheme are code outside the
-  // manifest: 89, wherever the resolve came from (our hook, the lockdown chain or the one allowed late hook).
+  // manifest: 89, wherever the resolve came from (our hook or the lockdown chain).
   const SCHEME_OK = (u) => u === HELPER_GATE_URL || u.startsWith('file:') || u.startsWith('node:');
   const schemeCheck = (u, where) => {
     if (typeof u !== 'string' || !SCHEME_OK(u)) helperAbort(EXIT_A25_MANIFEST_OUTSIDE, `${where}: scheme not allowed in helper mode: ${String(u).slice(0, 40)}`);
   };
-  // Bytes a late load hook hands node for a file URL are held to the manifest like ours; node: results get the builtin check.
-  const checkLoadResult = (url, r) => {
-    schemeCheck(url, 'late load');
-    if (url === HELPER_GATE_URL) { // the virtual gate: only our exact source may come back
-      if (!r || r.format !== 'module' || r.source !== GATE_SOURCE) helperAbort(EXIT_A25_GATE, 'late load: the gate module was altered (A25-2)');
-      return r;
-    }
-    if (typeof url === 'string' && url.startsWith('node:')) { builtinLoadCheck(url, 'late load'); return r; }
-    const v = verifyLoad(VIEW, url);
-    if (!v.ok) helperAbort(v.code, `late load: ${v.why}`);
-    if (r && r.source != null) {
-      const src = typeof r.source === 'string' ? Buffer.from(r.source, 'utf8') : Buffer.from(r.source.buffer ?? r.source, r.source.byteOffset ?? 0, r.source.byteLength);
-      if (createHash('sha256').update(src).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `late load: bytes of ${v.rel} differ from the manifest`);
-    }
-    return r;
-  };
+  // R-A25-2-SEC item 1 (D22-4 moved here): the evidence helper's observing load hook is now ours. For the helper main
+  // only, every src/ file is recorded with the digest of the bytes node compiles; helper.loaded() hands the list over.
+  const HELPER_MAIN_REL = 'verification/harness/evidence-helper.mjs';
+  const mainIsHelper = MAIN_URL !== null && VIEW.entries.has(HELPER_MAIN_REL) && MAIN_URL === pathToFileURL(join(VIEW.root, HELPER_MAIN_REL)).href;
+  const loaded = [];
+  HELPER_LOADED = () => Object.freeze(loaded.map((e) => Object.freeze([...e])));
+  const recordLoaded = (rel) => { if (mainIsHelper && rel.startsWith('src/')) loaded.push([rel, VIEW.entries.get(rel)]); };
   registerHooks({
     resolve(specifier, context, nextResolve) {
       const parent = context.parentURL;
@@ -428,45 +428,74 @@ function installHelperMode(cryptoMod) {
       // A25-2: every non-builtin load must be a manifest file whose bytes match its entry. The check runs on the
       // bytes node will compile (r.source), not on a second read, so a swap between check and compile is caught.
       schemeCheck(url, 'load');
-      if (typeof url === 'string' && url.startsWith('node:')) { builtinLoadCheck(url, 'load'); return nextLoad(url, context); }
+      if (typeof url === 'string' && url.startsWith('node:')) {
+        builtinLoadCheck(url, 'load');
+        // R-A25-2-SEC item 4: a builtin must come back as node's builtin, with no source a hook could have swapped in.
+        const rb = nextLoad(url, context);
+        if (!rb || rb.format !== 'builtin' || rb.source != null) helperAbort(EXIT_A25_MANIFEST_OUTSIDE, `load: ${url} came back as ${rb && rb.format}${rb && rb.source != null ? ' with a source' : ''}, not the builtin`);
+        return rb;
+      }
       const v = verifyLoad(VIEW, url);
       if (!v.ok) helperAbort(v.code, `load: ${v.why}`);
       const r = nextLoad(url, context);
       if (r && r.source != null) {
         const src = typeof r.source === 'string' ? Buffer.from(r.source, 'utf8') : Buffer.from(r.source.buffer ?? r.source, r.source.byteOffset ?? 0, r.source.byteLength);
         if (createHash('sha256').update(src).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `load: compiled bytes of ${v.rel} differ from the manifest`);
+        recordLoaded(v.rel);
         return r;
       }
+      recordLoaded(v.rel);
       return { ...r, source: v.bytes }; // CommonJS with no source from nextLoad: hand node the hashed bytes
     },
   });
-  // A25-2: the lockdown is the LAST preload hook (Addendum B). Then late hook registration is refused (94), except
-  // one registerHooks call by the evidence helper main (its D22-4 observing load hook), which runs above ours.
+  // A25-2: the lockdown is the LAST preload hook (Addendum B). After it, installHookGuard (install()) refuses every
+  // runtime registerHooks/register call with 94 (R-A25-2-SEC item 1: no late-hook allowance).
   installLockdown({ isManifestUrl: makeIsManifestUrl(VIEW, A25_DYNAMIC_BUILTINS), abort: helperAbort, registerRefuseHook });
-  const HELPER_MAIN_REL = 'verification/harness/evidence-helper.mjs';
-  const mainIsHelper = MAIN_URL !== null && VIEW.entries.has(HELPER_MAIN_REL) && MAIN_URL === pathToFileURL(join(VIEW.root, HELPER_MAIN_REL)).href;
-  let lateHookUsed = false;
-  const realRegisterHooks = registerHooks; // the saved original (the wrapper below is named registerHooks too)
-  const lateRegisterHooks = function registerHooks(hooks) {
-    if (!mainIsHelper || lateHookUsed) helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2)');
-    lateHookUsed = true;
-    if (hooks === null || typeof hooks !== 'object') helperAbort(EXIT_A25_IMPORT, 'module.registerHooks: hooks must be an object (A25-2)');
-    const { resolve: lr, load: ll } = hooks;
-    const wrapped = {};
-    if (typeof lr === 'function') wrapped.resolve = (specifier, context, next) => {
-      const r = lr(specifier, context, next);
-      schemeCheck(r && r.url, 'late resolve');
-      if (r.url.startsWith('node:')) builtinLoadCheck(r.url, 'late resolve');
-      return r;
-    };
-    if (typeof ll === 'function') wrapped.load = (url, context, next) => checkLoadResult(url, ll(url, context, next));
-    return realRegisterHooks(wrapped);
-  };
-  const lateRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2)'); };
-  Object.defineProperty(nodeModule, 'registerHooks', { value: lateRegisterHooks, writable: false, configurable: false, enumerable: true });
-  Object.defineProperty(nodeModule, 'register', { value: lateRegister, writable: false, configurable: false, enumerable: true });
-  try { nodeModule.syncBuiltinESMExports(); } catch { helperAbort(EXIT_A25_IMPORT, 'could not sync node:module exports'); }
-  if (nodeModule.registerHooks !== lateRegisterHooks || nodeModule.register !== lateRegister) helperAbort(EXIT_A25_IMPORT, 'late-hook guard not in place');
+  // R-A25-2-SEC item 2: from here on process.binding is an allowlist (HELPER_BINDING_ALLOW, empty: design v1.5).
+  BINDING_ALLOWLIST_ON = true;
+  // R-A25-2-SEC item 3: the inspector entry points on process (SIGUSR1-style attach, Sec p9) give 92.
+  for (const k of ['_debugProcess', '_debugEnd', '_startProfilerIdleNotifier', '_stopProfilerIdleNotifier']) {
+    const d = gopd(process, k);
+    if (d && d.configurable === false) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `process.${k} cannot be locked`);
+    const stub = function () { helperAbort(EXIT_A25_FORBIDDEN_MODULE, `process.${k} refused in helper mode (inspector entry point)`); };
+    Object.defineProperty(process, k, { value: stub, writable: false, configurable: false, enumerable: false });
+  }
+  // Residual found while closing item 3 (design v1.5 L-SEC-2): a SIGUSR1 sent from outside starts the inspector even
+  // with the stubs above. A JS listener replaces Node's default handler, so the signal now gives 92 instead. Helper
+  // code that removes every SIGUSR1 listener restores the default; --disable-sigusr1 on the helper spawn would close
+  // that too and is proposed to CTO (it changes the launcher's exact spawn arguments, A25-6 iv).
+  process.on('SIGUSR1', function backstopSigusr1() { helperAbort(EXIT_A25_FORBIDDEN_MODULE, 'SIGUSR1 (inspector activation) received in helper mode'); });
+  // R-A25-2-SEC item 5: WebAssembly compiles and runs code outside the manifest: 91. Node's own TypeScript stripping
+  // (amaro, used for every src/*.ts load) instantiates a wasm module lazily through the same global, so it is primed
+  // here first, once, with its experimental warning held back; later .ts loads reuse that instance.
+  const WA = globalThis.WebAssembly;
+  if (typeof nodeModule.stripTypeScriptTypes === 'function') {
+    const ew = process.emitWarning;
+    process.emitWarning = function () {};
+    try { nodeModule.stripTypeScriptTypes('const a: number = 1;'); } catch { helperAbort(EXIT_A25_CODEGEN, 'could not prime TypeScript stripping before the WebAssembly lock'); } finally { process.emitWarning = ew; }
+  }
+  if (WA && typeof WA === 'object') {
+    for (const k of ['compile', 'instantiate', 'Module', 'compileStreaming', 'instantiateStreaming']) {
+      const stub = function () { helperAbort(EXIT_A25_CODEGEN, `WebAssembly.${k} called in helper mode`); };
+      Object.defineProperty(WA, k, { value: stub, writable: false, configurable: false, enumerable: false });
+    }
+    Object.defineProperty(globalThis, 'WebAssembly', { value: WA, writable: false, configurable: false, enumerable: false });
+  }
+}
+// R-A25-2-SEC item 1: module.registerHooks and module.register are refused at call time with 94, before any hook is
+// installed, in BOTH modes. The preload owns the only hooks (helper mode: ours plus the lockdown's).
+function installHookGuard() {
+  const nodeModule = require('node:module');
+  if (nodeModule.registerHooks && nodeModule.registerHooks._backstopHookGuard) return;
+  const refuseHooks = function registerHooks() { helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2: the preload owns the only hooks)'); };
+  const refuseRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2: the preload owns the only hooks)'); };
+  refuseHooks._backstopHookGuard = true; refuseRegister._backstopHookGuard = true;
+  try {
+    Object.defineProperty(nodeModule, 'registerHooks', { value: refuseHooks, writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(nodeModule, 'register', { value: refuseRegister, writable: false, configurable: false, enumerable: true });
+    nodeModule.syncBuiltinESMExports();
+  } catch { helperAbort(EXIT_A25_IMPORT, 'could not install the hook guard'); }
+  if (nodeModule.registerHooks !== refuseHooks || nodeModule.register !== refuseRegister) helperAbort(EXIT_A25_IMPORT, 'hook guard not in place');
 }
 // import() of a builtin in helper mode: none today (the helper's dynamic imports are manifest files); the trace at
 // the A31 prereg re-pins this list together with the pinned helper closure (verification/harness/helper-closure.json).
@@ -1148,6 +1177,11 @@ function installBindingGuard() {
   const orig = process.binding;
   if (typeof orig !== 'function' || orig._backstopBinding) return;
   const guarded = function (name) {
+    if (BINDING_ALLOWLIST_ON && !HELPER_BINDING_ALLOW.includes(String(name))) {
+      const msg = `entropy-backstop: process.binding('${String(name)}') refused in helper mode (not on the allowlist)`;
+      refused('binding', msg);
+      helperAbort(EXIT_A25_FORBIDDEN_MODULE, msg); // no refuse hook yet cannot happen (the lockdown registers it first)
+    }
     if (REFUSED_BINDINGS.includes(String(name))) {
       const msg = `entropy-backstop: process.binding('${String(name)}') refused (G-39)`;
       refused(String(name) === 'spawn_sync' || String(name) === 'process_wrap' ? 'spawn' : 'binding', msg);
@@ -1190,6 +1224,8 @@ function installChildProcessHook() {
     if (typeof orig !== 'function' || orig._backstopChild) continue;
     const sync = name.endsWith('Sync');
     const hooked = function (...args) {
+      // R-A25-2-SEC item 3: no child in helper mode, through any holder of these exports (node:test's runner included).
+      if (HELPER_MODE) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `child_process.${name} refused in helper mode`);
       const { args: mapped, proof } = mapChildArgs(args, name);
       if (!proof) return orig.apply(this, mapped);
       if (sync) {
@@ -1278,6 +1314,7 @@ export function install(opts = {}) {
   }
   try { syncBuiltinESMExports(); } catch { /* not fatal for CJS-only surfaces */ }
   installHelperMode(crypto);
+  installHookGuard();
   for (const id of ENTRY_POINT_IDS) counters[id] = 0;
   countersAtInstall = Object.freeze(Object.fromEntries(ENTRY_POINT_IDS.map((id) => [id, 0])));
   installed = true;
@@ -1295,7 +1332,7 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
-    helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts }),
+    helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts, loaded: () => HELPER_LOADED() }),
     evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, token: evidenceGrantToken, spawnToken: evidenceSpawnToken, childProof: childPreloadProof, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });

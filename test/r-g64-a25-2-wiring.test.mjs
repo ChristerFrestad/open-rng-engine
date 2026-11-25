@@ -18,7 +18,7 @@ const OUT = 'process.stdout.write("survived\\n");\n';
 const baseEnv = () => { const e = { ...process.env }; delete e.NODE_OPTIONS; for (const k of Object.keys(e)) if (k.startsWith('ENTROPY_BACKSTOP')) delete e[k]; return e; };
 
 // files: { relpath: source }; main: relpath to run. Opts: grant/env/manifest overrides for W4/W5.
-function run(files, main, { listed = Object.keys(files), mutateEnv = (e) => e, swapManifest = null } = {}) {
+function run(files, main, { listed = Object.keys(files), mutateEnv = (e) => e, swapManifest = null, preImport = null } = {}) {
   const d = mkdtempSync(join(tmpdir(), 'a25w-'));
   try {
     const root = join(d, 'tree');
@@ -27,20 +27,21 @@ function run(files, main, { listed = Object.keys(files), mutateEnv = (e) => e, s
     const manifestPath = join(d, 'manifest.json');
     writeFileSync(manifestPath, swapManifest ? buildManifest(root, swapManifest).bytes : bytes);
     const env = mutateEnv(helperSpawnEnv(baseEnv(), { token: 'grant-9@9#wiring', manifestPath, manifestSha256: sha256 }), sha256);
-    const r = spawnSync(process.execPath, ['--import', PRELOAD, join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 30000 });
+    // preImport (R-A25-2-SEC item 4 only): a hook file outside the tree, imported BEFORE the preload, plays a hook below ours.
+    const pre = preImport ? (() => { const f = join(d, 'pre-hooks.mjs'); writeFileSync(f, preImport); return ['--import', f]; })() : [];
+    const r = spawnSync(process.execPath, [...pre, '--import', PRELOAD, join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 30000 });
     return { status: r.status, stdout: r.stdout, stderr: r.stderr };
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 const helperMain = (body) => ({ [HELPER_REL]: `import * as M from 'node:module';\n${body}` });
 
-test('W-late(a): the evidence-helper main may register one late hook; a second late registerHooks exits 94', () => {
-  const ok = run(helperMain(`M.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), HELPER_REL);
-  assert.equal(ok.status, 0, ok.stderr); assert.equal(ok.stdout, 'survived\n');
-  const r = run(helperMain(`M.registerHooks({ load: (u, c, n) => n(u, c) });\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), HELPER_REL);
-  assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /registerHooks after the preload/);
+// R-A25-2-SEC item 1: no late-hook allowance. The first runtime registerHooks call exits 94, from the helper main too.
+test('W-late(a) (SEC item 1): the evidence-helper main\'s FIRST registerHooks call exits 94; the preload owns the only hooks', () => {
+  const r = run(helperMain(`M.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), HELPER_REL);
+  assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /module\.registerHooks after the preload/);
 });
-test('W-late(e) earlier caller: a manifest module imported by the helper registers first; the helper\'s own call then exits 94', () => {
-  const files = { ...helperMain(`import './early.mjs';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), 'verification/harness/early.mjs': `import * as M from 'node:module';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n` };
+test('W-late(e) earlier caller: a manifest module imported by the helper exits 94 at ITS call, before the helper\'s own', () => {
+  const files = { ...helperMain(`import './early.mjs';\nprocess.stdout.write('helper body\\n');\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), 'verification/harness/early.mjs': `import * as M from 'node:module';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\nprocess.stdout.write('early survived\\n');\n` };
   const r = run(files, HELPER_REL);
   assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /registerHooks after the preload/);
 });
@@ -48,7 +49,7 @@ test('W-late(b): a non-helper main calling registerHooks exits 94, even its firs
   const r = run({ 'probe/main.mjs': `import * as M from 'node:module';\nM.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}` }, 'probe/main.mjs');
   assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, '');
 });
-test('W-late(b2): a helper-named file that is not in the manifest does not get the allowance (it is not loadable at all)', () => {
+test('W-late(b2): a helper-named file that is not in the manifest is not loadable at all (nonzero, no output)', () => {
   const files = { ...helperMain(`M.registerHooks({ load: (u, c, n) => n(u, c) });\n${OUT}`), 'x.mjs': '' };
   const r = run(files, HELPER_REL, { listed: ['x.mjs'] });
   assert.notEqual(r.status, 0); assert.equal(r.stdout, '');
@@ -63,23 +64,19 @@ test('W-late(d): the guard cannot be replaced (non-configurable, non-writable) a
   const r = run({ 'm.cjs': `const M = require('node:module');\nlet threw = 0;\ntry { Object.defineProperty(M, 'registerHooks', { value: () => {} }); } catch { threw++; }\ntry { M.registerHooks = () => {}; } catch { threw++; }\nM.registerHooks({});\nprocess.stdout.write('survived ' + threw + '\\n');\n` }, 'm.cjs');
   assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, '');
 });
-test('W1: a late resolve hook (the helper allowance) that maps a specifier to node:vm is still refused, 92', () => {
-  const r = run({ ...helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:vm' ? { url: 'node:vm', shortCircuit: true } : n(s, c)) });\nawait import('virt:vm');\n${OUT}`) }, HELPER_REL);
-  assert.equal(r.status, 92, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /late resolve: forbidden builtin node:vm/);
+// W1 / W1 (load side) as written for 1734059 tested the late-hook wrap, which no longer exists (SEC item 1). Their
+// attacks now stop at the registration: the same hook objects exit 94 before any hook is installed.
+test('W1 (SEC item 1): the W1 late resolve hook to node:vm and the W1 load-side forger both exit 94 at registerHooks', () => {
+  for (const hooks of ["{ resolve: (s, c, n) => (s === 'virt:vm' ? { url: 'node:vm', shortCircuit: true } : n(s, c)) }", "{ load: (u, c, n) => (u.endsWith('/x.mjs') ? { format: 'module', source: 'process.stdout.write(\"forged\\\\n\");', shortCircuit: true } : n(u, c)) }"]) {
+    const r = run({ ...helperMain(`M.registerHooks(${hooks});\nawait import('./x.mjs');\n${OUT}`), 'verification/harness/x.mjs': '' }, HELPER_REL);
+    assert.equal(r.status, 94, r.stderr); assert.equal(r.stdout, ''); assert.match(r.stderr, /registerHooks after the preload/);
+  }
 });
-test('W1 (load side): the late load hook cannot hand node bytes other than the manifest entry (90) nor short-circuit node:vm (92)', () => {
-  const forged = run({ ...helperMain(`M.registerHooks({ load: (u, c, n) => (u.endsWith('/x.mjs') ? { format: 'module', source: 'process.stdout.write("forged\\n");', shortCircuit: true } : n(u, c)) });\nawait import('./x.mjs');\n${OUT}`), 'verification/harness/x.mjs': '' }, HELPER_REL);
-  assert.equal(forged.status, 90, forged.stderr); assert.equal(forged.stdout, ''); assert.match(forged.stderr, /late load: bytes of verification\/harness\/x\.mjs differ from the manifest/);
-  const vm = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:vm' ? { url: 'node:vm', shortCircuit: true } : n(s, c)), load: (u, c, n) => (u === 'node:vm' ? { format: 'builtin', shortCircuit: true } : n(u, c)) });\nawait import('virt:vm');\n${OUT}`), HELPER_REL);
-  assert.equal(vm.status, 92, vm.stderr); assert.equal(vm.stdout, '');
-});
-test('W-scheme (CTO 22:20 ruling): a late resolve hook returning a data: module exits 89 (scheme check), as do static data:/http: imports', () => {
-  const late = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:x' ? { url: 'data:text/javascript,process.stdout.write("data\\n")', shortCircuit: true } : n(s, c)) });\nawait import('virt:x');\n${OUT}`), HELPER_REL);
-  assert.equal(late.status, 89, late.stderr); assert.equal(late.stdout, ''); assert.match(late.stderr, /late resolve: scheme not allowed in helper mode: data:/);
+test('W-scheme (CTO 22:20 ruling): static data:/http: imports exit 89 at our resolve (scheme check)', () => {
   const st = run({ 'm.mjs': `import 'data:text/javascript,process.stdout.write("data\\n")';\n${OUT}` }, 'm.mjs');
   assert.equal(st.status, 89, st.stderr); assert.equal(st.stdout, ''); assert.match(st.stderr, /resolve: scheme not allowed in helper mode: data:/);
-  const blob = run(helperMain(`M.registerHooks({ resolve: (s, c, n) => (s === 'virt:y' ? { url: 'https://example.invalid/x.mjs', shortCircuit: true } : n(s, c)) });\nawait import('virt:y');\n${OUT}`), HELPER_REL);
-  assert.equal(blob.status, 89, blob.stderr); assert.match(blob.stderr, /late resolve: scheme not allowed in helper mode: https:/);
+  const h = run({ 'm.mjs': `import 'https://example.invalid/x.mjs';\n${OUT}` }, 'm.mjs');
+  assert.notEqual(h.status, 0); assert.equal(h.stdout, '');
 });
 test('W1b (CTO ruling 2): in helper mode importing node:vm exits 92, statically and dynamically', () => {
   for (const src of [`import 'node:vm';\n${OUT}`, `await import('node:vm');\n${OUT}`]) {
