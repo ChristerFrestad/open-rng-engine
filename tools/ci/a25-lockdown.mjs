@@ -8,9 +8,11 @@
 //                                import, import(), require or process.getBuiltinModule
 //   93 EXIT_A25_ADDON            native addons: process.dlopen, a resolved .node file or 'addon' format,
 //                                Module._extensions['.node'], process._linkedBinding, node:sqlite (loadExtension)
-//   94 EXIT_A25_IMPORT           a dynamic import() whose resolved URL isManifestUrl() rejects (or that throws);
-//                                also at install when node is not NODE_VERSION_PIN (the import() detection reads
-//                                node-internal frame names, so another node version fails closed instead of silently)
+//   94 EXIT_A25_IMPORT           a dynamic import() whose resolved URL isManifestUrl() rejects (or that throws).
+//                                (Split note Addendum D: 94 also covers a refused late registerHooks call; that
+//                                refusal is Backend's preload wiring, not this file.)
+//   95 EXIT_A25_NODE_VERSION     at install, node is not NODE_VERSION_PIN (the import() detection reads node-internal
+//                                frame names, so another node version fails closed instead of silently)
 // Under the backstop preload, process.dlopen / process.binding('spawn_sync'|'process_wrap') / process.execve are the
 // backstop's non-configurable G-39/G-46 refusals, which throw (catchable). Split note Addendum B: the backstop exports a
 // one-shot registerRefuseHook(fn) and every such refusal site calls fn(kind, detail) before it throws. The preload passes
@@ -29,6 +31,7 @@ export const EXIT_A25_CODEGEN = 91;
 export const EXIT_A25_FORBIDDEN_MODULE = 92;
 export const EXIT_A25_ADDON = 93;
 export const EXIT_A25_IMPORT = 94;
+export const EXIT_A25_NODE_VERSION = 95;
 export const FORBIDDEN_BUILTINS = Object.freeze(['vm', 'worker_threads', 'child_process', 'cluster', 'inspector', 'inspector/promises', 'repl']);
 export const ADDON_BUILTINS = Object.freeze(['sqlite']);
 export const NODE_VERSION_PIN = 'v24.22.1';
@@ -138,7 +141,7 @@ export function installLockdown({ isManifestUrl, abort, registerRefuseHook } = {
   // (0) Node version pin, before anything else.
   const versions = process.versions;
   if (process.version !== NODE_VERSION_PIN || !versions || versions.node !== apply(strSlice, NODE_VERSION_PIN, [1])) {
-    die(EXIT_A25_IMPORT, `install: node ${String(process.version)} is not the pinned ${NODE_VERSION_PIN} (import() detection is version-bound)`);
+    die(EXIT_A25_NODE_VERSION, `install: node ${String(process.version)} is not the pinned ${NODE_VERSION_PIN} (import() detection is version-bound)`);
   }
   // (0b) Backstop refusal sites (Addendum B): abort instead of a catchable throw.
   if (typeof registerRefuseHook !== 'function') die(EXIT_A25_FORBIDDEN_MODULE, 'install: registerRefuseHook missing (backstop refusals would stay catchable)');

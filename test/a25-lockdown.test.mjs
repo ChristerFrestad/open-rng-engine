@@ -151,10 +151,11 @@ const BACKSTOP_HAS_HOOK = /^export function registerRefuseHook\(/m.test(readFile
 test('A25-2 real backstop refusal sites abort through the hook (normal mode)', { skip: BACKSTOP_HAS_HOOK ? false : 'waits on Backend: entropy-backstop.mjs registerRefuseHook (Addendum B)' }, () => {
   for (const [code, body] of Object.values(DIRECT)) expectAbort(code, body, { preload: true, refuse: 'backstop' });
 });
-test('A25-2 node version pin: install aborts 94 unless node is v24.22.1', () => {
-  expectAbort(94, '', { pre: "Object.defineProperty(process, 'version', { value: 'v24.22.2' });" });
-  expectAbort(94, '', { pre: "Object.defineProperty(process.versions, 'node', { value: '25.0.0' });" });
-  expectAbort(94, '', { pre: "Object.defineProperty(process, 'versions', { value: undefined });" });
+test('A25-2 node version pin: install aborts 95 (NODE_VERSION, Addendum D) unless node is v24.22.1', () => {
+  // The pin fires first at install, before any hook or lock exists, with its own code (not 94 IMPORT).
+  for (const pre of ["Object.defineProperty(process, 'version', { value: 'v24.22.2' });", "Object.defineProperty(process.versions, 'node', { value: '25.0.0' });", "Object.defineProperty(process, 'versions', { value: undefined });"]) {
+    assert.match(expectAbort(95, "eval('1');", { pre }).err, /ABORT 95 A25-2 lockdown: install: node .* is not the pinned v24\.22\.1/);
+  }
   expectSurvive("if (process.version !== 'v24.22.1') throw new Error('pin');");
 });
 for (const [name, body] of Object.entries(ADDONS)) test(`A25-2 addon -> 93: ${name}`, () => { expectAbort(93, body); });
@@ -232,5 +233,5 @@ test('A25-2 source rules: no import from the backstop, no node:crypto, no wrappe
   // No backstop import and no dependency on its strings (Addendum B: no abort keyed on log text, no console guard).
   assert.doesNotMatch(code, /entropy-backstop|console|node:crypto|['"]crypto['"]|randomBytes|randomFill|randomInt|randomUUID|getRandomValues|webcrypto|subtle|generateKey|generatePrime/);
   assert.match(code, /^export function installLockdown\(\{ isManifestUrl, abort, registerRefuseHook \} = \{\}\)/m);
-  for (const [k, v] of [['EXIT_A25_CODEGEN', 91], ['EXIT_A25_FORBIDDEN_MODULE', 92], ['EXIT_A25_ADDON', 93], ['EXIT_A25_IMPORT', 94]]) assert.match(code, new RegExp(`^export const ${k} = ${v};$`, 'm'));
+  for (const [k, v] of [['EXIT_A25_CODEGEN', 91], ['EXIT_A25_FORBIDDEN_MODULE', 92], ['EXIT_A25_ADDON', 93], ['EXIT_A25_IMPORT', 94], ['EXIT_A25_NODE_VERSION', 95]]) assert.match(code, new RegExp(`^export const ${k} = ${v};$`, 'm'));
 });
