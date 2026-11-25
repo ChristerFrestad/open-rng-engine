@@ -1,9 +1,9 @@
 // A25-6 (i), (ii), (iii), (v) and A29-3: behavioural cases for A25-2 full code closure (HoQ addendum 1 L638-L647, L786;
-// CTO split /workspace/rng-backup/a25-2/A25-2-SPLIT-v1.md, frozen v1 interfaces). Owner: Test Engineer.
+// CTO split /workspace/rng-backup/a25-2/A25-2-SPLIT-v1.md, interface v2 = Addendum C, sha256 1f832505...). Owner: TE.
 // Each case runs a child node under the preload in helper mode (ENTROPY_BACKSTOP_HELPER=a25) on a TEMP COPY of src/
 // and tools/ci (never on this tree) and checks its exact exit code:
 //   86 EXIT_A25_TOKEN, 89 EXIT_A25_MANIFEST_OUTSIDE, 90 EXIT_A25_MANIFEST_DIGEST, 91 EXIT_A25_CODEGEN.
-// Written against the frozen v1 interfaces before Backend integrates tools/ci/a25-manifest.mjs and the load hook, so
+// Written against interface v2 (Addendum C) before Backend integrates tools/ci/a25-manifest.mjs and the load hook, so
 // the A25-2 cases FAIL until then (expected). The A29-3 cases run on 150edc5d as is.
 // Bare parent: a preloaded parent (npm test) re-preloads every node child and refuses one that never proves the
 // preload, and the hostile-tree/manifest cases need bare children (buildManifest). Under npm test this file only checks
@@ -15,20 +15,30 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 import { child } from './fixtures/a25-child.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MARK = "Symbol.for('open-rng-engine/entropy-backstop/v1')";
 const BARE = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')] === undefined;
 const EXIT = Object.freeze({ TOKEN: 86, OUTSIDE: 89, DIGEST: 90, CODEGEN: 91 });
-// ---- ASSUMPTION (not named by the frozen v1 interfaces; Backend: confirm, or change it HERE only) ----
-// How the helper-mode preload receives the manifest: an env var holding the path of the JSON that buildManifest
-// returned ({ files: [{ url, sha256 }], digest }). Everything else below uses only the frozen v1 names.
+// Interface v2 (Addendum C): ENTROPY_BACKSTOP_MANIFEST only LOCATES the manifest JSON
+// { version: 1, root, entries: { '<posix relpath>': '<sha256 hex>' } }; the launcher deletes any inherited value and sets
+// its own; the D22-7 header binds manifest_sha256 and the preload exits 90 before any module loads when the file is
+// missing, unreadable, or its sha256 differs from the header-bound digest.
 const MANIFEST_ENV = 'ENTROPY_BACKSTOP_MANIFEST';
+// ---- OPEN (Addendum C says the digest is "passed via the grant" but names no carrier for a helper started without
+// the launcher). Backend: confirm or rename HERE only. A direct `node --import <backstop> <main>` spawn gives the
+// preload the header-bound manifest sha256 in this env var. ----
+const MANIFEST_SHA_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
+// ---- OPEN: named exports TE asked Backend for (the mutant runner overrides them; NOT-APPLIED until they exist) ----
+//   tools/ci/a25-manifest.mjs                 readManifest(path, expectedSha256) -> manifest (the preload's header check)
+//   verification/harness/stream-launcher.mjs  helperSpawnEnv(baseEnv, { token, manifestPath }) -> env (realSpawnPart)
+const sha256 = (b) => createHash('sha256').update(b).digest('hex');
 
 function bareEnv(extra = {}) {
   const env = { ...process.env };
-  for (const k of ['NODE_OPTIONS', 'ENTROPY_BACKSTOP_CHANNEL', 'ENTROPY_BACKSTOP_HELPER', MANIFEST_ENV]) delete env[k];
+  for (const k of ['NODE_OPTIONS', 'ENTROPY_BACKSTOP_CHANNEL', 'ENTROPY_BACKSTOP_HELPER', 'ENTROPY_BACKSTOP_GRANT', MANIFEST_ENV, MANIFEST_SHA_ENV]) delete env[k];
   return { ...env, ...extra };
 }
 // A temp tree: src/, tools/ci/, package.json and tsconfig.json copied; `edit` rewrites files ({ path: (text) => text }),
@@ -42,38 +52,53 @@ function tree({ edit = {}, add = {} } = {}) {
   for (const [p, text] of Object.entries(add)) { mkdirSync(join(root, p, '..'), { recursive: true }); writeFileSync(join(root, p), text); }
   return root;
 }
-// buildManifest from the tree's own tools/ci/a25-manifest.mjs, in a bare child (importing it here could install the
-// preload in this process). Written next to, not inside, the tree.
-function manifestFor(root, entries) {
+// Every file in the tree, as posix relpaths, sorted.
+function listFiles(root, dir = '') {
+  const out = [];
+  for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const rel = dir ? `${dir}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...listFiles(root, rel)); else out.push(rel);
+  }
+  return out.sort();
+}
+// buildManifest(root, relpaths) from the tree's own tools/ci/a25-manifest.mjs, in a bare child (importing it here could
+// install the preload in this process). The manifest lists every file of the tree except `outside` (files a case adds
+// to load from outside the manifest). Written next to, not inside, the tree. Returns its path, the parsed manifest and
+// the sha256 of its exact bytes (what the header binds).
+function manifestFor(root, outside = []) {
   const mod = join(root, 'tools/ci/a25-manifest.mjs');
   assert.ok(existsSync(mod), 'tools/ci/a25-manifest.mjs is missing (Backend integration pending)');
-  const entryUrls = entries.map((p) => pathToFileURL(join(root, p)).href);
+  const relpaths = listFiles(root).filter((p) => !outside.includes(p));
   const script = `const M = await import(${JSON.stringify(pathToFileURL(mod).href)});
-const m = await M.buildManifest({ root: ${JSON.stringify(root)}, entryUrls: ${JSON.stringify(entryUrls)} });
-process.stdout.write(JSON.stringify(m));`;
+const m = await M.buildManifest(${JSON.stringify(root)}, ${JSON.stringify(relpaths)});
+process.stdout.write(typeof m === 'string' ? m : JSON.stringify(m));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, `buildManifest failed: ${r.stderr}`);
   const m = JSON.parse(r.stdout);
-  assert.ok(Array.isArray(m.files) && typeof m.digest === 'string', 'buildManifest shape is { files, digest }');
-  for (const e of entryUrls) assert.ok(m.files.some((f) => f.url === e), `entry ${e} is in the manifest`);
+  assert.equal(m.version, 1, 'manifest version 1');
+  assert.equal(m.root, root, 'manifest root is the absolute tree root');
+  assert.deepEqual(Object.keys(m.entries).sort(), relpaths, 'manifest entries are exactly the given relpaths');
+  for (const p of relpaths) assert.equal(m.entries[p], sha256(readFileSync(join(root, p))), `entry ${p} is the sha256 of its bytes`);
   const path = `${root}.manifest.json`;
-  writeFileSync(path, JSON.stringify(m));
-  return { path, m };
+  writeFileSync(path, r.stdout);
+  return { path, m, sha: sha256(readFileSync(path)) };
 }
 // Runs `main` (a path inside root) under the tree's preload in helper mode with the manifest.
-function helper(root, main, manifestPath, extra = {}) {
-  const env = bareEnv({ ENTROPY_BACKSTOP_HELPER: 'a25', [MANIFEST_ENV]: manifestPath, ...extra });
+function helper(root, main, manifestPath, manifestSha, extra = {}) {
+  const env = bareEnv({ ENTROPY_BACKSTOP_HELPER: 'a25', [MANIFEST_ENV]: manifestPath, [MANIFEST_SHA_ENV]: manifestSha, ...extra });
   const r = spawnSync(process.execPath, ['--import', join(root, 'tools/ci/entropy-backstop.mjs'), join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 120000 });
   return { status: r.status, out: r.stdout, err: r.stderr };
 }
-const clean = (root) => { rmSync(root, { recursive: true, force: true }); rmSync(`${root}.manifest.json`, { force: true }); };
-// One scenario: build the tree, the manifest over `entries`, optionally change bytes after the manifest (`after`), run.
-function scenario({ main, edit, add, entries = ['te-main.mjs'], after, env }) {
+const clean = (root) => { for (const p of [root, `${root}.manifest.json`, `${root}.swap.json`]) rmSync(p, { recursive: true, force: true }); };
+// One scenario: build the tree and the manifest (every file but `outside`), optionally change tree bytes after the
+// manifest (`after`) or the manifest file / header-bound sha (`header`: ({ root, path, sha, m }) => { path, sha }), run.
+function scenario({ main, edit, add, outside = [], after, header, env }) {
   const root = tree({ edit, add: { ...add, 'te-main.mjs': main } });
   try {
-    const { path } = manifestFor(root, entries);
+    let { path, sha, m } = manifestFor(root, outside);
     if (after) for (const [p, fn] of Object.entries(after)) { const f = join(root, p), t = readFileSync(f, 'utf8'), n = fn(t); assert.notEqual(n, t); writeFileSync(f, n); }
-    return helper(root, 'te-main.mjs', path, env);
+    if (header) ({ path, sha } = header({ root, path, sha, m }));
+    return helper(root, 'te-main.mjs', path, sha, env);
   } finally { clean(root); }
 }
 const HEAD = `import * as E from './src/index.ts';\nconst M = () => globalThis[${MARK}].helper;\n`;
@@ -137,7 +162,7 @@ if (BARE) {
   const ROGUE_ESM = `import { randomBytes } from 'node:crypto'; randomBytes(4); process.stdout.write('ROGUE-RAN');\n`;
   const loadRogue = (spec) => `${HEAD}import { createRequire } from 'node:module';\nE.integer(0, 10);\ncreateRequire(import.meta.url)(${JSON.stringify(spec)});\nprocess.stdout.write('ALIVE');\n`;
   test('A25-6(i) control: the same tree and manifest without the rogue load exit 0', () => {
-    ok(scenario({ main: `${HEAD}E.integer(0, 10); E.shuffle([1, 2, 3]); process.stdout.write('ALIVE');\n`, add: { 'rogue.cjs': ROGUE } }));
+    ok(scenario({ main: `${HEAD}E.integer(0, 10); E.shuffle([1, 2, 3]); process.stdout.write('ALIVE');\n`, add: { 'rogue.cjs': ROGUE }, outside: ['rogue.cjs'] }));
   });
   const OUTSIDE = {
     'a .cjs file': ['./rogue.cjs', { 'rogue.cjs': ROGUE }],
@@ -147,7 +172,7 @@ if (BARE) {
   };
   for (const [name, [spec, add]] of Object.entries(OUTSIDE)) {
     test(`A25-6(i): ${name} outside the manifest calling randomBytes exits 89 before it runs`, () => {
-      dies(scenario({ main: loadRogue(spec), add }), EXIT.OUTSIDE);
+      dies(scenario({ main: loadRogue(spec), add, outside: Object.keys(add) }), EXIT.OUTSIDE);
     });
   }
 
@@ -164,10 +189,60 @@ if (BARE) {
   }
   test('A25-6(ii): a manifest module rewritten on disk after start, then lazily loaded: exit 90', () => {
     const main = `${HEAD}import { writeFileSync } from 'node:fs';\nE.integer(0, 10);\nwriteFileSync(new URL('./lazy.mjs', import.meta.url), "globalThis.crypto.getRandomValues(new Uint8Array(1)); process.stdout.write('ROGUE-RAN');\\n");\nawait import('./lazy.mjs');\nprocess.stdout.write('ALIVE');\n`;
-    dies(scenario({ main, add: { 'lazy.mjs': 'export const x = 1;\n' }, entries: ['te-main.mjs', 'lazy.mjs'] }), EXIT.DIGEST);
+    dies(scenario({ main, add: { 'lazy.mjs': 'export const x = 1;\n' } }), EXIT.DIGEST);
   });
   test('A25-6(ii) control: the lazy manifest module unchanged loads and exits 0', () => {
-    ok(scenario({ main: `${HEAD}E.integer(0, 10);\nconst L = await import('./lazy.mjs');\nif (L.x === 1) process.stdout.write('ALIVE');\n`, add: { 'lazy.mjs': 'export const x = 1;\n' }, entries: ['te-main.mjs', 'lazy.mjs'] }));
+    ok(scenario({ main: `${HEAD}E.integer(0, 10);\nconst L = await import('./lazy.mjs');\nif (L.x === 1) process.stdout.write('ALIVE');\n`, add: { 'lazy.mjs': 'export const x = 1;\n' } }));
+  });
+
+  // ---------------- A25-2 header binding (Addendum C; CTO 21:14, 21:23): the manifest FILE itself -> 90 before any module loads ----------------
+  // The env var only locates the file; the header-bound sha256 decides. Each main prints MAIN-START first, so an empty
+  // stdout proves the exit came before the main entry ran.
+  const EARLY = `process.stdout.write('MAIN-START');\n${HEAD}E.integer(0, 10); process.stdout.write('ALIVE');\n`;
+  const early = (r) => { dies(r, EXIT.DIGEST); assert.equal(r.out, '', 'exit 90 before the main entry runs'); };
+  test('A25-2 header control: the bound manifest at the bound sha runs the main entry', () => {
+    const r = scenario({ main: EARLY }); ok(r); assert.match(r.out, /^MAIN-START/);
+  });
+  test('A25-2 header: the manifest file swapped for another valid manifest (sha no longer the header-bound one): exit 90', () => {
+    // The swap lists the same files plus rogue.cjs: valid JSON, version 1, right root; only its bytes' sha differs.
+    early(scenario({ main: EARLY, add: { 'rogue.cjs': ROGUE }, outside: ['rogue.cjs'], header: ({ root, sha, m }) => {
+      const swapped = { ...m, entries: { ...m.entries, 'rogue.cjs': sha256(readFileSync(join(root, 'rogue.cjs'))) } };
+      const p = `${root}.swap.json`; writeFileSync(p, JSON.stringify(swapped)); assert.notEqual(sha256(readFileSync(p)), sha);
+      return { path: p, sha };
+    } }));
+  });
+  test('A25-2 header: the same manifest file under a different header-bound sha256: exit 90', () => {
+    early(scenario({ main: EARLY, header: ({ path, sha }) => ({ path, sha: (sha[0] === '0' ? '1' : '0') + sha.slice(1) }) }));
+  });
+  test('A25-2 header: the manifest file is missing: exit 90', () => {
+    early(scenario({ main: EARLY, header: ({ root, sha }) => ({ path: `${root}.does-not-exist.json`, sha }) }));
+  });
+  test('A25-2 header: the manifest path is unreadable (a directory): exit 90', () => {
+    early(scenario({ main: EARLY, header: ({ root, sha }) => ({ path: join(root, 'src'), sha }) }));
+  });
+  test('A25-2 header: the manifest file loses its last byte after binding: exit 90', () => {
+    early(scenario({ main: EARLY, header: ({ path, sha }) => { const b = readFileSync(path); writeFileSync(path, b.subarray(0, b.length - 1)); return { path, sha }; } }));
+  });
+
+  // ---------------- A25-2 launcher (Addendum C): an inherited ENTROPY_BACKSTOP_MANIFEST never reaches a helper ----------------
+  // Behavioural on the launcher's env builder (helperSpawnEnv, the one realSpawnPart must use; export requested from Backend).
+  const LAUNCHER = join(ROOT, 'verification/harness/stream-launcher.mjs');
+  const spawnEnv = (base) => {
+    const script = `const L = await import(${JSON.stringify(pathToFileURL(LAUNCHER).href)});
+if (typeof L.helperSpawnEnv !== 'function') { process.stderr.write('helperSpawnEnv is not exported'); process.exit(3); }
+process.stdout.write(JSON.stringify(L.helperSpawnEnv(${JSON.stringify(base)}, { token: 'grant-1@1#00', manifestPath: '/te/own.manifest.json' })));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
+    assert.equal(r.status, 0, `helperSpawnEnv: ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  };
+  test('A25-2 launcher: an inherited manifest locator and sha are replaced by the launcher\'s own', () => {
+    const e = spawnEnv({ PATH: '/usr/bin', [MANIFEST_ENV]: '/hostile/manifest.json', [MANIFEST_SHA_ENV]: 'f'.repeat(64), NODE_OPTIONS: '--require /hostile.cjs' });
+    assert.equal(e[MANIFEST_ENV], '/te/own.manifest.json');
+    assert.notEqual(e[MANIFEST_SHA_ENV], 'f'.repeat(64));
+    assert.ok(!('NODE_OPTIONS' in e));
+  });
+  test('A25-2 launcher: with nothing inherited the launcher still sets its own manifest locator', () => {
+    assert.equal(spawnEnv({ PATH: '/usr/bin' })[MANIFEST_ENV], '/te/own.manifest.json');
   });
 
   // ---------------- A25-6 (iii): eval / new Function code calls a CSPRNG primitive -> 91 ----------------
@@ -209,7 +284,7 @@ export function teCb(): void {
 `;
   const cbEdit = { 'src/entropy/index.ts': (t) => t.replace("import { randomFillSync } from 'node:crypto';", "import { randomFillSync } from 'node:crypto';\nimport { teCb } from '../te-cb.ts';").replace('export function fillBuffer(target: Uint8Array): Uint8Array {\n', 'export function fillBuffer(target: Uint8Array): Uint8Array {\n  teCb();\n') };
   const cbMain = (at) => `${HEAD}while (M().counts().gate_calls <= ${at}) E.integer(0, 1000);\nprocess.stdout.write('ALIVE ' + M().counts().gate_calls);\n`;
-  const reenter = (at, how) => scenario({ main: cbMain(Math.max(at, 12290)), edit: cbEdit, add: { 'src/te-cb.ts': CB }, entries: ['te-main.mjs'], env: { TE_REENTER_AT: String(at), TE_REENTER_HOW: how } });
+  const reenter = (at, how) => scenario({ main: cbMain(Math.max(at, 12290)), edit: cbEdit, add: { 'src/te-cb.ts': CB }, env: { TE_REENTER_AT: String(at), TE_REENTER_HOW: how } });
   test('A25-6(v) control: the callback that never fires leaves the run green past 12290 gate calls', () => {
     const r = reenter(-1, 'getRandomValues'); ok(r); assert.ok(Number(/ALIVE (\d+)/.exec(r.out)[1]) > 12290);
   });

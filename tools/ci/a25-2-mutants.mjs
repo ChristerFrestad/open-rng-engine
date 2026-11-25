@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// A25-6 (i), (ii), (iii), (v) and A29-3 mutants (HoQ addendum 1 L642-L647, L786; CTO split A25-2-SPLIT-v1). Owner: Test
+// A25-6 (i), (ii), (iii), (v), A25-2 header/launcher and A29-3 mutants (HoQ addendum 1 L642-L647, L786; CTO split
+// A25-2-SPLIT-v1 with Addendum C = interface v2). Owner: Test
 // Engineer. Runs test/r-g64-a25-2.test.mjs from a BARE parent (no NODE_OPTIONS, no preload) on a temp copy of this
 // tree: first unmutated (must be green, 0 skipped), then once per mutant (must fail = KILLED). Exit 0 only when the
 // baseline is green and every mutant applied and was killed. A mutant whose pattern is not found is NOT-APPLIED and
@@ -14,6 +15,14 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const TEST_FILE = 'test/r-g64-a25-2.test.mjs';
 const BS = 'tools/ci/entropy-backstop.mjs', MAN = 'tools/ci/a25-manifest.mjs', LOCK = 'tools/ci/a25-lockdown.mjs';
+const LAUNCH = 'verification/harness/stream-launcher.mjs';
+// verifyLoad(url, bytes) (interface v2) closes over the manifest, so a mutant that must act on membership reads the
+// same manifest itself, from the locator, when a25-manifest.mjs is evaluated by the preload. If the locator is gone by
+// then, MEMBERS is null and the mutant degrades to "verifyLoad checks nothing" (still a mutant, less selective).
+const MEMBERS = `(() => { try { const fs = process.getBuiltinModule('node:fs'), u = process.getBuiltinModule('node:url'), pa = process.getBuiltinModule('node:path');
+  const m = JSON.parse(fs.readFileSync(process.env.ENTROPY_BACKSTOP_MANIFEST, 'utf8'));
+  return (url) => { const f = u.fileURLToPath(url); const r = pa.relative(m.root, f).split(pa.sep).join('/'); return Object.hasOwn(m.entries, r); };
+} catch { return null; } })()`;
 
 // Edits: [file, old, new] replaces the one occurrence of `old`; [file, { override, params, body }] renames
 // `export function <override>(` to a private name and appends an exported replacement that may call it as __orig(...),
@@ -34,13 +43,18 @@ const BS = 'tools/ci/entropy-backstop.mjs', MAN = 'tools/ci/a25-manifest.mjs', L
 // token-clear path, and that mutant behaves identically on every input: no test can kill it.
 const MUTANTS = [
   // A25-6 (i) -> 89
-  ['A6i-M1 verifyLoad lets a module outside the manifest through', [[MAN, { override: 'verifyLoad', params: 'url, sourceBytes, manifest', body: 'if (!manifest.files.some((f) => f.url === url)) return; return __orig(url, sourceBytes, manifest);' }]]],
+  ['A6i-M1 verifyLoad lets a module outside the manifest through', [[MAN, { override: 'verifyLoad', params: 'url, bytes', body: `const inM = ${MEMBERS}; if (inM === null || !inM(url)) return; return __orig(url, bytes);` }]]],
   ['A6i-M2 EXIT_A25_MANIFEST_OUTSIDE is not distinct (89 -> 90)', [['*', { re: /\bEXIT_A25_MANIFEST_OUTSIDE\s*=\s*89\b/, to: 'EXIT_A25_MANIFEST_OUTSIDE = 90' }]]],
   // A25-6 (ii) -> 90
-  ['A6ii-M3 verifyLoad does not compare the bytes of a manifest module', [[MAN, { override: 'verifyLoad', params: 'url, sourceBytes, manifest', body: 'if (manifest.files.some((f) => f.url === url)) return; return __orig(url, sourceBytes, manifest);' }]]],
+  ['A6ii-M3 verifyLoad checks membership only, not the bytes of a manifest module', [[MAN, { override: 'verifyLoad', params: 'url, bytes', body: `const inM = ${MEMBERS}; if (inM === null || inM(url)) return; return __orig(url, bytes);` }]]],
   ['A6ii-M4 EXIT_A25_MANIFEST_DIGEST is not distinct (90 -> 89)', [['*', { re: /\bEXIT_A25_MANIFEST_DIGEST\s*=\s*90\b/, to: 'EXIT_A25_MANIFEST_DIGEST = 89' }]]],
+  // A25-2 header binding (Addendum C) -> 90 before any module loads
+  ['A2h-M16 readManifest ignores the header-bound sha256 (swapped manifest accepted)', [[MAN, { override: 'readManifest', params: 'path, expectedSha256', body: "let s = expectedSha256; try { s = process.getBuiltinModule('node:crypto').createHash('sha256').update(process.getBuiltinModule('node:fs').readFileSync(path)).digest('hex'); } catch { /* missing: let the original decide */ } return __orig(path, s);" }]]],
+  // A25-2 launcher (Addendum C): the launcher overrides an inherited locator
+  ['A2l-M17 helperSpawnEnv keeps an inherited ENTROPY_BACKSTOP_MANIFEST', [[LAUNCH, { override: 'helperSpawnEnv', params: 'base, opts', body: "const e = __orig(base, opts); for (const k of ['ENTROPY_BACKSTOP_MANIFEST', 'ENTROPY_BACKSTOP_MANIFEST_SHA256']) if (base && Object.hasOwn(base, k)) e[k] = base[k]; return e;" }]]],
+  ['A2l-M18 helperSpawnEnv sets no manifest locator of its own', [[LAUNCH, { override: 'helperSpawnEnv', params: 'base, opts', body: "const e = __orig(base, opts); delete e.ENTROPY_BACKSTOP_MANIFEST; return e;" }]]],
   // A25-6 (iii) -> 91
-  ['A6iii-M5 installLockdown installs nothing', [[LOCK, { override: 'installLockdown', params: 'opts', body: 'return undefined;' }]]],
+  ['A6iii-M5 installLockdown installs nothing', [[LOCK, { override: 'installLockdown', params: '...args', body: 'return undefined;' }]]],
   ['A6iii-M6 EXIT_A25_CODEGEN is not distinct (91 -> 86)', [['*', { re: /\bEXIT_A25_CODEGEN\s*=\s*91\b/, to: 'EXIT_A25_CODEGEN = 86' }]]],
   // A25-6 (v) -> 86 on every call
   ['A6v-M7 wrapped primitives do not abort in helper mode', [[BS, '    if (HELPER_MODE) helperAbort(EXIT_A25_TOKEN,', '    if (false) helperAbort(EXIT_A25_TOKEN,']]],
