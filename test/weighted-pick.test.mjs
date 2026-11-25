@@ -180,6 +180,22 @@ test('the input array is not modified and an array whose length changes while co
   assert.throws(() => weightedPickWithFill(shifting, noBytes()), /length changed while copying/);
 });
 
+test('HoQ A16: typed arrays are refused, and the caller\'s own slice is never called', () => {
+  for (const t of [new Uint32Array([1, 2]), new Float64Array([1, 2]), new Uint16Array([3])]) {
+    assert.throws(() => weightedPickWithFill(t, noBytes()), /weights must be an array/);
+  }
+  const own = [1, 2, 3];
+  own.slice = () => {
+    throw new Error('own slice called');
+  };
+  // T = 6, x = 5 -> index 2, read through Array.prototype.slice
+  assert.equal(weightedPickWithFill(own, wordFill([5])), 2);
+  const lying = [0, 0, 1, 1];
+  lying.slice = () => [5, 0, 0, 0];
+  // the real copy is [0, 0, 1, 1]: two nonzero, T = 2, x = 1 -> index 3 (never 0)
+  assert.equal(weightedPickWithFill(lying, wordFill([1])), 3);
+});
+
 test('adapter failures: short buffer and throwing fill are RngEntropyError; 128 rejects is RngHealthError', () => {
   assert.throws(() => weightedPickWithFill([1, 1], () => new Uint8Array(1)), RngEntropyError);
   assert.throws(() => weightedPickWithFill([1, 1], () => { throw new Error('x'); }), RngEntropyError);

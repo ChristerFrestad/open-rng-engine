@@ -194,3 +194,18 @@ test('public shuffle over the platform source returns a permutation', () => {
     assert.deepEqual([...out].sort((a, b) => a - b), src);
   }
 });
+
+test('sparse input (HoQ A14 NIT, documented): a moved hole becomes explicit undefined, index 0 may stay a hole', async () => {
+  const { shuffleWithFill: sw } = await import('../src/mapping/index.ts');
+  const tape = (vals) => { let i = 0; return (t) => { t.fill(0); t[t.length - 1] = vals[i++]; return t; }; };
+  // j = i on every step: no element moves, but each splice re-writes index i
+  const kept = sw([, 2, , 4, 5], tape([4, 3, 2, 1]));
+  assert.equal(kept.length, 5);
+  assert.equal(0 in kept, false);
+  assert.equal(2 in kept, true);
+  assert.equal(kept[2], undefined);
+  // j = 0 on every step: index 0 is swapped, so every slot is an own element
+  const moved = sw([1, , 3, , 5], tape([0, 0, 0, 0]));
+  assert.deepEqual([0, 1, 2, 3, 4].map((i) => i in moved), [true, true, true, true, true]);
+  assert.equal(moved.filter((x) => x === undefined).length, 2);
+});

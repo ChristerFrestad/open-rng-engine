@@ -65,6 +65,7 @@ function takeFilled(target: Uint8Array, out: Uint8Array): Uint8Array {
 
 /**
  * Draw an integer in [min, maxExclusive) from a fill callback.
+ * Draws through drawBelowWithFill, which zeroes every drawn byte (R-23 / QR-08).
  * Not part of the public "." surface; tests inject a fill here.
  */
 export function integerWithFill(min: IncomingBound, maxExclusive: IncomingBound, fill: FillBuffer): number {
@@ -86,6 +87,10 @@ export function integerWithFill(min: IncomingBound, maxExclusive: IncomingBound,
  * integer span in 1..2^53-1, already checked by the caller. span 1 reads 0
  * bytes (R-42). One 4-byte read per try when span <= 2^32, else 7 bytes;
  * low bitlen(span-1) bits, accept c < span, else retry; 128 tries.
+ * Every try zeroes its target buffer, and the buffer the fill returned when it
+ * is a different Uint8Array, in finally before the call returns, retries or
+ * throws (PLAN R-23 / QR-08; HoQ A14 (b)), so integer, shuffle, sample and
+ * weightedPick are all covered.
  * Module-private: integerWithFill keeps its public 2^48 span cap in front.
  */
 function drawBelowWithFill(span: number, fill: FillBuffer): number {
@@ -95,15 +100,24 @@ function drawBelowWithFill(span: number, fill: FillBuffer): number {
   const m = bitLength(span - 1);
   for (let t = 0; t < TRY_LIMIT; t++) {
     const target = new Uint8Array(width);
-    let filled: Uint8Array;
+    let returned: Uint8Array | undefined;
     try {
-      filled = takeFilled(target, fill(target));
-    } catch (e) {
-      if (e instanceof RngRangeError || e instanceof RngHealthError || e instanceof RngEntropyError) throw e;
-      throw new RngEntropyError('adapter failed');
+      let filled: Uint8Array;
+      try {
+        const raw = fill(target);
+        if (raw instanceof Uint8Array) returned = raw;
+        filled = takeFilled(target, raw);
+      } catch (e) {
+        if (e instanceof RngRangeError || e instanceof RngHealthError || e instanceof RngEntropyError) throw e;
+        throw new RngEntropyError('adapter failed');
+      }
+      const c = lowBits(filled, m);
+      if (c < span) return c;
+    } finally {
+      // PLAN R-23 / QR-08: no drawn byte outlives the call, on return, reject or throw.
+      target.fill(0);
+      if (returned !== undefined && returned !== target) returned.fill(0);
     }
-    const c = lowBits(filled, m);
-    if (c < span) return c;
   }
   throw new RngHealthError('128 consecutive rejects');
 }
@@ -173,6 +187,9 @@ export function sampleWithFill(n: IncomingBound, k: IncomingBound, fill: FillBuf
 /** PLAN R-72: weightedPick weight total bound, 1 <= T <= 2^53-1. */
 export const WEIGHT_TOTAL_MAX = Number.MAX_SAFE_INTEGER;
 
+/** weightedPick binary-search step cap (HoQ A16): ceil(log2(2^32-1)) = 32 steps suffice; 33 allowed. Internal guard, unreachable in correct code; reports as RngHealthError RNG_REJECTION_EXHAUSTED. */
+const SEARCH_ITER_MAX = 33;
+
 /**
  * PLAN §3.3 weightedPick(weights) (R-72, QR-05, PRQ-04): one draw x over
  * [0, T) by the shared A.5.1 routine (7-byte reads when T > 2^32, so T may
@@ -180,9 +197,16 @@ export const WEIGHT_TOTAL_MAX = Number.MAX_SAFE_INTEGER;
  * running sums for the largest index whose sum of earlier weights is <= x.
  * A zero weight is never picked. Weights are non-negative safe integers,
  * length 1..2^32-1, at least one nonzero, T <= 2^53-1 checked while summing;
- * a hole in a sparse array reads as undefined and is refused. Any violation is
- * RANGE_INVALID with 0 bytes read. A single nonzero weight reads 0 bytes (R-42).
- * No floats, no modulo. Not part of the public "." surface; tests inject a fill.
+ * a hole in a sparse array reads as undefined and is refused. Typed arrays
+ * (Uint32Array and the like) are not arrays and are refused; pass Array.from(t).
+ * Any violation is RANGE_INVALID with 0 bytes read. A single nonzero weight
+ * reads 0 bytes (R-42). Memory is O(n): one copy of the weights and one array
+ * of running sums. The search is capped at SEARCH_ITER_MAX steps (enough for
+ * n <= 2^32-1). The cap is an internal non-convergence guard that correct code
+ * cannot reach; past it the call throws RngHealthError under the existing code
+ * RNG_REJECTION_EXHAUSTED (no new code, PLAN §3.3 taxonomy unchanged), so a
+ * broken search fails instead of hanging. No floats, no modulo. Not part of the public "." surface;
+ * tests inject a fill.
  */
 export function weightedPickWithFill(weights: readonly number[], fill: FillBuffer): number {
   if (!Array.isArray(weights)) {
@@ -192,7 +216,8 @@ export function weightedPickWithFill(weights: readonly number[], fill: FillBuffe
   if (!Number.isSafeInteger(n) || n < 1 || n > SHUFFLE_MAX_LENGTH) {
     rangeInvalid('weights length must be an integer in 1..2^32-1');
   }
-  const copy: readonly number[] = weights.slice();
+  // HoQ A16: never call the caller's own slice.
+  const copy: readonly number[] = Array.prototype.slice.call(weights);
   if (copy.length !== n) {
     rangeInvalid('weights length changed while copying');
   }
@@ -222,7 +247,10 @@ export function weightedPickWithFill(weights: readonly number[], fill: FillBuffe
   const x = drawBelowWithFill(total, fill);
   let lo = 0;
   let hi = n - 1;
+  let steps = 0;
   while (lo < hi) {
+    steps += 1;
+    if (steps > SEARCH_ITER_MAX) throw new RngHealthError('weightedPick search did not converge');
     const mid = hi - ((hi - lo) >>> 1);
     const sumBefore = before[mid];
     if (sumBefore === undefined) throw new RngRangeError('running sum missing');
