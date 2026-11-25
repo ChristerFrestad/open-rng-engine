@@ -2037,12 +2037,21 @@ export function selfTest() {
 // tests M-A17-1 and N-A18-1 are re-run here as a plain-node child. That is the gating mode in which
 // runChecked's r.error branch is reachable (under the npm test preload the backstop throws first). It is
 // deliberately NOT a plain-node child inside npm test: the backstop must keep refusing children that drop
-// the preload. Runs only for the real checker file, not for the M-167 scratch copies the tests make.
+// the preload.
+// HoQ A20 M-A20-1: the step always runs unless the caller sets the explicit opt-out N19_OPT_OUT_ENV. Only the
+// test's m167Mutant sets it (through runChecked's env), for its scratch copies. The real checker refuses the
+// opt-out and fails red before doing anything else, so the step can never be skipped silently there.
 export const N19_PATTERN = 'N-A18-1|M-A17-1';
 export const N19_EXPECTED_TESTS = 2;
+export const N19_OPT_OUT_ENV = 'RULE27_N19_SCRATCH_OPT_OUT';
+const n19IsRealChecker = () => new URL(import.meta.url).pathname.endsWith('/tools/ci/import-allowlist.mjs');
+export function n19OptOutRefusal() {
+  if (process.env[N19_OPT_OUT_ENV] === undefined || !n19IsRealChecker()) return null;
+  return `N-A19-1 opt-out REFUSED: ${N19_OPT_OUT_ENV} is set, but this is the real tools/ci/import-allowlist.mjs; the plain-node step cannot be skipped here (M-A20-1)`;
+}
 function n19PlainNodeStep() {
   const here = new URL(import.meta.url).pathname;
-  if (!here.endsWith('/tools/ci/import-allowlist.mjs')) return { ok: true, line: 'N-A19-1 plain-node step: skipped (not the real checker file)' };
+  if (process.env[N19_OPT_OUT_ENV] !== undefined) return { ok: true, line: `N-A19-1 plain-node step: skipped (${N19_OPT_OUT_ENV} set for an M-167 scratch copy)` };
   const root = join(dirname(here), '..', '..');
   // When this self-test itself runs inside a node:test file (the 218-fixture test in npm test), the inherited
   // NODE_TEST_CONTEXT would make the nested `node --test` skip running files; drop it so the step really runs.
@@ -2061,6 +2070,7 @@ function n19PlainNodeStep() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (process.argv[2] === '--self-test') {
+    const refused = n19OptOutRefusal(); if (refused) { console.log(refused); process.exit(1); }
     const f = selfTest(); console.log(f.length ? f.join('\n') : `rule27 self-test: ${Object.keys(BAD).length} known-bad fixtures red, good fixture green, ${SELF_TEST_EXTRA_CASES.length} extra cases ok (${SELF_TEST_EXTRA_CASES.join(', ')})`);
     const g = n19PlainNodeStep(); console.log(g.line); if (!g.ok) f.push(g.line);
     process.exit(f.length ? 1 : 0);
