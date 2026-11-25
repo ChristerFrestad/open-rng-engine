@@ -12,6 +12,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RS_TEST = 'test/r-g64-stream.test.mjs';
+const A30_TEST = 'test/r-g64-a30.test.mjs';
+const A30M = 'verification/bench/a30-method.mjs';
 const RP_TEST = 'test/r-g64-positional.test.mjs';
 const RD_TEST = 'test/r-g64-decision.test.mjs';
 const A25_TEST = ['test/r-g64-a25.test.mjs', 'test/r-g64-a25-bare.mjs']; // run here without the preload: the bare file's hostile-src cases need a bare parent
@@ -132,6 +134,13 @@ const MUTANTS = [
   ["A25-M14 launcher accepts an H frame without the helper state", [["verification/harness/stream-launcher.mjs", "      if (!b || typeof b !== 'object') return fail('H has no backstop helper state", "      if (!b || typeof b !== 'object') return; if (false) return fail('H has no backstop helper state"]], RS_TEST],
   ["A25-M15 launcher does not compare the backstop digest (A25-1)", [["verification/harness/stream-launcher.mjs", "      if (b.backstop_sha256 !== hx.backstop_sha256) return fail(", "      if (false) return fail("]], RS_TEST],
   ["A25-M16 launcher does not require the leak check", [["verification/harness/stream-launcher.mjs", "      if (h.gate_leak_check !== true) return fail(", "      if (false) return fail("]], RS_TEST],
+  ['A30-M1 ABBA broken: a25 always runs first (HoQ A30 1)', [[A30M, "  return i % 2 === 0 ? ['a25', 'plain'] : ['plain', 'a25'];\n", "  return ['a25', 'plain'];\n"]], A30_TEST],
+  ['A30-M2 void pair (load1 > guard) run and counted as valid (HoQ A30 3)', [[A30M, "    if (!(load1 <= guard)) {", "    if (false) {"]], A30_TEST],
+  ['A30-M3 2N attempt cap removed (HoQ A30 3)', [[A30M, "  while (overheads.length < N && attempts < 2 * N) {", "  while (overheads.length < N) {"]], A30_TEST],
+  ['A30-M4 PASS limit rounded to one decimal (10.04% passes; HoQ A30 2)', [[A30M, "  const pass = med <= A30.LIMIT && above", "  const pass = Math.round(med * 1000) / 1000 <= A30.LIMIT && above"]], A30_TEST],
+  // A30-M5 (drop the ceil(N/2)+1 rule) is equivalent: ceil(N/2)+1 pairs above 10% puts the median above 10%, so the
+  // median rule already fails such an entry for every N. Kept in the method as HoQ's stated rule; no mutant here.
+  ['A30-M6 load1 guard widened above 4.0 (HoQ A30 3)', [[A30M, "  if (guard !== A30.GUARD_LOAD1) throw", "  if (false) throw"]], A30_TEST],
   ['RS-18 voided attempt kept as counted', [['verification/harness/stream-launcher.mjs', "      continue; // the voided attempt's accumulators", "      attempts.at(-1).void = null; // the voided attempt's accumulators"]], RS_TEST],
 ];
 
