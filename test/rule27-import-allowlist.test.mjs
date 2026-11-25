@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { runChecked as runCheckedLib } from './run-checked-lib.mjs';
+import { N19_OPT_OUT_ENV } from '../tools/ci/import-allowlist.mjs';
 import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, BAD_EXTRA, GUARD_OK, selfTest, strip, entropyTriggers, READ_NAME_ALLOW, BAD_REASON, SELF_TEST_EXTRA_CASES, GLOBALTHIS_MEMBERS_ALLOWED, PROCESS_MEMBERS_ALLOWED, COMPUTED_LITERAL_KEYS_ALLOWED, REFLECTIVE_BASES } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -194,6 +195,8 @@ test('HoQ: --self-test carries 218 known-bad fixtures (allow-list, G-12..G-28, S
   for (const [n, src] of Object.entries(five)) { assert.equal(BAD[n], src, n); assert.equal(BAD_PATH[n], 'src/entropy/a.ts'); assert.ok(BAD_REASON[n] instanceof RegExp, n); }
   const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /218 known-bad fixtures red, good fixture green, 12 extra cases ok/);
+  // HoQ A20 M-A20-1 (a): the real checker ran the N-A19-1 plain-node step (never skipped silently).
+  assert.match(r.stdout, /^N-A19-1 plain-node step: 2\/2 rule27 child-runner tests pass without the preload$/m, r.stdout);
 });
 
 // G-12 (HoQ 2de685b2): fail-closed reach to the global object.
@@ -421,7 +424,7 @@ test('HoQ 81d1d184: b1-b6 and M-163..M-165 are green on the old checker and red 
 // and a child killed by the timeout (or by any signal, or never started) fails with an explicit
 // TIMEOUT / CHILD-FAILED message instead of an empty-output assertion.
 const SELFTEST_CHILD_TIMEOUT_MS = 180_000;
-const runChecked = (label, args, { timeoutMs = SELFTEST_CHILD_TIMEOUT_MS, cwd = ROOT } = {}) => runCheckedLib(label, args, { timeoutMs, cwd });
+const runChecked = (label, args, { timeoutMs = SELFTEST_CHILD_TIMEOUT_MS, cwd = ROOT, env } = {}) => runCheckedLib(label, args, { timeoutMs, cwd, env });
 
 
 test('M-A17-1: a child that outlives its limit fails with an explicit TIMEOUT, never as empty output', () => {
@@ -464,13 +467,31 @@ function m167Mutant(name, mutate, reason) {
   const file = join(ROOT, 'tools/ci', `_scratch-m167-${name}.mjs`);
   try {
     writeFileSync(file, mutated);
-    const r = runChecked(`M-167 ${name}`, [file, '--self-test']);
+    const r = runChecked(`M-167 ${name}`, [file, '--self-test'], { env: { ...process.env, [N19_OPT_OUT_ENV]: '1' } });
     assert.notEqual(r.status, 0, `${name} must fail self-test:\n${r.stdout}\n${r.stderr}`);
     assert.match(`${r.stdout}\n${r.stderr}`, reason);
   } finally {
     try { rmSync(file, { force: true }); } catch {}
   }
 }
+
+// HoQ A20 M-A20-1 (b): the N-A19-1 opt-out is explicit, set only by m167Mutant through runChecked's env;
+// runChecked never adds it by default, and the real checker refuses it (red, before any other work).
+test('M-A20-1: runChecked passes no N-A19-1 opt-out by default, only the env its caller gives', () => {
+  const probe = ['-e', `console.log(process.env[${JSON.stringify(N19_OPT_OUT_ENV)}] ?? 'UNSET')`];
+  assert.equal(process.env[N19_OPT_OUT_ENV], undefined, `${N19_OPT_OUT_ENV} must not be set in the test process`);
+  assert.equal(runChecked('opt-out probe default', probe, { timeoutMs: 60_000 }).stdout.trim(), 'UNSET');
+  assert.equal(runChecked('opt-out probe explicit', probe, { timeoutMs: 60_000, env: { ...process.env, [N19_OPT_OUT_ENV]: '1' } }).stdout.trim(), '1');
+});
+
+test('M-A20-1: the real checker refuses the N-A19-1 opt-out and fails red', () => {
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools/ci/import-allowlist.mjs'), '--self-test'],
+    { encoding: 'utf8', timeout: SELFTEST_CHILD_TIMEOUT_MS, killSignal: 'SIGKILL', env: { ...process.env, [N19_OPT_OUT_ENV]: '1' } });
+  assert.equal(r.error, undefined, String(r.error));
+  assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, /^N-A19-1 opt-out REFUSED: RULE27_N19_SCRATCH_OPT_OUT is set, but this is the real tools\/ci\/import-allowlist\.mjs; the plain-node step cannot be skipped here \(M-A20-1\)$/m, r.stdout);
+  assert.doesNotMatch(r.stdout, /rule27 self-test:/);
+});
 
 test('G-30 / M-167: disabling unparsed-tracked is killed by the self-test fixtures', () => {
   m167Mutant('drop-cw', (src) => src.replace('hits.push(`${rel}:1: rule27-unparsed-tracked tracked source file under a scan root was not parsed`);', '/* mutant: unparsed-tracked dropped */'), /unparsed-tracked/);
