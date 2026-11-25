@@ -36,7 +36,7 @@ test('A25 mode: src runs through the gate; state, leak check and walk counts are
 process.stdout.write(JSON.stringify({ state: M().state, leak: M().assertNoGateLeak(E), counts: M().counts() }));`);
   assert.equal(r.status, 0, r.err);
   const o = JSON.parse(r.out);
-  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor, backstop_sha256: sha(readFileSync(BACKSTOP)) });
+  assert.deepEqual(o.state, { mode: 'a25', sample_k: P.HELPER_PLAN.sample_k, first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor, backstop_sha256: sha(readFileSync(BACKSTOP)), grant: null });
   assert.equal(o.leak, true);
   assert.ok(o.counts.gate_calls >= 30003, JSON.stringify(o.counts));
   assert.equal(o.counts.walks, P.expectedWalks(o.counts.gate_calls));

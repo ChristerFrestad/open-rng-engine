@@ -13,6 +13,9 @@ const P = await import(new URL('../../verification/harness/run-plan.mjs', import
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i < 0 ? d : process.argv[i + 1]; };
 const runId = arg('run'), stream = arg('stream'), rep = arg('rep'), j = Number(arg('j')), calls = Number(arg('calls')), off = Number(arg('off')), seed = arg('seed', 's');
 const fault = arg('fault', 'none');
+// A25-1: the real preload reads the grant token from its env; under npm test this child's preload is not in helper
+// mode and drops that env, so the fixture takes the token as an argument.
+const grant = arg('grant', null);
 const k = P.loadKTests(ROOT).find((t) => t.id === rep);
 const codec = F.codecFor(k);
 const p = k.parameters || {};
@@ -31,7 +34,7 @@ const src = P.srcManifest(ROOT);
 const loaded = src.list.filter(([f]) => ['src/index.ts', 'src/entropy/index.ts', 'src/mapping/index.ts', 'src/errors.ts'].includes(f)).map(([f, s]) => [f, fault === 'loaded' && f === 'src/entropy/index.ts' ? '0'.repeat(64) : s]);
 // A25: the fixture reports the helper state the real preload would (mode, k, F and the backstop file digest).
 const bsSha = createHash('sha256').update(readFileSync(join(ROOT, 'tools/ci/entropy-backstop.mjs'))).digest('hex');
-const backstop = fault === 'h-nomode' ? null : { mode: P.HELPER_PLAN.mode, sample_k: P.HELPER_PLAN.sample_k + (fault === 'h-k' ? 1 : 0), first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor - (fault === 'h-floor' ? 1 : 0), backstop_sha256: fault === 'h-bs' ? 'b'.repeat(64) : bsSha };
+const backstop = fault === 'h-nomode' ? null : { mode: P.HELPER_PLAN.mode, sample_k: P.HELPER_PLAN.sample_k + (fault === 'h-k' ? 1 : 0), first_walk: P.HELPER_PLAN.first_walk, part_floor: P.HELPER_PLAN.part_floor - (fault === 'h-floor' ? 1 : 0), backstop_sha256: fault === 'h-bs' ? 'b'.repeat(64) : bsSha, grant: fault === 'h-nogrant' ? null : fault === 'h-badgrant' ? `${grant}x` : grant };
 const H = { run_id: runId, stream, rep, j: fault === 'h-j' ? j + 1 : j, calls: fault === 'h-n' ? calls + 1 : calls, src_before: fault === 'src-before' ? 'f'.repeat(64) : src.sha256, loaded, backstop, gate_leak_check: fault !== 'h-leak' };
 if (fault === 'slow') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000); // still running when a sibling voids
 if (fault !== 'no-h') out(F.jsonFrame(F.FRAME.H, H));

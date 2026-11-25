@@ -237,6 +237,15 @@ export const EXIT_A25_GATE = 87;    // the gate refused: bad argument, tampered 
 export const EXIT_A25_WALK = 88;    // A25-4 sampled stack walk failed
 export const HELPER_GATE_URL = 'rng-backstop-gate:node-crypto';
 const HELPER_MODE = process.env[HELPER_MODE_ENV] === HELPER_MODE_ID;
+// A25-1 (G-54; design v2): the launcher hands each helper spawn a FRESH token (grant-<n>@<pid>#<nonce>). The preload
+// reads it once and removes it from the environment, writes it into this process's G-39 proof file together with
+// its own sha256 (writeProof), and, in helper mode, reports it in the H frame (helperState().grant). The token alone
+// is not a proof of preload (a child without the preload could echo it); the proof file, written by the preload
+// itself and checked per spawn by the launcher, is.
+export const HELPER_GRANT_ENV = 'ENTROPY_BACKSTOP_GRANT';
+const SPAWN_TOKEN = typeof process.env[HELPER_GRANT_ENV] === 'string' ? process.env[HELPER_GRANT_ENV] : null;
+const HELPER_GRANT = HELPER_MODE ? SPAWN_TOKEN : null;
+delete process.env[HELPER_GRANT_ENV];
 if (process.env[HELPER_MODE_ENV] !== undefined && !HELPER_MODE) {
   writeSync(2, `entropy-backstop: ${HELPER_MODE_ENV}=${process.env[HELPER_MODE_ENV]} is not a known helper mode\n`);
   process.exit(EXIT_A25_GATE);
@@ -299,7 +308,7 @@ export function makeHelperGate(fill, { walk = helperWalk } = {}) {
 }
 export let HELPER_GATE = null;
 export function helperState() {
-  return HELPER_MODE ? Object.freeze({ mode: HELPER_MODE_ID, sample_k: HELPER_SAMPLE_K, first_walk: HELPER_FIRST_WALK, part_floor: HELPER_PART_FLOOR, backstop_sha256: BACKSTOP_SHA256 }) : null;
+  return HELPER_MODE ? Object.freeze({ mode: HELPER_MODE_ID, sample_k: HELPER_SAMPLE_K, first_walk: HELPER_FIRST_WALK, part_floor: HELPER_PART_FLOOR, backstop_sha256: BACKSTOP_SHA256, grant: HELPER_GRANT }) : null;
 }
 // CTO change 3: after importing src/index.ts the helper hands its namespace here; no export may be the gate.
 function helperAssertNoGateLeak(ns) {
@@ -729,6 +738,20 @@ export function reportEvidenceResult(result) {
   return resultContentDigest(result);
 }
 export function evidenceGrantActive() { return activeGrant !== null && evidenceGrants.has(activeGrant); }
+// A25-1: the token of g while g is the open grant, else null. The launcher passes it to each helper and re-reads it
+// to decide that the grant is still live.
+export function evidenceGrantToken(g) {
+  return g !== null && typeof g === 'object' && evidenceGrants.has(g) && activeGrant === g ? `grant-${g.grant}@${process.pid}` : null;
+}
+// A25-1 (design v2): a fresh per-spawn token, grant-<n>@<pid>#<128-bit nonce>, from the ORIGINAL randomFillSync (the
+// launcher's own crypto calls would go through the wrapped entry points). null unless g is the open grant.
+export function evidenceSpawnToken(g) {
+  const t = evidenceGrantToken(g);
+  const fill = originals.randomFillSync;
+  if (t === null || typeof fill !== 'function') return null;
+  const b = new Uint8Array(16); fill(b);
+  return `${t}#${Buffer.from(b).toString('hex')}`;
+}
 
 // G-55 (HoQ report 505599e..96aaf91): a battery binary is launched only if its real path and sha256 equal an
 // entry of verification/harness/tool-binaries.json, whose source pin equals the frozen tool-pins-v1.1.json
@@ -783,6 +806,19 @@ export const CHILD_EXECUTABLE_ALLOWLIST = Object.freeze(['node', 'git', 'mkdir',
 const TRUSTED_DIRS = Object.freeze([...new Set(['/usr/bin', '/bin', '/usr/local/bin', dirname(process.execPath)].map((d) => { try { return realpathSync(d); } catch { return d; } }))]);
 const PLAIN_WORD = /^[A-Za-z0-9_./:,@%+=-]+$/;
 const PROOF_ENV = 'ENTROPY_BACKSTOP_PROOF_FILE';
+// A25-1: the proof path of each async node child, so a caller can tie the G-39 proof to one child (a helper part).
+const childProofs = new WeakMap();
+// null: not a node child spawned through this hook; false: no proof file; otherwise the proof the child's preload
+// wrote ({ pid, preload_sha256, token } or { invalid: true }) plus the file's mtime_ms.
+export function childPreloadProof(child) {
+  const p = child !== null && typeof child === 'object' ? childProofs.get(child) : undefined;
+  if (p === undefined) return null;
+  if (!existsSync(p)) return false;
+  let body;
+  try { body = JSON.parse(readFileSync(p, 'utf8')); } catch { body = null; }
+  const ok = body !== null && typeof body === 'object' && !Array.isArray(body);
+  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
+}
 let proofDir = null;
 let proofSeq = 0;
 export const proofFailures = [];
@@ -954,7 +990,10 @@ function checkProof(path, label) {
 function writeProof() {
   const p = process.env[PROOF_ENV];
   if (!p) return;
-  try { writeFileSync(p, String(process.pid), { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
+  // A25-1: the proof names this process, the preload's own digest and the spawn token it was started with. 'wx':
+  // a file that already exists is never overwritten, so a stale proof keeps its old pid and token (and voids).
+  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN });
+  try { writeFileSync(p, body, { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
   delete process.env[PROOF_ENV];
 }
 
@@ -1045,6 +1084,7 @@ function installChildProcessHook() {
         return r;
       }
       const child = orig.apply(this, mapped);
+      if (child && typeof child === 'object') childProofs.set(child, proof);
       if (child && typeof child.once === 'function') child.once('exit', () => checkProof(proof, `${name} ${String(args[0]).slice(0, 80)}`));
       return child;
     };
@@ -1140,7 +1180,7 @@ export function install(opts = {}) {
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
     helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts }),
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, token: evidenceGrantToken, spawnToken: evidenceSpawnToken, childProof: childPreloadProof, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });

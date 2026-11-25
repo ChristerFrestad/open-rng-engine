@@ -25,15 +25,27 @@ const tmp = (p) => mkdtempSync(join(tmpdir(), `rg64-${p}-`));
 // spawnPart for the fixture: the same global sequence whatever the partition. faults: { 'attempt:j': fault }.
 function fakeSpawn(plan, { seed = 's', faults = {} } = {}) {
   const tries = new Map();
-  return (stream, j, calls) => {
+  return (stream, j, calls, token) => {
     const a = (tries.get(`${stream.id}:${j}`) ?? 0) + 1; tries.set(`${stream.id}:${j}`, a);
     const off = stream.parts.slice(0, j).reduce((x, y) => x + y, 0);
     const fault = faults[`${a}:${j}`] ?? 'none';
-    return spawn(process.execPath, [FAKE, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls), '--off', String(off), '--seed', seed, '--fault', fault],
-      { env: env(), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+    const c = spawn(process.execPath, [FAKE, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls), '--off', String(off), '--seed', seed, '--fault', fault, '--grant', String(token)],
+      { env: { ...env(), ENTROPY_BACKSTOP_GRANT: String(token) }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+    SPAWNED.set(c, token); return c;
   };
 }
 const expect = () => ({ src: P.srcManifest(ROOT) });
+// A25-1 (design v2): a test grant view. Each spawn gets a fresh token base#n. Under npm test the proof comes from
+// this process's real G-39 hook (the preloaded fixture child writes it). The j-calib copy runs this file in a bare
+// parent (no hook): there the default proof is the record the preload would write. The hook and the preload's proof
+// are tested through preloaded probe processes, and each launcher proof check through explicit views below.
+const MARKED = () => globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.evidence ?? null;
+const TOKEN = 'grant-1@test';
+const BS_SHA = createHash('sha256').update(readFileSync(join(ROOT, 'tools/ci/entropy-backstop.mjs'))).digest('hex');
+const SPAWNED = new WeakMap(); // child -> the token it was spawned with
+let tokenSeq = 0;
+const goodProof = (c) => ({ pid: c.pid, preload_sha256: BS_SHA, token: SPAWNED.get(c), mtime_ms: Date.now() });
+const grantView = ({ base = TOKEN, live = () => true, next = () => `${base}#${++tokenSeq}`, proof = (c) => (MARKED() ? MARKED().childProof(c) : goodProof(c)) } = {}) => ({ base, live, next, proof });
 // The same sequence, one pass, in this process (what the fixture emits for global indices 0..n-1).
 function onePass(rep, n, seed = 's') {
   const r = spawnSync(process.execPath, [FAKE, '--run', 'x', '--stream', 'x', '--rep', rep, '--j', '0', '--calls', String(n), '--off', '0', '--seed', seed], { env: env(), stdio: ['ignore', 'ignore', 'inherit', 'pipe'], maxBuffer: 1 << 28 });
@@ -96,7 +108,7 @@ async function runFake(ids, { M, N, observations = {}, faults = {}, maxAttempts 
   const dir = tmp('run');
   try {
     const consumers = await L.wave1Consumers(stream, { observations });
-    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults, seed }), runDir: dir, consumers, expect: expect(), maxAttempts });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults, seed }), runDir: dir, consumers, expect: expect(), maxAttempts, grant: grantView() });
     const stats = res.counted ? L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep))) : null;
     return { plan, stream, res, stats, consumers };
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -132,7 +144,7 @@ test('D22-3: a shared stream read as w=1 values and w=2 windows; windows never s
   const consumers = { fixed: [pairCount(1, 50), pairCount(2, 40)], seq: [] };
   const dir = tmp('w');
   try {
-    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect() });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
     const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)));
     const v = onePass(stream.rep, 80);
     const tally = (arr) => { const m = new Map(); for (const k of arr) m.set(k, (m.get(k) ?? 0) + 1); return [...m].sort(); };
@@ -146,7 +158,7 @@ const FAULTS = [
   ['extra', /more than n_j/], ['t-count', /trailer count/], ['t-digest', /trailer digest differs/], ['shape', /outcome 0: /],
   ['ragged', /not whole outcomes/], ['garbage', /unknown type/], ['h-j', /H frame j\/n_j/], ['h-n', /H frame j\/n_j/],
   ['src-before', /src_before/], ['src-after', /srcDigest_after/], ['loaded', /as loaded differs .*D22-4/],
-  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['t-walks', /trailer A25 walks .*A25-4/], ['h-floor', /part floor \d+ differs from the plan .*A25-4b/],
+  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['h-nogrant', /H grant is not this spawn's token .*A25-1/], ['h-badgrant', /H grant is not this spawn's token .*A25-1/], ['t-walks', /trailer A25 walks .*A25-4/], ['h-floor', /part floor \d+ differs from the plan .*A25-4b/],
 ];
 for (const [fault, why] of FAULTS) {
   test(`D22-8 integrity void: ${fault} voids the attempt, the void reason is kept, no statistic is computed`, async () => {
@@ -182,7 +194,7 @@ test('Q3: fixed accumulators are merged in part order', async () => {
   const consumers = { fixed: [seqAcc], seq: [] };
   const dir = tmp('ord');
   try {
-    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect() });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
     const v = onePass(stream.rep, 30);
     assert.deepEqual(L.streamStatistics(res, stream, consumers, null).order, [0, 10, 20].map((t) => v[t].join(',')));
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -206,7 +218,7 @@ test('Q3 (b): the payload file is re-hashed against d_j before use; a changed by
   const dir = tmp('sp');
   try {
     const consumers = await L.wave1Consumers(stream, { observations: { [id]: 5 } });
-    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect() });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
     assert.equal(res.counted, true);
     const codec = F.codecFor(kOf(stream.rep));
     const next = L.payloadReader(res, codec); assert.equal(typeof next(), 'number');
@@ -284,15 +296,15 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
   const plan = P.buildPlan({ runId: 'real', M: { [id]: 40 }, N: 2 });
   const stream = plan.streams[0];
   const dir = tmp('real');
-  const spawnPart = (s, j, calls) => spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25' }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25', ENTROPY_BACKSTOP_GRANT: token }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
   try {
     const consumers = await L.wave1Consumers(stream);
-    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect() });
+    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), grant: grantView() });
     assert.equal(res.counted, true, JSON.stringify(res.attempts));
     assert.ok(res.parts.every((p) => p.H.loaded.some(([f]) => f === 'src/entropy/index.ts')));
     const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)));
     assert.equal(st[id].outcomes, 40);
-    const bad = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: { src: { ...expect().src, list: expect().src.list.map(([f, s]) => [f, f === 'src/errors.ts' ? '1'.repeat(64) : s]) } }, maxAttempts: 1 });
+    const bad = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: { src: { ...expect().src, list: expect().src.list.map(([f, s]) => [f, f === 'src/errors.ts' ? '1'.repeat(64) : s]) } }, maxAttempts: 1, grant: grantView() });
     assert.match(bad.attempts[0].void, /src\/errors\.ts as loaded differs .*D22-4/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -313,7 +325,7 @@ test('A25-4b: a counted plan with a part below the floor is refused before any p
   const stream = plan.streams[0]; const dir = tmp('cf'); let spawned = 0;
   try {
     const consumers = await L.wave1Consumers(stream);
-    await assert.rejects(L.runStreamCore(plan, stream, { spawnPart: (...a) => { spawned++; return fakeSpawn(plan)(...a); }, runDir: dir, consumers, expect: expect() }), /counted plan part 0 has 20 outcomes, below the A25 part floor 91920 .*A25-4b/);
+    await assert.rejects(L.runStreamCore(plan, stream, { spawnPart: (...a) => { spawned++; return fakeSpawn(plan)(...a); }, runDir: dir, consumers, expect: expect(), grant: grantView() }), /counted plan part 0 has 20 outcomes, below the A25 part floor 91920 .*A25-4b/);
     assert.equal(spawned, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -324,9 +336,9 @@ test('A25-4b: a counted part at the floor counts; one whose trailer reports fewe
   assert.equal(stream.parts[0], P.HELPER_PLAN.part_floor);
   try {
     const consumers = await L.wave1Consumers(stream);
-    const ok = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), maxAttempts: 1 });
+    const ok = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant: grantView() });
     assert.equal(ok.counted, true, JSON.stringify(ok.attempts));
-    const bad = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults: { '1:0': 't-floor' } }), runDir: dir, consumers, expect: expect(), maxAttempts: 1 });
+    const bad = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults: { '1:0': 't-floor' } }), runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant: grantView() });
     assert.equal(bad.counted, false); assert.match(bad.attempts[0].void, /gate calls 91919 below the part floor 91920 in a counted run .*A25-4b/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -337,4 +349,122 @@ test('A25-4b: runStreamPlan (the evidence path) refuses a plan that is not count
     await assert.rejects(L.runStreamPlan(plan, { runDir: join(d, 'run') }), /counted plans only .*A25-4b/);
     assert.equal(existsSync(join(d, 'run')), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---------- A25-1 (design v2): parts run inside a live grant, with fresh per-spawn tokens and per-spawn proofs ----------
+const A25_1_ID = 'shuffle/adjacency-mod4/n-52';
+async function runGrant(grant, { faults = {} } = {}) {
+  const plan = P.buildPlan({ runId: 'g1', M: { [A25_1_ID]: 40 }, N: 2 });
+  const stream = plan.streams[0]; const dir = tmp('g1'); let spawned = 0;
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    const fs = fakeSpawn(plan, { faults });
+    const spawnPart = (...a) => { spawned++; return fs(...a); };
+    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant });
+    return { res, spawned };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+const preloadedProbe = (body, extraEnv = {}) => {
+  const d = tmp('probe'); const f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, body);
+    const e = { ...env(), ...extraEnv }; delete e.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+};
+test('A25-1: runStreamCore refuses to start without a grant view; nothing is spawned', async () => {
+  const f = () => 'x';
+  for (const g of [undefined, null, {}, { base: TOKEN, live: f, next: f }, { base: TOKEN, live: f, proof: f }, { base: 1, live: f, next: f, proof: f }]) {
+    await assert.rejects(runGrant(g), /needs a live evidence grant \(A25-1\)/);
+  }
+});
+test('A25-1: with a live grant each part gets its own fresh token, recorded per part, and the attempt counts', async () => {
+  const { res, spawned } = await runGrant(grantView());
+  assert.equal(res.counted, true, JSON.stringify(res.attempts)); assert.equal(spawned, 2);
+  const t = res.attempts[0].tokens;
+  assert.equal(t.length, 2); assert.notEqual(t[0], t[1]); for (const x of t) assert.match(x, /^grant-1@test#.+/);
+  assert.deepEqual(res.parts.map((p) => p.token), t);
+});
+test('A25-1: a token reused across spawns voids the part (old M31)', async () => {
+  const { res, spawned } = await runGrant(grantView({ next: () => `${TOKEN}#same` }));
+  assert.equal(res.counted, false); assert.equal(spawned, 1);
+  assert.match(res.attempts[0].void, /spawn token is not fresh \(A25-1\)/);
+});
+test('A25-1: a token that is not base#nonce voids the part', async () => {
+  for (const next of [() => `grant-2@test#${++tokenSeq}`, () => `${TOKEN}#`, () => TOKEN, () => null]) {
+    const { res } = await runGrant(grantView({ next }));
+    assert.equal(res.counted, false); assert.match(res.attempts[0].void, /spawn token is not fresh \(A25-1\)/);
+  }
+});
+test('A25-1: a grant that is not live before a spawn voids the part and spawns nothing', async () => {
+  const { res, spawned } = await runGrant(grantView({ live: () => false }));
+  assert.equal(res.counted, false); assert.equal(spawned, 0);
+  assert.match(res.attempts[0].void, /evidence grant is not live \(A25-1\)/);
+});
+test('A25-1: a grant that closes after the spawns voids at the H frame', async () => {
+  let calls = 0;
+  const { res, spawned } = await runGrant(grantView({ live: () => ++calls <= 2 }));
+  assert.equal(spawned, 2); assert.equal(res.counted, false);
+  assert.match(res.attempts[0].void, /evidence grant closed before the H frame \(A25-1\)/);
+});
+test('A25-1: each proof check voids the part on its own (missing, invalid, another spawn, digest, pid, older than the spawn)', async () => {
+  const cases = [
+    [() => false, /did not prove the backstop preload/], [() => null, /did not prove the backstop preload/],
+    [(c) => ({ invalid: true, mtime_ms: Date.now() }), /did not prove the backstop preload/],
+    [(c) => ({ ...goodProof(c), token: `${TOKEN}#other-spawn` }), /proof token is not this spawn's token/],
+    [(c) => ({ ...goodProof(c), preload_sha256: 'a'.repeat(64) }), /proof preload digest differs from the bound backstop/],
+    [(c) => ({ ...goodProof(c), pid: c.pid + 1 }), /proof names another process/],
+    [(c) => ({ ...goodProof(c), mtime_ms: Date.now() - 60000 }), /proof older than the spawn/],
+  ];
+  for (const [proof, why] of cases) {
+    const { res } = await runGrant(grantView({ proof }));
+    assert.equal(res.counted, false, String(why)); assert.match(res.attempts[0].void, why);
+    assert.match(res.attempts[0].void, /\(A25-1\)/);
+  }
+  const ok = await runGrant(grantView({ proof: goodProof }));
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+});
+test('A25-1: the proof is written by the preload itself: child pid, preload sha256 and the spawn token (probe)', () => {
+  const tok = 'grant-9@probe#00ff';
+  const got = preloadedProbe([
+    "import { spawn } from 'node:child_process';",
+    "const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;",
+    `const c = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', env: { ...process.env, ENTROPY_BACKSTOP_GRANT: '${tok}' } });`,
+    "const t0 = Date.now();",
+    "c.on('close', () => { const p = ev.childProof(c); process.stdout.write(JSON.stringify({ p, pid: c.pid, fresh: p && p.mtime_ms >= t0 - 20, other: [ev.childProof({}), ev.childProof(null), ev.token({ grant: 1 }), ev.spawnToken({ grant: 1 })] })); });",
+  ].join('\n'));
+  assert.equal(got.p.pid, got.pid); assert.equal(got.p.preload_sha256, BS_SHA); assert.equal(got.p.token, tok); assert.equal(got.fresh, true);
+  assert.deepEqual(got.other, [null, null, null, null]);
+});
+test('A25-1: a helper is spawned only as exactly --import <bound backstop> <helper> <args>, without NODE_OPTIONS', () => {
+  const plan = P.buildPlan({ runId: 'a', M: { [A25_1_ID]: 2 }, N: 1 });
+  const want = L.helperSpawnArgs(plan, plan.streams[0], 0, 2);
+  const BS = join(ROOT, 'tools/ci/entropy-backstop.mjs');
+  assert.equal(want[1], BS); assert.ok(want[1].startsWith('/'));
+  assert.deepEqual(L.assertHelperSpawn([...want], {}, want), want);
+  const bad = [
+    [want.slice(2), {}], [['--require', ...want.slice(1)], {}], [[...want.slice(0, 2), '--require', '/tmp/x.cjs', ...want.slice(2)], {}],
+    [[...want.slice(0, 2), '--import', '/tmp/x.mjs', ...want.slice(2)], {}], [['--import', `${BS}x`, ...want.slice(2)], {}],
+    [['--require', '/tmp/x.cjs', ...want], {}], [['--import', '/tmp/x.mjs', ...want], {}],
+    [[want[0], want[1], FAKE, ...want.slice(3)], {}], [[...want.slice(0, -1), '3'], {}], [[...want, '--extra'], {}],
+    [[...want], { NODE_OPTIONS: '' }], [[...want], { NODE_OPTIONS: '--require /tmp/x.cjs' }], [null, {}], [[...want], null],
+  ];
+  for (const [args, e] of bad) assert.throws(() => L.assertHelperSpawn(args, e, want), /not exactly --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused \(A25-1, A25-6 iv\)/);
+});
+test('A25-1: liveGrant refuses no grant and a grant object the backstop never opened', () => {
+  const why = MARKED() ? /no open evidence grant \(A25-1\)/ : /backstop preload is not loaded \(A25-1\)/;
+  for (const g of [null, undefined, { grant: 1 }]) assert.throws(() => L.liveGrant(g), why);
+});
+test('A25-1: the header names the preload (path, digest of the bound file, helper mode, grant)', () => {
+  const plan = P.buildPlan({ runId: 'h', M: { [A25_1_ID]: 2 }, N: 1 });
+  const h = L.header(plan, P.bindings(ROOT), {}, L.preloadRecord(TOKEN));
+  assert.deepEqual(h.preload, { path: 'tools/ci/entropy-backstop.mjs', sha256: h.bindings.files['tools/ci/entropy-backstop.mjs'], helper_mode: P.HELPER_PLAN.mode, grant: TOKEN });
+  assert.equal(h.preload.sha256, BS_SHA);
+});
+test('A25-1: the helper-mode preload reads the spawn token once, removes it from the env and reports it', () => {
+  const body = "const s = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].helper.state; process.stdout.write(JSON.stringify({ grant: s.grant, env: process.env.ENTROPY_BACKSTOP_GRANT ?? null }));\n";
+  assert.deepEqual(preloadedProbe(body, { ENTROPY_BACKSTOP_HELPER: 'a25', ENTROPY_BACKSTOP_GRANT: `${TOKEN}#7` }), { grant: `${TOKEN}#7`, env: null });
+  assert.deepEqual(preloadedProbe(body, { ENTROPY_BACKSTOP_HELPER: 'a25' }), { grant: null, env: null });
 });

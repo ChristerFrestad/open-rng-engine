@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statfsSync, writeFileSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FRAME, FrameReader, codecFor } from './stream-frames.mjs';
 import { outcomeShapeError } from './collector.mjs';
@@ -47,6 +47,8 @@ function partReader(ctx, j) {
       if (b.mode !== hx.mode || b.sample_k !== hx.sample_k || b.first_walk !== hx.first_walk) return fail(`H helper mode ${b.mode}/k=${b.sample_k}/F=${b.first_walk} differs from the plan ${hx.mode}/k=${hx.sample_k}/F=${hx.first_walk} (A25-4)`);
       if (b.part_floor !== hx.part_floor) return fail(`H helper part floor ${b.part_floor} differs from the plan ${hx.part_floor} (A25-4b)`);
       if (b.backstop_sha256 !== hx.backstop_sha256) return fail('H backstop digest differs from the bound preload (A25-1)');
+      if (typeof b.grant !== 'string' || b.grant !== st.token) return fail('H grant is not this spawn\'s token (A25-1)');
+      if (!ctx.grant.live()) return fail('evidence grant closed before the H frame (A25-1)');
       if (h.gate_leak_check !== true) return fail('H gate leak check did not run (A25-3)');
       return;
     }
@@ -77,6 +79,14 @@ function partReader(ctx, j) {
   st.finish = (code, signal) => {
     if (st.payloadFd !== null) { closeSync(st.payloadFd); st.payloadFd = null; }
     try { st.reader.end(); } catch (e) { fail(e.message); }
+    // A25-1 (design v2): this spawn's own proof, written by the preload: created after the spawn, naming this child,
+    // the bound preload digest and this spawn's fresh token. A stale, copied or foreign proof voids the part.
+    const pr = ctx.grant.proof(st.child);
+    if (pr === null || pr === false || typeof pr !== 'object' || pr.invalid) fail('helper did not prove the backstop preload (A25-1)');
+    else if (pr.token !== st.token) fail('proof token is not this spawn\'s token (A25-1)');
+    else if (pr.preload_sha256 !== ctx.helperExpect.backstop_sha256) fail('proof preload digest differs from the bound backstop (A25-1)');
+    else if (pr.pid !== st.child.pid) fail('proof names another process (A25-1)');
+    else if (!(pr.mtime_ms >= st.spawnedAt - PROOF_CLOCK_SLACK_MS)) fail('proof older than the spawn (A25-1)');
     if (code !== 0 || signal) fail(`helper exit ${code}${signal ? ` signal ${signal}` : ''}`);
     if (!st.H) fail('no H frame');
     if (!st.T) fail('no trailer');
@@ -97,7 +107,11 @@ function partReader(ctx, j) {
 
 // ---------------- one stream: attempts until one counts (integrity voids only) ----------------
 export async function runStreamCore(plan, stream, opts) {
-  const { spawnPart, runDir, consumers = { fixed: [], seq: [] }, expect, maxAttempts = 3, kTests = loadKTests() } = opts;
+  const { spawnPart, runDir, consumers = { fixed: [], seq: [] }, expect, maxAttempts = 3, kTests = loadKTests(), grant } = opts;
+  // A25-1: every part runs inside a live evidence grant: { base, live(), next(), proof(child) }. next() gives each
+  // spawn a fresh token base#nonce; a token is never used twice in a run (design v2).
+  if (!grant || typeof grant.base !== 'string' || typeof grant.live !== 'function' || typeof grant.next !== 'function' || typeof grant.proof !== 'function') throw new Error(`${stream.id}: runStreamCore needs a live evidence grant (A25-1)`);
+  const usedTokens = new Set();
   const kRep = kTests.find((k) => k.id === stream.rep);
   const codec = codecFor(kRep);
   if (codec.bytes !== stream.outcome_bytes) throw new Error(`${stream.id}: codec ${codec.bytes} B != plan ${stream.outcome_bytes} B`);
@@ -111,7 +125,7 @@ export async function runStreamCore(plan, stream, opts) {
   mkdirSync(runDir, { recursive: true });
   const attempts = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers, helperExpect, counted };
+    const ctx = { stream, kRep, codec, expect, attempt, runId: plan.run_id, runDir, consumers, helperExpect, counted, grant };
     const parts = stream.parts.map((_, j) => partReader(ctx, j));
     const kids = [];
     const order = []; // void reasons in the order they happened; a part killed because another voided says so
@@ -119,7 +133,13 @@ export async function runStreamCore(plan, stream, opts) {
     const noteVoid = (st) => { if (st.void && !order.includes(st.void)) order.push(st.void); };
     await Promise.all(parts.map((st) => new Promise((done) => {
       let child;
-      try { child = spawnPart(stream, st.j, stream.parts[st.j]); } catch (e) { st.void = `part ${st.j}: spawn refused: ${e.message}`; noteVoid(st); return done(); }
+      try {
+        if (!grant.live()) throw new Error('evidence grant is not live (A25-1)');
+        const token = grant.next();
+        if (typeof token !== 'string' || !token.startsWith(`${grant.base}#`) || token.length <= grant.base.length + 1 || usedTokens.has(token)) throw new Error('spawn token is not fresh (A25-1)');
+        usedTokens.add(token); st.token = token; st.spawnedAt = Date.now();
+        child = spawnPart(stream, st.j, stream.parts[st.j], token); st.child = child;
+      } catch (e) { st.void = `part ${st.j}: spawn refused: ${e.message}`; noteVoid(st); return done(); }
       kids.push({ child, st });
       child.stdio[3].on('data', (chunk) => {
         // A part is killed only once it has sent data: its backstop is installed (and has proved it to a
@@ -137,11 +157,11 @@ export async function runStreamCore(plan, stream, opts) {
     })));
     for (const p of parts) noteVoid(p);
     if (order.length) {
-      attempts.push({ attempt, void: order[0], all_void_reasons: order });
+      attempts.push({ attempt, void: order[0], all_void_reasons: order, tokens: parts.map((p) => p.token ?? null) });
       for (const p of parts) if (p.payloadPath) rmSync(p.payloadPath, { force: true });
       continue; // the voided attempt's accumulators are dropped here, never finished (D22-8)
     }
-    attempts.push({ attempt, void: null });
+    attempts.push({ attempt, void: null, tokens: parts.map((p) => p.token) });
     const d = parts.map((p) => p.d);
     const digest = sha(`${stream.id}\n${plan.run_id}\n${stream.parts.join(',')}\n${d.join('\n')}`);
     return { counted: true, stream: stream.id, attempts, d, digest, parts, payloadFiles: parts.map((p) => p.payloadPath) };
@@ -257,27 +277,56 @@ export function assertDisk(dir, bytes) {
 const COUNTED = new WeakMap();
 export function streamCounted(r) { return r !== null && typeof r === 'object' && COUNTED.get(r) === r.digest && typeof r.digest === 'string'; }
 
-export function header(plan, bind, clone) {
-  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, counted: plan.counted === true, helper: plan.helper ?? null, bindings: bind, clone };
+// A25-1 / D22-7: the header names the preload every helper ran under (path, digest, helper mode) and the grant.
+export function header(plan, bind, clone, preload = null) {
+  return { plan_digest: planDigest(plan), run_id: plan.run_id, M_per_entry: plan.M_per_entry, stream_map: plan.stream_map, counting_rule: plan.counting_rule, counted: plan.counted === true, helper: plan.helper ?? null, preload, bindings: bind, clone };
+}
+export function preloadRecord(grantToken) {
+  return { path: 'tools/ci/entropy-backstop.mjs', sha256: sha(readFileSync(BACKSTOP)), helper_mode: HELPER_PLAN.mode, grant: grantToken };
 }
 
+// A25-1 / A25-6 (iv): a helper is started only as `node --import <bound backstop, absolute> <helper> <helper args>`,
+// with no other node flag, and with no NODE_OPTIONS in the env the launcher builds. (Under the preload the G-39 hook
+// then adds exactly its own `--import <backstop>` to the child's NODE_OPTIONS; nothing else can be injected there.)
+export const PROOF_CLOCK_SLACK_MS = 20; // file mtime vs Date.now(): kernel timestamps can trail by a tick
+export function helperSpawnArgs(plan, stream, j, calls) {
+  return ['--import', BACKSTOP, HELPER, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls)];
+}
+export function assertHelperSpawn(args, env, want) {
+  const ok = Array.isArray(args) && Array.isArray(want) && isAbsolute(BACKSTOP) && args.length === want.length && args.every((a, i) => a === want[i])
+    && args[0] === '--import' && args[1] === BACKSTOP && args[2] === HELPER
+    && env !== null && typeof env === 'object' && !Object.prototype.hasOwnProperty.call(env, 'NODE_OPTIONS');
+  if (!ok) throw new Error('helper spawn is not exactly --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused (A25-1, A25-6 iv)');
+  return args;
+}
 function realSpawnPart(plan) {
-  return (stream, j, calls) => {
+  return (stream, j, calls, token) => {
     const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ENTROPY_BACKSTOP_CHANNEL; env.ENTROPY_BACKSTOP_HELPER = HELPER_PLAN.mode;
-    return spawn(process.execPath, ['--import', BACKSTOP, HELPER, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls)],
-      { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+    env.ENTROPY_BACKSTOP_GRANT = token;
+    const want = helperSpawnArgs(plan, stream, j, calls);
+    return spawn(process.execPath, assertHelperSpawn([...want], env, want), { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
   };
+}
+// A25-1: the live-grant view the launcher hands runStreamCore, from the preload's own grant API.
+export function liveGrant(g) {
+  const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.evidence;
+  if (!ev || typeof ev.token !== 'function' || typeof ev.childProof !== 'function' || typeof ev.spawnToken !== 'function') throw new Error('evidence refused: the backstop preload is not loaded (A25-1)');
+  const token = ev.token(g);
+  if (token === null) throw new Error('evidence refused: no open evidence grant (A25-1)');
+  return Object.freeze({ base: token, live: () => ev.token(g) === token, next: () => ev.spawnToken(g), proof: (child) => ev.childProof(child) });
 }
 
 // Runs every stream of the plan from the dedicated pinned clone this module is loaded from.
-export async function runStreamPlan(plan, { runDir, pinned, observations = {}, maxAttempts = 3, onStream = null } = {}) {
+export async function runStreamPlan(plan, { runDir, pinned, observations = {}, maxAttempts = 3, onStream = null, grant: g = null } = {}) {
   // A25-4b: the evidence path runs counted plans only, so the part floor always applies to it.
   if (plan === null || typeof plan !== 'object' || plan.counted !== true) throw new Error('runStreamPlan runs counted plans only (plan.counted !== true, A25-4b)');
   assertEvidenceRunReady(ROOT);
+  const grant = liveGrant(g); // A25-1: refused before anything is spawned or written unless a grant is open
   const clone = pinnedCloneState(ROOT, pinned);
   if (!clone.ok) throw new Error(`evidence refused (D22-5): ${clone.why.join('; ')}`);
   const bind = bindings(ROOT);
-  const head = header(plan, bind, { head: clone.head, tree: clone.tree, clean: clone.clean });
+  const head = header(plan, bind, { head: clone.head, tree: clone.tree, clean: clone.clean }, preloadRecord(grant.base));
+  if (head.preload.sha256 !== bind.files['tools/ci/entropy-backstop.mjs']) throw new Error('preload changed while binding (A25-1)');
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, 'header.json'), JSON.stringify(head, null, 1));
   const expect = { src: srcManifest(ROOT) };
@@ -292,7 +341,7 @@ export async function runStreamPlan(plan, { runDir, pinned, observations = {}, m
       if (bad.length) throw new Error(`${stream.id}: checkpoint not reusable: ${bad.join(', ')} (D22-7)`);
     }
     assertDisk(runDir, payloadBytes(stream, consumers));
-    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan), runDir, consumers, expect, maxAttempts });
+    const res = await runStreamCore(plan, stream, { spawnPart: realSpawnPart(plan), runDir, consumers, expect, maxAttempts, grant });
     const out = { stream: stream.id, counted: res.counted, attempts: res.attempts, d: res.d, digest: res.digest, entries: stream.entries.map((e) => e.id), bindings: bind };
     if (res.counted) {
       COUNTED.set(out, out.digest);
