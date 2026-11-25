@@ -10,9 +10,15 @@
 // numbers are equal in distribution only, never equal stream for stream: on the same draw script the
 // permutations differ, and they agree only through the pinned mirror (production = reverse of the
 // harness permutation with every card v replaced by n - 1 - v, on reflected draws x_t = (n - 1 - t) - c_t).
-// The exhaustive n = 4 and n = 5 tests below check that the laws (permutation, card 0, Lehmer digits,
-// adjacency mod/div labels) are exactly equal. Neither src nor the harness is changed here; any change
-// to either needs a CTO ruling.
+// The exhaustive tests below (every draw tuple for n = 2..7, 5040 tuples at n = 7) check that the full
+// permutation multisets and the reduction laws (card 0, Lehmer digits, adjacency mod/div labels) are
+// exactly equal.
+//
+// HoQ condition: this equality in law holds only under H0 (uniform index draws). Under a defective
+// generator the mirror moves the bias (the non-uniform tape test below gives different permutation laws
+// for the two orders), so harness power and MDD figures for specific alternatives do not carry over to
+// the production order unless they are re-derived or re-run there. Neither src nor the harness is
+// changed here; any change to either needs a CTO ruling.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shuffleWithFill, sampleWithFill, WIDTH_SMALL } from '../src/mapping/index.ts';
@@ -186,30 +192,34 @@ function laws(perms) {
 
 const fact = (n) => (n <= 1 ? 1 : n * fact(n - 1));
 
-for (const n of [4, 5]) {
-  test(`SRC-1: exhaustive n = ${n}: production and mirrored harness agree per tuple and in every reduction law`, () => {
-    const tuples = allDrawTuples(n);
+// Production order and harness order (forward, raw and mirrored) on every draw tuple of n.
+function orders(n) {
+  const tuples = allDrawTuples(n);
+  const prod = tuples.map((c) => {
+    const fill = tapeFill(c);
+    const out = shuffleWithFill(iota(n), fill);
+    assert.equal(fill.calls(), Math.max(n - 1, 0));
+    return out;
+  });
+  return { tuples, prod, harnessSame: tuples.map((c) => forward(n, c)), harnessMirrored: tuples.map((c) => mirror(forward(n, reflect(c, n)))) };
+}
+
+for (const n of [2, 3, 4, 5, 6, 7]) {
+  test(`SRC-1: exhaustive n = ${n} (${fact(n)} draw tuples): equal permutation multisets and reduction laws under H0`, () => {
+    const { tuples, prod, harnessSame, harnessMirrored } = orders(n);
     assert.equal(tuples.length, fact(n));
     // The reflection c -> x is a bijection of the draw-tuple set onto itself.
     const key = (a) => a.join(',');
     const tupleSet = new Set(tuples.map(key));
     const reflected = new Set(tuples.map((c) => key(reflect(c, n))));
+    assert.equal(tupleSet.size, tuples.length);
     assert.equal(reflected.size, tuples.length);
     for (const k of reflected) assert.ok(tupleSet.has(k));
-
-    const prod = tuples.map((c) => {
-      const fill = tapeFill(c);
-      const out = shuffleWithFill(iota(n), fill);
-      assert.equal(fill.calls(), n - 1);
-      return out;
-    });
-    const harnessSame = tuples.map((c) => forward(n, c));
-    const harnessMirrored = tuples.map((c) => mirror(forward(n, reflect(c, n))));
-    // Per tuple: production equals the mirrored harness, and is not the raw harness on the same draws.
+    // Per tuple: production equals the mirrored harness, and (n >= 3) is not the raw harness on the same draws.
     for (let k = 0; k < tuples.length; k++) assert.deepEqual(prod[k], harnessMirrored[k], `tuple ${key(tuples[k])}`);
-    assert.ok(prod.some((p, k) => key(p) !== key(harnessSame[k])), 'never equal stream for stream');
+    if (n >= 3) assert.ok(prod.some((p, k) => key(p) !== key(harnessSame[k])), 'never equal stream for stream');
 
-    // Exact uniform permutation law: every permutation exactly once in each order.
+    // Exact uniform law from an independent enumeration of all permutations.
     const reference = laws(allPerms(n));
     assert.equal(reference.perm.length, fact(n));
     for (const [, count] of reference.perm) assert.equal(count, 1);
@@ -217,8 +227,35 @@ for (const n of [4, 5]) {
     for (const [, count] of reference.lehmer) assert.equal(count, 1);
     const lp = laws(prod);
     const lh = laws(harnessSame);
+    const lm = laws(harnessMirrored);
+    assert.deepEqual(lp.perm, lh.perm, 'full permutation multiset: production = harness');
     assert.deepEqual(lp, reference, 'production law is the exact uniform law');
     assert.deepEqual(lh, reference, 'harness law is the exact uniform law');
+    assert.deepEqual(lm, reference, 'mirrored harness law is the exact uniform law');
     assert.deepEqual(lp, lh, 'equal in distribution: permutation, card 0, Lehmer digits, adjacency mod/div labels');
+  });
+}
+
+// Exact weighted law of the permutation (and card 0) when draw value 0 has weight 3 and every other value
+// weight 1: a below() biased to 0. Weights are integers, so the comparison is exact.
+function biasedLaws(tuples, perms) {
+  const w = (c) => c.reduce((acc, v) => acc * (v === 0 ? 3 : 1), 1);
+  const tally = (f) => {
+    const m = new Map();
+    perms.forEach((p, k) => { const kk = JSON.stringify(f(p)); m.set(kk, (m.get(kk) ?? 0) + w(tuples[k])); });
+    return [...m.entries()].sort();
+  };
+  return { perm: tally((p) => p), card0: tally((p) => p[0]) };
+}
+
+for (const n of [4, 5]) {
+  test(`SRC-1: under a non-uniform tape (below() biased to 0, n = ${n}) the two orders give different laws`, () => {
+    const { tuples, prod, harnessSame } = orders(n);
+    const bp = biasedLaws(tuples, prod);
+    const bh = biasedLaws(tuples, harnessSame);
+    const uniform = (law) => new Set(law.map(([, c]) => c)).size === 1;
+    assert.ok(!uniform(bp.perm) && !uniform(bh.perm), 'the tape is visibly non-uniform in both orders');
+    assert.notDeepEqual(bp.perm, bh.perm, 'the check tells the two orders apart off H0');
+    assert.notDeepEqual(bp.card0, bh.card0, 'the mirror moves the bias: card 0 laws differ off H0');
   });
 }
