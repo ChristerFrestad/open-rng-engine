@@ -32,11 +32,14 @@ const MANIFEST_ENV = 'ENTROPY_BACKSTOP_MANIFEST';
 // carrier: every helper env is built by the launcher's own export, and the forged-sha cases check that a sha offered
 // outside the grant is ignored.
 // ---- OPEN: named exports TE asked Backend for (the mutant runner overrides them; NOT-APPLIED until they exist) ----
-//   tools/ci/a25-manifest.mjs                 readManifest(path, expectedSha256) -> manifest (the preload's header check)
+//   tools/ci/a25-manifest.mjs                 buildManifest(root, relpaths) -> { manifest, bytes, sha256 } (sync)
+//                                             readManifest(path, expectedSha256) -> frozen view; exits 90 itself
+//                                             verifyLoad(view, url, readBytes?) -> { ok, bytes, rel } | { ok:false, code, why }
 //   verification/harness/stream-launcher.mjs  helperSpawnEnv(baseEnv, { token, manifestPath, manifestSha256 }) -> env
 //                                             (the builder realSpawnPart uses; binds the sha into the grant)
-// The token passed here is a test token; if the preload must verify it against a live grant, Backend says how a
-// direct test spawn obtains one, and only launchEnv() below changes.
+// Shapes confirmed by Backend 22:01 CET. The preload does not verify the token (the launcher checks proof + token
+// after spawn, A25-1), so a direct test spawn may use any token without '|'. The carrier format stays Backend's:
+// this file never builds or parses the grant itself.
 // Env names used ONLY as forged values (any spawner could set them); the preload must ignore all of them.
 const FORGED_SHA_NAMES = ['ENTROPY_BACKSTOP_MANIFEST_SHA256', 'ENTROPY_BACKSTOP_MANIFEST_DIGEST', 'ENTROPY_BACKSTOP_HEADER_MANIFEST_SHA256', 'MANIFEST_SHA256'];
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
@@ -75,18 +78,24 @@ function manifestFor(root, outside = []) {
   assert.ok(existsSync(mod), 'tools/ci/a25-manifest.mjs is missing (Backend integration pending)');
   const relpaths = listFiles(root).filter((p) => !outside.includes(p));
   const script = `const M = await import(${JSON.stringify(pathToFileURL(mod).href)});
-const m = await M.buildManifest(${JSON.stringify(root)}, ${JSON.stringify(relpaths)});
-process.stdout.write(typeof m === 'string' ? m : JSON.stringify(m));`;
+const o = M.buildManifest(${JSON.stringify(root)}, ${JSON.stringify(relpaths)});
+if (!o || typeof o.then === 'function') { process.stderr.write('buildManifest must be sync and return { manifest, bytes, sha256 }'); process.exit(3); }
+const b = typeof o.bytes === 'string' ? Buffer.from(o.bytes, 'utf8') : Buffer.from(o.bytes);
+process.stdout.write(JSON.stringify({ manifest: o.manifest, bytes: b.toString('base64'), sha256: o.sha256 }));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: root, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, `buildManifest failed: ${r.stderr}`);
-  const m = JSON.parse(r.stdout);
+  const o = JSON.parse(r.stdout), bytes = Buffer.from(o.bytes, 'base64');
+  assert.equal(o.sha256, sha256(bytes), 'buildManifest sha256 is the sha256 of the exact bytes it returns');
+  const m = JSON.parse(bytes.toString('utf8'));
+  assert.deepEqual(m, o.manifest, 'buildManifest bytes are the serialised manifest');
   assert.equal(m.version, 1, 'manifest version 1');
   assert.equal(m.root, root, 'manifest root is the absolute tree root');
   assert.deepEqual(Object.keys(m.entries).sort(), relpaths, 'manifest entries are exactly the given relpaths');
   for (const p of relpaths) assert.equal(m.entries[p], sha256(readFileSync(join(root, p))), `entry ${p} is the sha256 of its bytes`);
   const path = `${root}.manifest.json`;
-  writeFileSync(path, r.stdout);
-  return { path, m, sha: sha256(readFileSync(path)) };
+  writeFileSync(path, bytes);
+  assert.equal(sha256(readFileSync(path)), o.sha256);
+  return { path, m, sha: o.sha256 };
 }
 // The helper env from the launcher's own builder (this tree's verification/harness/stream-launcher.mjs, imported in a
 // bare child): helperSpawnEnv(base, { token, manifestPath, manifestSha256 }).
@@ -251,6 +260,15 @@ if (BARE) {
     return { path: p, sha };
   };
   const forgeAll = (v) => Object.fromEntries(FORGED_SHA_NAMES.map((k) => [k, v]));
+  test('A25-2 header: a helper spawned around the launcher builder (grant without the bound sha, sha offered in plain env) exits 90', () => {
+    const root = tree({ add: { 'te-main.mjs': EARLY } });
+    try {
+      const { path, sha } = manifestFor(root);
+      const env = bareEnv({ ENTROPY_BACKSTOP_HELPER: 'a25', ENTROPY_BACKSTOP_GRANT: 'grant-1@1#te', [MANIFEST_ENV]: path, ...forgeAll(sha) });
+      const r = spawnSync(process.execPath, ['--import', join(root, 'tools/ci/entropy-backstop.mjs'), join(root, 'te-main.mjs')], { cwd: root, env, encoding: 'utf8', timeout: 120000 });
+      early({ status: r.status, out: r.stdout, err: r.stderr });
+    } finally { clean(root); }
+  });
   test('A25-2 header: a forged sha (the swapped file\'s own) inherited by the launcher is ignored: exit 90', () => {
     early(scenario({ main: EARLY, add: { 'rogue.cjs': ROGUE }, outside: ['rogue.cjs'], header: swapTo,
       spoof: ({ path }) => ({ inherited: forgeAll(sha256(readFileSync(path))) }) }));
@@ -275,6 +293,15 @@ if (BARE) {
   });
   test('A25-2 launcher: with nothing inherited the launcher still sets its own manifest locator', () => {
     assert.equal(launchEnv({ PATH: '/usr/bin' }, OWN)[MANIFEST_ENV], '/te/own.manifest.json');
+  });
+  test('A25-2 launcher: helperSpawnEnv refuses a token with "|", a non-hex sha and a relative manifest path (TypeError)', () => {
+    const bad = [{ ...OWN, token: 'a|b' }, { ...OWN, token: '' }, { ...OWN, manifestSha256: 'A'.repeat(64) }, { ...OWN, manifestSha256: 'a'.repeat(63) }, { ...OWN, manifestPath: 'rel/m.json' }];
+    const script = `const L = await import(${JSON.stringify(pathToFileURL(LAUNCHER).href)});
+const out = []; for (const o of ${JSON.stringify(bad)}) { try { L.helperSpawnEnv({ PATH: '/usr/bin' }, { token: 'grant-1@1#te', ...o }); out.push('accepted'); } catch (e) { out.push(e instanceof TypeError ? 'TypeError' : 'other:' + e?.name); } }
+process.stdout.write(JSON.stringify(out));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), bad.map(() => 'TypeError'));
   });
 
   // ---------------- A25-6 (iii): eval / new Function code calls a CSPRNG primitive -> 91 ----------------

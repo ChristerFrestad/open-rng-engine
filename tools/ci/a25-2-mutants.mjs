@@ -16,13 +16,10 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const TEST_FILE = 'test/r-g64-a25-2.test.mjs';
 const BS = 'tools/ci/entropy-backstop.mjs', MAN = 'tools/ci/a25-manifest.mjs', LOCK = 'tools/ci/a25-lockdown.mjs';
 const LAUNCH = 'verification/harness/stream-launcher.mjs';
-// verifyLoad(url, bytes) (interface v2) closes over the manifest, so a mutant that must act on membership reads the
-// same manifest itself, from the locator, when a25-manifest.mjs is evaluated by the preload. If the locator is gone by
-// then, MEMBERS is null and the mutant degrades to "verifyLoad checks nothing" (still a mutant, less selective).
-const MEMBERS = `(() => { try { const fs = process.getBuiltinModule('node:fs'), u = process.getBuiltinModule('node:url'), pa = process.getBuiltinModule('node:path');
-  const m = JSON.parse(fs.readFileSync(process.env.ENTROPY_BACKSTOP_MANIFEST, 'utf8'));
-  return (url) => { const f = u.fileURLToPath(url); const r = pa.relative(m.root, f).split(pa.sep).join('/'); return Object.hasOwn(m.entries, r); };
-} catch { return null; } })()`;
+// verifyLoad(view, url, readBytes?) (Backend 22:01 CET) returns { ok, bytes, rel } or { ok:false, code:89|90, why }.
+// M1/M3 wrap the module export (the preload's load hook calls it) and turn one refusal code into an accept, reading
+// the bytes themselves so the module still loads.
+const ACCEPT = `({ ok: true, bytes: process.getBuiltinModule('node:fs').readFileSync(new URL(url)), rel: String(url) })`;
 
 // Edits: [file, old, new] replaces the one occurrence of `old`; [file, { override, params, body }] renames
 // `export function <override>(` to a private name and appends an exported replacement that may call it as __orig(...),
@@ -43,10 +40,10 @@ const MEMBERS = `(() => { try { const fs = process.getBuiltinModule('node:fs'), 
 // token-clear path, and that mutant behaves identically on every input: no test can kill it.
 const MUTANTS = [
   // A25-6 (i) -> 89
-  ['A6i-M1 verifyLoad lets a module outside the manifest through', [[MAN, { override: 'verifyLoad', params: 'url, bytes', body: `const inM = ${MEMBERS}; if (inM === null || !inM(url)) return; return __orig(url, bytes);` }]]],
+  ['A6i-M1 verifyLoad lets a module outside the manifest through', [[MAN, { override: 'verifyLoad', params: 'view, url, readBytes', body: `const r = __orig(view, url, readBytes); return r && r.ok === false && r.code === 89 ? ${ACCEPT} : r;` }]]],
   ['A6i-M2 EXIT_A25_MANIFEST_OUTSIDE is not distinct (89 -> 90)', [['*', { re: /\bEXIT_A25_MANIFEST_OUTSIDE\s*=\s*89\b/, to: 'EXIT_A25_MANIFEST_OUTSIDE = 90' }]]],
   // A25-6 (ii) -> 90
-  ['A6ii-M3 verifyLoad checks membership only, not the bytes of a manifest module', [[MAN, { override: 'verifyLoad', params: 'url, bytes', body: `const inM = ${MEMBERS}; if (inM === null || inM(url)) return; return __orig(url, bytes);` }]]],
+  ['A6ii-M3 verifyLoad checks membership only, not the bytes of a manifest module', [[MAN, { override: 'verifyLoad', params: 'view, url, readBytes', body: `const r = __orig(view, url, readBytes); return r && r.ok === false && r.code === 90 ? ${ACCEPT} : r;` }]]],
   ['A6ii-M4 EXIT_A25_MANIFEST_DIGEST is not distinct (90 -> 89)', [['*', { re: /\bEXIT_A25_MANIFEST_DIGEST\s*=\s*90\b/, to: 'EXIT_A25_MANIFEST_DIGEST = 89' }]]],
   // A25-2 header binding (Addendum C) -> 90 before any module loads
   ['A2h-M16 readManifest ignores the header-bound sha256 (swapped manifest accepted)', [[MAN, { override: 'readManifest', params: 'path, expectedSha256', body: "let s = expectedSha256; try { s = process.getBuiltinModule('node:crypto').createHash('sha256').update(process.getBuiltinModule('node:fs').readFileSync(path)).digest('hex'); } catch { /* missing: let the original decide */ } return __orig(path, s);" }]]],
