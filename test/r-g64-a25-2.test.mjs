@@ -27,18 +27,23 @@ const EXIT = Object.freeze({ TOKEN: 86, OUTSIDE: 89, DIGEST: 90, CODEGEN: 91 });
 // its own; the D22-7 header binds manifest_sha256 and the preload exits 90 before any module loads when the file is
 // missing, unreadable, or its sha256 differs from the header-bound digest.
 const MANIFEST_ENV = 'ENTROPY_BACKSTOP_MANIFEST';
-// ---- OPEN (Addendum C says the digest is "passed via the grant" but names no carrier for a helper started without
-// the launcher). Backend: confirm or rename HERE only. A direct `node --import <backstop> <main>` spawn gives the
-// preload the header-bound manifest sha256 in this env var. ----
-const MANIFEST_SHA_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
+// The manifest sha256 is bound in the D22-7 header and reaches the preload ONLY through the grant (Addendum C; CTO
+// 21:29): never through a plain inheritable env var, which any spawner could set. This file therefore hard-codes NO
+// carrier: every helper env is built by the launcher's own export, and the forged-sha cases check that a sha offered
+// outside the grant is ignored.
 // ---- OPEN: named exports TE asked Backend for (the mutant runner overrides them; NOT-APPLIED until they exist) ----
 //   tools/ci/a25-manifest.mjs                 readManifest(path, expectedSha256) -> manifest (the preload's header check)
-//   verification/harness/stream-launcher.mjs  helperSpawnEnv(baseEnv, { token, manifestPath }) -> env (realSpawnPart)
+//   verification/harness/stream-launcher.mjs  helperSpawnEnv(baseEnv, { token, manifestPath, manifestSha256 }) -> env
+//                                             (the builder realSpawnPart uses; binds the sha into the grant)
+// The token passed here is a test token; if the preload must verify it against a live grant, Backend says how a
+// direct test spawn obtains one, and only launchEnv() below changes.
+// Env names used ONLY as forged values (any spawner could set them); the preload must ignore all of them.
+const FORGED_SHA_NAMES = ['ENTROPY_BACKSTOP_MANIFEST_SHA256', 'ENTROPY_BACKSTOP_MANIFEST_DIGEST', 'ENTROPY_BACKSTOP_HEADER_MANIFEST_SHA256', 'MANIFEST_SHA256'];
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
 
 function bareEnv(extra = {}) {
   const env = { ...process.env };
-  for (const k of ['NODE_OPTIONS', 'ENTROPY_BACKSTOP_CHANNEL', 'ENTROPY_BACKSTOP_HELPER', 'ENTROPY_BACKSTOP_GRANT', MANIFEST_ENV, MANIFEST_SHA_ENV]) delete env[k];
+  for (const k of Object.keys(env)) if (k === 'NODE_OPTIONS' || k.startsWith('ENTROPY_BACKSTOP_') || FORGED_SHA_NAMES.includes(k)) delete env[k];
   return { ...env, ...extra };
 }
 // A temp tree: src/, tools/ci/, package.json and tsconfig.json copied; `edit` rewrites files ({ path: (text) => text }),
@@ -83,22 +88,35 @@ process.stdout.write(typeof m === 'string' ? m : JSON.stringify(m));`;
   writeFileSync(path, r.stdout);
   return { path, m, sha: sha256(readFileSync(path)) };
 }
-// Runs `main` (a path inside root) under the tree's preload in helper mode with the manifest.
-function helper(root, main, manifestPath, manifestSha, extra = {}) {
-  const env = bareEnv({ ENTROPY_BACKSTOP_HELPER: 'a25', [MANIFEST_ENV]: manifestPath, [MANIFEST_SHA_ENV]: manifestSha, ...extra });
+// The helper env from the launcher's own builder (this tree's verification/harness/stream-launcher.mjs, imported in a
+// bare child): helperSpawnEnv(base, { token, manifestPath, manifestSha256 }).
+const LAUNCHER = join(ROOT, 'verification/harness/stream-launcher.mjs');
+function launchEnv(base, { manifestPath, manifestSha256 }) {
+  const script = `const L = await import(${JSON.stringify(pathToFileURL(LAUNCHER).href)});
+if (typeof L.helperSpawnEnv !== 'function') { process.stderr.write('helperSpawnEnv is not exported (Backend integration pending)'); process.exit(3); }
+process.stdout.write(JSON.stringify(await L.helperSpawnEnv(${JSON.stringify(base)}, ${JSON.stringify({ token: 'grant-1@1#te', manifestPath, manifestSha256 })})));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 0, `helperSpawnEnv: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+// Runs `main` (a path inside root) under the tree's preload in helper mode with the manifest bound at manifestSha.
+// `inherited`: extra vars in the env the launcher starts from; `forged`: vars written over the launcher's env at spawn.
+function helper(root, main, manifestPath, manifestSha, extra = {}, { inherited = {}, forged = {} } = {}) {
+  const env = { ...launchEnv(bareEnv(inherited), { manifestPath, manifestSha256: manifestSha }), ...extra, ...forged };
+  assert.equal(env.ENTROPY_BACKSTOP_HELPER, 'a25', 'the launcher sets helper mode');
   const r = spawnSync(process.execPath, ['--import', join(root, 'tools/ci/entropy-backstop.mjs'), join(root, main)], { cwd: root, env, encoding: 'utf8', timeout: 120000 });
   return { status: r.status, out: r.stdout, err: r.stderr };
 }
 const clean = (root) => { for (const p of [root, `${root}.manifest.json`, `${root}.swap.json`]) rmSync(p, { recursive: true, force: true }); };
 // One scenario: build the tree and the manifest (every file but `outside`), optionally change tree bytes after the
 // manifest (`after`) or the manifest file / header-bound sha (`header`: ({ root, path, sha, m }) => { path, sha }), run.
-function scenario({ main, edit, add, outside = [], after, header, env }) {
+function scenario({ main, edit, add, outside = [], after, header, env, spoof }) {
   const root = tree({ edit, add: { ...add, 'te-main.mjs': main } });
   try {
     let { path, sha, m } = manifestFor(root, outside);
     if (after) for (const [p, fn] of Object.entries(after)) { const f = join(root, p), t = readFileSync(f, 'utf8'), n = fn(t); assert.notEqual(n, t); writeFileSync(f, n); }
     if (header) ({ path, sha } = header({ root, path, sha, m }));
-    return helper(root, 'te-main.mjs', path, sha, env);
+    return helper(root, 'te-main.mjs', path, sha, env, spoof ? spoof({ root, path, sha }) : {});
   } finally { clean(root); }
 }
 const HEAD = `import * as E from './src/index.ts';\nconst M = () => globalThis[${MARK}].helper;\n`;
@@ -224,25 +242,39 @@ if (BARE) {
     early(scenario({ main: EARLY, header: ({ path, sha }) => { const b = readFileSync(path); writeFileSync(path, b.subarray(0, b.length - 1)); return { path, sha }; } }));
   });
 
-  // ---------------- A25-2 launcher (Addendum C): an inherited ENTROPY_BACKSTOP_MANIFEST never reaches a helper ----------------
-  // Behavioural on the launcher's env builder (helperSpawnEnv, the one realSpawnPart must use; export requested from Backend).
-  const LAUNCHER = join(ROOT, 'verification/harness/stream-launcher.mjs');
-  const spawnEnv = (base) => {
-    const script = `const L = await import(${JSON.stringify(pathToFileURL(LAUNCHER).href)});
-if (typeof L.helperSpawnEnv !== 'function') { process.stderr.write('helperSpawnEnv is not exported'); process.exit(3); }
-process.stdout.write(JSON.stringify(L.helperSpawnEnv(${JSON.stringify(base)}, { token: 'grant-1@1#00', manifestPath: '/te/own.manifest.json' })));`;
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, env: bareEnv(), encoding: 'utf8', timeout: 60000 });
-    assert.equal(r.status, 0, `helperSpawnEnv: ${r.stderr}`);
-    return JSON.parse(r.stdout);
+  // A sha offered OUTSIDE the grant (CTO 21:29): the manifest file is swapped for a valid one (rogue.cjs added), the grant
+  // still binds the ORIGINAL sha, and the swapped file's own sha is offered under every FORGED_SHA_NAMES name, both
+  // inherited by the launcher and written over its env at spawn. The preload must ignore them all: exit 90, main never runs.
+  const swapTo = ({ root, sha, m }) => {
+    const swapped = { ...m, entries: { ...m.entries, 'rogue.cjs': sha256(readFileSync(join(root, 'rogue.cjs'))) } };
+    const p = `${root}.swap.json`; writeFileSync(p, JSON.stringify(swapped)); assert.notEqual(sha256(readFileSync(p)), sha);
+    return { path: p, sha };
   };
-  test('A25-2 launcher: an inherited manifest locator and sha are replaced by the launcher\'s own', () => {
-    const e = spawnEnv({ PATH: '/usr/bin', [MANIFEST_ENV]: '/hostile/manifest.json', [MANIFEST_SHA_ENV]: 'f'.repeat(64), NODE_OPTIONS: '--require /hostile.cjs' });
+  const forgeAll = (v) => Object.fromEntries(FORGED_SHA_NAMES.map((k) => [k, v]));
+  test('A25-2 header: a forged sha (the swapped file\'s own) inherited by the launcher is ignored: exit 90', () => {
+    early(scenario({ main: EARLY, add: { 'rogue.cjs': ROGUE }, outside: ['rogue.cjs'], header: swapTo,
+      spoof: ({ path }) => ({ inherited: forgeAll(sha256(readFileSync(path))) }) }));
+  });
+  test('A25-2 header: a forged sha (the swapped file\'s own) written into the helper env at spawn is ignored: exit 90', () => {
+    early(scenario({ main: EARLY, add: { 'rogue.cjs': ROGUE }, outside: ['rogue.cjs'], header: swapTo,
+      spoof: ({ path }) => ({ forged: forgeAll(sha256(readFileSync(path))) }) }));
+  });
+  test('A25-2 header control: forged sha values that EQUAL the bound one change nothing (the forgery cases fail on the swap, not on the extra vars)', () => {
+    const r = scenario({ main: EARLY, spoof: ({ sha }) => ({ inherited: forgeAll(sha), forged: forgeAll(sha) }) }); ok(r);
+  });
+
+  // ---------------- A25-2 launcher (Addendum C): inherited values never reach a helper ----------------
+  // Behavioural on the launcher's env builder (helperSpawnEnv, the one realSpawnPart must use; export requested from Backend).
+  const OWN = { manifestPath: '/te/own.manifest.json', manifestSha256: 'a'.repeat(64) };
+  test('A25-2 launcher: an inherited manifest locator, forged shas and NODE_OPTIONS are replaced or dropped', () => {
+    const bad = 'f'.repeat(64);
+    const e = launchEnv({ PATH: '/usr/bin', [MANIFEST_ENV]: '/hostile/manifest.json', ...forgeAll(bad), NODE_OPTIONS: '--require /hostile.cjs' }, OWN);
     assert.equal(e[MANIFEST_ENV], '/te/own.manifest.json');
-    assert.notEqual(e[MANIFEST_SHA_ENV], 'f'.repeat(64));
     assert.ok(!('NODE_OPTIONS' in e));
+    for (const [k, v] of Object.entries(e)) assert.ok(!String(v).includes(bad), `inherited forged sha reaches the helper as ${k}`);
   });
   test('A25-2 launcher: with nothing inherited the launcher still sets its own manifest locator', () => {
-    assert.equal(spawnEnv({ PATH: '/usr/bin' })[MANIFEST_ENV], '/te/own.manifest.json');
+    assert.equal(launchEnv({ PATH: '/usr/bin' }, OWN)[MANIFEST_ENV], '/te/own.manifest.json');
   });
 
   // ---------------- A25-6 (iii): eval / new Function code calls a CSPRNG primitive -> 91 ----------------
