@@ -5,10 +5,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
-export function runChecked(label, args, { timeoutMs, cwd }) {
+// HoQ A20 M-A20-1: env is passed to the child only when the caller gives one; by default the child inherits
+// process.env unchanged (no opt-out is ever added here).
+export function runChecked(label, args, { timeoutMs, cwd, env }) {
   let r;
   try {
-    r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', cwd });
+    r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', cwd, ...(env === undefined ? {} : { env }) });
   } catch (e) {
     // N-A18-1: under the entropy-backstop preload (npm test) a child that never ran throws from the hooked
     // spawnSync instead of returning r.error; report it the same way, never as empty output.
