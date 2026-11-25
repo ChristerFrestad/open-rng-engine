@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { runChecked as runCheckedLib } from './run-checked-lib.mjs';
 import { scanTree, scanFile, writeFixture, BAD, BAD_PATH, BAD_EXTRA, GUARD_OK, selfTest, strip, entropyTriggers, READ_NAME_ALLOW, BAD_REASON, SELF_TEST_EXTRA_CASES, GLOBALTHIS_MEMBERS_ALLOWED, PROCESS_MEMBERS_ALLOWED, COMPUTED_LITERAL_KEYS_ALLOWED, REFLECTIVE_BASES } from '../tools/ci/import-allowlist.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -420,20 +421,8 @@ test('HoQ 81d1d184: b1-b6 and M-163..M-165 are green on the old checker and red 
 // and a child killed by the timeout (or by any signal, or never started) fails with an explicit
 // TIMEOUT / CHILD-FAILED message instead of an empty-output assertion.
 const SELFTEST_CHILD_TIMEOUT_MS = 180_000;
+const runChecked = (label, args, { timeoutMs = SELFTEST_CHILD_TIMEOUT_MS, cwd = ROOT } = {}) => runCheckedLib(label, args, { timeoutMs, cwd });
 
-function runChecked(label, args, { timeoutMs = SELFTEST_CHILD_TIMEOUT_MS, cwd = ROOT } = {}) {
-  const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL', cwd });
-  if (r.error && r.error.code === 'ETIMEDOUT') {
-    assert.fail(`TIMEOUT: ${label} child killed after ${timeoutMs} ms (signal ${r.signal}); output so far:\n${r.stdout ?? ''}\n${r.stderr ?? ''}`);
-  }
-  if (r.error) {
-    assert.fail(`CHILD-FAILED: ${label} child did not run (${r.error.code ?? r.error.message})`);
-  }
-  if (r.signal !== null) {
-    assert.fail(`CHILD-FAILED: ${label} child killed by signal ${r.signal}; output so far:\n${r.stdout}\n${r.stderr}`);
-  }
-  return r;
-}
 
 test('M-A17-1: a child that outlives its limit fails with an explicit TIMEOUT, never as empty output', () => {
   assert.throws(
@@ -447,6 +436,24 @@ test('M-A17-1: a child that outlives its limit fails with an explicit TIMEOUT, n
   const ok = runChecked('trivial', ['-e', 'console.log("ok")'], { timeoutMs: 60_000 });
   assert.equal(ok.status, 0);
   assert.equal(ok.stdout.trim(), 'ok');
+});
+
+// N-A18-1: a child that cannot spawn must fail with CHILD-FAILED, never as empty output. Plain node reports
+// ENOENT in r.error; under the entropy-backstop preload (npm test) the hooked spawnSync throws its own
+// fail-closed error first and marks the whole process red, so the failing spawn runs one level down, in
+// an intermediary node child that calls runChecked and prints what it threw. The intermediary itself is a
+// healthy child (it proves the backstop when the preload is on); its exit code is not asserted, because
+// the backstop is meant to turn it red.
+test('N-A18-1: a child that cannot spawn (nonexistent cwd, ENOENT) fails with CHILD-FAILED, never as empty output', () => {
+  const missing = join(ROOT, 'tools/ci', '_n-a18-1-no-such-dir');
+  assert.ok(!existsSync(missing));
+  const lib = new URL('./run-checked-lib.mjs', import.meta.url).href;
+  const inner = `import { runChecked } from ${JSON.stringify(lib)};
+try { runChecked('no-cwd', ['-e', 'console.log(1)'], { cwd: ${JSON.stringify(missing)}, timeoutMs: 60000 }); console.log('NO-THROW'); }
+catch (e) { console.log('THREW ' + e.name + ': ' + e.message); }`;
+  const r = runChecked('n-a18-1 intermediary', ['--input-type=module', '-e', inner], { timeoutMs: 60_000 });
+  assert.match(r.stdout, /^THREW AssertionError: CHILD-FAILED: no-cwd child did not run \((ENOENT|entropy-backstop: node child did not prove the backstop is loaded \(spawnSync\))\)$/m, `${r.stdout}\n${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /NO-THROW/);
 });
 
 function m167Mutant(name, mutate, reason) {
