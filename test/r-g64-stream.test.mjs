@@ -368,14 +368,14 @@ test('A25-4b: runStreamPlan (the evidence path) refuses a plan that is not count
 
 // ---------- A25-1 (design v2): parts run inside a live grant, with fresh per-spawn tokens and per-spawn proofs ----------
 const A25_1_ID = 'shuffle/adjacency-mod4/n-52';
-async function runGrant(grant, { faults = {} } = {}) {
+async function runGrant(grant, { faults = {}, manifestSha256 = null } = {}) {
   const plan = P.buildPlan({ runId: 'g1', M: { [A25_1_ID]: 40 }, N: 2 });
   const stream = plan.streams[0]; const dir = tmp('g1'); let spawned = 0;
   try {
     const consumers = await L.wave1Consumers(stream);
     const fs = fakeSpawn(plan, { faults });
     const spawnPart = (...a) => { spawned++; return fs(...a); };
-    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant });
+    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant, manifestSha256 });
     return { res, spawned };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
@@ -440,6 +440,16 @@ test('A25-1: each proof check voids the part on its own (missing, invalid, anoth
   }
   const ok = await runGrant(grantView({ proof: goodProof }));
   assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+});
+test('W6 (A25-2): with a header-bound manifest digest, a proof whose manifest_sha256 differs (or is missing) voids the part; an equal one counts', async () => {
+  const M = 'c'.repeat(64);
+  for (const pm of ['d'.repeat(64), undefined, null]) {
+    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: pm }) }), { manifestSha256: M });
+    assert.equal(res.counted, false, String(pm)); assert.match(res.attempts[0].void, /proof manifest digest differs from the header-bound manifest \(A25-2\)/);
+  }
+  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M }) }), { manifestSha256: M });
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+  await assert.rejects(() => runGrant(grantView({ proof: goodProof }), { manifestSha256: 'C'.repeat(64) }), /manifestSha256 must be 64 lowercase hex/);
 });
 test('A25-1: the proof is written by the preload itself: child pid, preload sha256 and the spawn token (probe)', () => {
   const tok = 'grant-9@probe#00ff';

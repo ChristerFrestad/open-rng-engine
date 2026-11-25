@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto';
 // A25-2 (split note v1 + Addenda A-D): helper-mode manifest check and post-boot lockdown. Both modules are pure (no
 // backstop import, no CSPRNG use) and are loaded before any hook exists, like this file.
 import { EXIT_A25_MANIFEST_DIGEST, EXIT_A25_MANIFEST_OUTSIDE, MANIFEST_ENV, makeIsManifestUrl, parseGrant, readManifest, verifyLoad } from './a25-manifest.mjs';
-import { EXIT_A25_IMPORT, installLockdown } from './a25-lockdown.mjs';
+import { ADDON_BUILTINS, EXIT_A25_ADDON, EXIT_A25_FORBIDDEN_MODULE, EXIT_A25_IMPORT, FORBIDDEN_BUILTINS, installLockdown } from './a25-lockdown.mjs';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -375,6 +375,30 @@ function installHelperMode(cryptoMod) {
   const MAIN_URL = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
   const STARTUP_CWD_URL = pathToFileURL(process.cwd() + sep).href;
   let mainStarted = false;
+  // A25-2 (W1): the lockdown refuses forbidden builtins at resolve. A hook above it (the helper's one allowed late hook)
+  // could short-circuit a resolve to one, so the load step re-checks every node: URL, and the late hook is wrapped.
+  const FORBIDDEN_SET = new Set(FORBIDDEN_BUILTINS), ADDON_SET = new Set(ADDON_BUILTINS);
+  const builtinLoadCheck = (url, where) => {
+    const b = String(url).slice(5);
+    if (FORBIDDEN_SET.has(b)) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `${where}: forbidden builtin ${url}`);
+    if (ADDON_SET.has(b)) helperAbort(EXIT_A25_ADDON, `${where}: addon builtin ${url}`);
+  };
+  const GATE_SOURCE = `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n`;
+  // Bytes a late load hook hands node for a file URL are held to the manifest like ours; node: results get the builtin check.
+  const checkLoadResult = (url, r) => {
+    if (url === HELPER_GATE_URL) { // the virtual gate: only our exact source may come back
+      if (!r || r.format !== 'module' || r.source !== GATE_SOURCE) helperAbort(EXIT_A25_GATE, 'late load: the gate module was altered (A25-2)');
+      return r;
+    }
+    if (typeof url === 'string' && url.startsWith('node:')) { builtinLoadCheck(url, 'late load'); return r; }
+    const v = verifyLoad(VIEW, url);
+    if (!v.ok) helperAbort(v.code, `late load: ${v.why}`);
+    if (r && r.source != null) {
+      const src = typeof r.source === 'string' ? Buffer.from(r.source, 'utf8') : Buffer.from(r.source.buffer ?? r.source, r.source.byteOffset ?? 0, r.source.byteLength);
+      if (createHash('sha256').update(src).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `late load: bytes of ${v.rel} differ from the manifest`);
+    }
+    return r;
+  };
   registerHooks({
     resolve(specifier, context, nextResolve) {
       const parent = context.parentURL;
@@ -390,12 +414,11 @@ function installHelperMode(cryptoMod) {
     },
     load(url, context, nextLoad) {
       if (url === HELPER_GATE_URL) {
-        return { format: 'module', shortCircuit: true,
-          source: `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n` };
+        return { format: 'module', shortCircuit: true, source: GATE_SOURCE };
       }
       // A25-2: every non-builtin load must be a manifest file whose bytes match its entry. The check runs on the
       // bytes node will compile (r.source), not on a second read, so a swap between check and compile is caught.
-      if (typeof url === 'string' && url.startsWith('node:')) return nextLoad(url, context);
+      if (typeof url === 'string' && url.startsWith('node:')) { builtinLoadCheck(url, 'load'); return nextLoad(url, context); }
       const v = verifyLoad(VIEW, url);
       if (!v.ok) helperAbort(v.code, `load: ${v.why}`);
       const r = nextLoad(url, context);
@@ -417,7 +440,16 @@ function installHelperMode(cryptoMod) {
   const lateRegisterHooks = function registerHooks(hooks) {
     if (!mainIsHelper || lateHookUsed) helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2)');
     lateHookUsed = true;
-    return realRegisterHooks(hooks);
+    if (hooks === null || typeof hooks !== 'object') helperAbort(EXIT_A25_IMPORT, 'module.registerHooks: hooks must be an object (A25-2)');
+    const { resolve: lr, load: ll } = hooks;
+    const wrapped = {};
+    if (typeof lr === 'function') wrapped.resolve = (specifier, context, next) => {
+      const r = lr(specifier, context, next);
+      if (r && typeof r.url === 'string' && r.url.startsWith('node:')) builtinLoadCheck(r.url, 'late resolve');
+      return r;
+    };
+    if (typeof ll === 'function') wrapped.load = (url, context, next) => checkLoadResult(url, ll(url, context, next));
+    return realRegisterHooks(wrapped);
   };
   const lateRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2)'); };
   Object.defineProperty(nodeModule, 'registerHooks', { value: lateRegisterHooks, writable: false, configurable: false, enumerable: true });
