@@ -11,6 +11,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const RS_TEST = 'test/r-g64-stream.test.mjs';
+const A30_TEST = 'test/r-g64-a30.test.mjs';
+const A30M = 'verification/bench/a30-method.mjs';
+const RP_TEST = 'test/r-g64-positional.test.mjs';
+const RD_TEST = 'test/r-g64-decision.test.mjs';
+const A25_TEST = ['test/r-g64-a25.test.mjs', 'test/r-g64-a25-bare.mjs']; // run here without the preload: the bare file's hostile-src cases need a bare parent
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const ST = 'verification/statistic/wave1-statistic.mjs', SRC = 'verification/calibration/wave1-source.mjs';
 const AD = 'verification/labkit/aes-ctr-ref.mjs', CAL = 'verification/calibration/wave1-calibrate.mjs';
@@ -71,6 +77,87 @@ const MUTANTS = [
   // K3a G-64 static ban on defining the backstop marker, run against test/g64-marker-ban.test.mjs.
   ['MB-1 marker ban never matches a definition', [['tools/ci/marker-ban.mjs', "if (s.includes(MARK_TEXT) && DEFINE.test(s)) out.push(", "if (false) out.push("]], 'test/g64-marker-ban.test.mjs'],
   ['MB-2 marker ban skips verification/', [['tools/ci/marker-ban.mjs', "if (rel !== 'test') walk(p);", "if (rel !== 'test' && rel !== 'verification') walk(p);"]], 'test/g64-marker-ban.test.mjs'],
+  // R-G64 item 2 (HoQ addendum 1 R118-4): positional ((n-1)/n)·X², df (n-1)².
+  ['RP-1 raw X² compared with χ² (no (n-1)/n scaling)', [['verification/statistic/positional-statistic.mjs', 'const x2 = scale(n) * raw;', 'const x2 = raw;']], RP_TEST],
+  ['RP-2 df n²-1 instead of (n-1)²', [['verification/statistic/positional-statistic.mjs', 'export const df = (n) => (n - 1) * (n - 1);', 'export const df = (n) => n * n - 1;']], RP_TEST],
+  ['RP-3 row/column sums not checked', [['verification/statistic/positional-statistic.mjs', 'if (rows[i] !== M || cols[i] !== M) throw', 'if (false) throw']], RP_TEST],
+  ['RP-4 merge drops the last cell', [['verification/statistic/positional-statistic.mjs', 'for (let i = 0; i < C.length; i++) C[i] += o.C[i];', 'for (let i = 0; i < C.length - 1; i++) C[i] += o.C[i];']], RP_TEST],
+  // R-G64 item 3 (A23 R118-1..3, A23.1 M-R118-2b): RC decision with the stream-collapsed flag count.
+  ['RD-1 re-run result ignored (M-R118-2b i)', [['verification/harness/rc-decision.mjs', "  if (again.length) return { ...report, reruns: rerunReport, verdict: 'FAIL'", "  if (false) return { ...report, reruns: rerunReport, verdict: 'FAIL'"]], RD_TEST],
+  ['RD-2 a flagged entry without a re-run accepted (M-R118-2b ii)', [['verification/harness/rc-decision.mjs', '    if (!r) throw new Error(`decision refused: flagged', '    if (!r) continue; if (0) throw new Error(`decision refused: flagged']], RD_TEST],
+  ['RD-3 hard-FAIL count per entry, not per stream (R118-2)', [['verification/harness/rc-decision.mjs', 'if (t.flags_collapsed >= HARD_FLAGS) return', 'if (t.flags_per_entry >= HARD_FLAGS) return']], RD_TEST],
+  ['RD-4 threshold 0.01/161 instead of 0.01/157 (R118-1)', [['verification/harness/rc-decision.mjs', 'export const THRESHOLD = 0.01 / K_FROZEN;', 'export const THRESHOLD = 0.01 / K_COUNT;']], RD_TEST],
+  ['RD-5 re-run on the flagged stream accepted', [['verification/harness/rc-decision.mjs', '    if (firstStreams.has(r.stream)) throw', '    if (false) throw']], RD_TEST],
+  ['RD-6 re-run at another M accepted', [['verification/harness/rc-decision.mjs', '    if (r.M !== e.M) throw', '    if (false) throw']], RD_TEST],
+  ['RD-7 failure band not hard FAIL', [['verification/harness/rc-decision.mjs', '  if (t.hard.length) return', '  if (false) return']], RD_TEST],
+  ['RD-8 uncounted stream taken as evidence', [['verification/harness/rc-decision.mjs', '    if (!streamCounted(r)) throw', '    if (false) throw']], RD_TEST],
+  ['RD-9 flags collapsed per run, not per stream', [['verification/harness/rc-decision.mjs', '    const sk = `${t.run}\\0${t.stream}`;', '    const sk = t.run;']], RD_TEST],
+  ['RD-10 missing evidence not FAIL', [['verification/harness/rc-decision.mjs', '  if (tests.length !== expectK) return', '  if (false) return']], RD_TEST],
+  ['RD-11 SUSPECT without re-runs decided as PASS-WITH-NOTE', [['verification/harness/rc-decision.mjs', "  if (reruns === null) return { ...report, verdict: 'SUSPECT'", "  if (reruns === null) return { ...report, verdict: 'PASS-WITH-NOTE'"]], RD_TEST],
+  // R-G64 streamed harness (HoQ addendum 1, A22 and D22-1..8).
+  ['RS-1 H j/n_j not checked against the plan (A22)', [['verification/harness/stream-launcher.mjs', 'if (h.j !== j || h.calls !== want) return fail(', 'if (false) return fail(']], RS_TEST],
+  ["RS-2 merge uses the result's part count, not the plan's N (A22)", [['verification/harness/stream-launcher.mjs', "  const N = stream.parts.length; // the plan's N", "  const N = res.parts.length; // the plan's N"]], RS_TEST],
+  ['RS-3 statistic computed on a voided attempt (A22)', [['verification/harness/stream-launcher.mjs', ' || res.attempts.at(-1)?.void !== null) throw', ') throw']], RS_TEST],
+  ['RS-4 reuse ignores the k-tests sha256 (A22)', [['verification/harness/run-plan.mjs', '    if ((prev.files || {})[f] !== (cur.files || {})[f]) out.push(', "    if (!f.includes('k-tests') && (prev.files || {})[f] !== (cur.files || {})[f]) out.push("]], RS_TEST],
+  ['RS-5 outcomes of <=128 bits go through the hash path (A22, D22-6)', [['verification/harness/stream-frames.mjs', 'return bytes.length <= 16 ?', 'return bytes.length < 16 ?']], RS_TEST],
+  ['RS-6 trailer digest not compared', [['verification/harness/stream-launcher.mjs', 'if (st.T.payload_sha256 !== st.d) return fail(', 'if (false) return fail(']], RS_TEST],
+  ['RS-7 part count not checked', [['verification/harness/stream-launcher.mjs', 'if (st.count !== want) return fail(', 'if (false) return fail(']], RS_TEST],
+  ['RS-8 outcome shape not checked', [['verification/harness/stream-launcher.mjs', 'const bad = outcomeShapeError(kRep, v);', 'const bad = null;']], RS_TEST],
+  ['RS-9 helper exit status ignored', [['verification/harness/stream-launcher.mjs', 'if (code !== 0 || signal) fail(', 'if (false) fail(']], RS_TEST],
+  ['RS-10 load-hook digests not compared (D22-4)', [['verification/harness/stream-launcher.mjs', 'for (const [p, s] of h.loaded) if (man.get(p) !== s) return fail(', 'for (const [p, s] of h.loaded) if (false) return fail(']], RS_TEST],
+  ['RS-11 payload file not re-hashed against d_j (Q3 b)', [['verification/harness/stream-launcher.mjs', 'if (sha(buf) !== res.d[j]) throw new Error(', 'if (false) throw new Error(']], RS_TEST],
+  ["RS-12 window offset ignores the part's global position (D22-3)", [['verification/harness/stream-launcher.mjs', 'const call = off + st.count + i;', 'const call = st.count + i;']], RS_TEST],
+  ['RS-13 clone clean check off (D22-5)', [['verification/harness/stream-launcher.mjs', "if (dirty !== '') why.push(", 'if (false) why.push(']], RS_TEST],
+  ['RS-14 runStreamPlan skips the readiness check', [['verification/harness/stream-launcher.mjs', '  assertEvidenceRunReady(ROOT);\n  const grant = liveGrant(g);', '  const grant = liveGrant(g);']], RS_TEST],
+  ['RS-15 parts merged in reverse order', [['verification/harness/stream-launcher.mjs', 'for (let j = 0; j < N; j++) merged.merge(res.parts[j].accs[x]);', 'for (let j = N - 1; j >= 0; j--) merged.merge(res.parts[j].accs[x]);']], RS_TEST],
+  ['RS-16 srcDigest_after not compared', [['verification/harness/stream-launcher.mjs', 'if (st.T.src_after !== expect.src.sha256) return fail(', 'if (false) return fail(']], RS_TEST],
+  ["RS-17 a killed sibling's reason is listed before the cause", [['verification/harness/stream-launcher.mjs', '    for (const p of parts) noteVoid(p);\n    if (order.length) {', '    order.sort();\n    if (order.length) {']], RS_TEST],
+  ["A25-M1 gate handed off through a global (CTO change 1)", [["tools/ci/entropy-backstop.mjs", "  HELPER_GATE = HELPER.gate;\n", "  HELPER_GATE = HELPER.gate; globalThis.__a25gate = HELPER.gate;\n"]], A25_TEST],
+  ["A25-M2 extra arguments (offset/size, valueOf) not refused (CTO change 2)", [["tools/ci/entropy-backstop.mjs", "  if (arguments.length !== 1) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M3 non-Uint8Array targets not refused", [["tools/ci/entropy-backstop.mjs", "  if (!isView(target) || getProto(target) !== U8P) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M4 own byteLength on the target not refused", [["tools/ci/entropy-backstop.mjs", "  if (hasOwn(target, 'byteLength') || hasOwn(target, 'BYTES_PER_ELEMENT')) helperAbort(", "  if (false) helperAbort("]], A25_TEST],
+  ["A25-M5 prototypes not frozen in helper mode", [["tools/ci/entropy-backstop.mjs", "  Object.freeze(TAP); Object.freeze(U8P);\n  if (!Object.isFrozen(TAP) || !Object.isFrozen(U8P)) throw", "  if (false) throw"]], A25_TEST],
+  ["A25-M6 leak check removed (CTO change 3)", [["tools/ci/entropy-backstop.mjs", "    if (v === HELPER.gate || v === origFill) helperAbort(", "    if (false) helperAbort("]], A25_TEST],
+  ["A25-M7 first 10^4 gate calls not all walked (A25-4)", [["tools/ci/entropy-backstop.mjs", "  if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {", "  if ((i & HELPER_MASK) === 0) {"]], A25_TEST],
+  ["A25-M8 sample mask k-1 instead of k (A25-4)", [["tools/ci/entropy-backstop.mjs", "  if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {", "  if (i < HELPER_FIRST_WALK || (i & (HELPER_MASK >>> 1)) === 0) {"]], A25_TEST],
+  ["A25-M9 token-clear calls not aborted (A25-3)", [["tools/ci/entropy-backstop.mjs", "    if (HELPER_MODE) helperAbort(EXIT_A25_TOKEN,", "    if (false) helperAbort(EXIT_A25_TOKEN,"]], A25_TEST],
+  ["A25-M10 src/entropy importer guard removed", [["tools/ci/entropy-backstop.mjs", "      if (r.url === ENTROPY_URL && parent !== INDEX_URL) helperAbort(", "      if (false) helperAbort("]], A25_TEST],
+  ["A25-M11 preload importable after the main entry", [["tools/ci/entropy-backstop.mjs", "      if (r.url === MAIN_URL) mainStarted = true;\n", ""]], A25_TEST],
+  ["A25-M17 gate token not cleared in finally (CTO answer a)", [["tools/ci/entropy-backstop.mjs", "    try { fill(target); } finally { token = false; }", "    fill(target); token = false;"]], A25_TEST],
+  ["A25-M22 one gate token shared by every makeHelperGate instance (CTO: own token proven)", [["tools/ci/entropy-backstop.mjs", "  let token = false, calls = 0, walks = 0;\n", "  let calls = 0, walks = 0;\n"], ["tools/ci/entropy-backstop.mjs", "export function makeHelperGate(fill, { walk = helperWalk } = {}) {\n", "let token = false;\nexport function makeHelperGate(fill, { walk = helperWalk } = {}) {\n"]], A25_TEST],
+  ["A25-M18 counted plan with a part below the floor not refused (A25-4b)", [["verification/harness/stream-launcher.mjs", "  if (counted) { const j = stream.parts.findIndex(", "  if (false) { const j = stream.parts.findIndex("]], RS_TEST],
+  ["A25-M19 counted trailer below the floor not voided (A25-4b)", [["verification/harness/stream-launcher.mjs", "    if (ctx.counted && a.gate_calls < ctx.helperExpect.part_floor) return fail(", "    if (false) return fail("]], RS_TEST],
+  ["A25-M20 H part floor not compared (A25-4b)", [["verification/harness/stream-launcher.mjs", "      if (b.part_floor !== hx.part_floor) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M21 runStreamPlan accepts a plan that is not counted (A25-4b)", [["verification/harness/stream-launcher.mjs", "plan.counted !== true) throw new Error('runStreamPlan runs counted plans only", "false) throw new Error('runStreamPlan runs counted plans only"]], RS_TEST],
+  ["A25-M12 launcher does not compare the helper k with the plan (CTO change 4)", [["verification/harness/stream-launcher.mjs", "      if (b.mode !== hx.mode || b.sample_k !== hx.sample_k || b.first_walk !== hx.first_walk) return fail(", "      if (b.mode !== hx.mode || b.first_walk !== hx.first_walk) return fail("]], RS_TEST],
+  ["A25-M13 launcher does not check the trailer walk count (A25-4)", [["verification/harness/stream-launcher.mjs", "    if (a.walks !== expectedWalks(a.gate_calls, ctx.helperExpect)) return fail(", "    if (false) return fail("]], RS_TEST],
+  ["A25-M14 launcher accepts an H frame without the helper state", [["verification/harness/stream-launcher.mjs", "      if (!b || typeof b !== 'object') return fail('H has no backstop helper state", "      if (!b || typeof b !== 'object') return; if (false) return fail('H has no backstop helper state"]], RS_TEST],
+  ["A25-M15 launcher does not compare the backstop digest (A25-1)", [["verification/harness/stream-launcher.mjs", "      if (b.backstop_sha256 !== hx.backstop_sha256) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M16 launcher does not require the leak check", [["verification/harness/stream-launcher.mjs", "      if (h.gate_leak_check !== true) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M23 H grant not compared with this spawn's token (A25-1 v2)", [["verification/harness/stream-launcher.mjs", "      if (typeof b.grant !== 'string' || b.grant !== st.token) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M24 grant liveness not re-checked at the H frame (A25-1)", [["verification/harness/stream-launcher.mjs", "      if (!ctx.grant.live()) return fail(", "      if (false) return fail("]], RS_TEST],
+  ["A25-M25 a missing or invalid proof passes (A25-1 v2, CTO cond 2)", [["verification/harness/stream-launcher.mjs", "    if (pr === null || pr === false || typeof pr !== 'object' || pr.invalid) fail(", "    if (false) fail("]], RS_TEST],
+  ["A25-M26 proof preload digest not checked (A25-1 v2, CTO cond 2)", [["verification/harness/stream-launcher.mjs", "    else if (pr.preload_sha256 !== ctx.helperExpect.backstop_sha256) fail(", "    else if (false) fail("]], RS_TEST],
+  ["A25-M27 proof of another process passes (A25-1 v2, CTO cond 2)", [["verification/harness/stream-launcher.mjs", "    else if (pr.pid !== st.child.pid) fail(", "    else if (false) fail("]], RS_TEST],
+  ["A25-M28 an extra --import/--require before the helper passes (A25-1 v2, CTO cond 1)", [["verification/harness/stream-launcher.mjs", "args.length === want.length && args.every((a, i) => a === want[i])", "args.length >= want.length && want.every((a, i) => a === args[args.length - want.length + i])"], ["verification/harness/stream-launcher.mjs", "\n    && args[0] === '--import' && args[1] === BACKSTOP && args[2] === HELPER\n", "\n"]], RS_TEST],
+  ["A25-M29 a stale proof from before the spawn passes (A25-1 v2, CTO cond 2)", [["verification/harness/stream-launcher.mjs", "    else if (!(pr.mtime_ms >= st.spawnedAt - PROOF_CLOCK_SLACK_MS)) fail(", "    else if (false) fail("]], RS_TEST],
+  ["A25-M30 a proof copied from another spawn passes (A25-1 v2, CTO cond 3, old M30)", [["verification/harness/stream-launcher.mjs", "    else if (pr.token !== st.token) fail(", "    else if (false) fail("]], RS_TEST],
+  ["A25-M31 a token reused across spawns passes (A25-1 v2, CTO cond 3, old M31)", [["verification/harness/stream-launcher.mjs", " || usedTokens.has(token)) throw new Error('spawn token is not fresh", ") throw new Error('spawn token is not fresh"]], RS_TEST],
+  ["A25-M32 NODE_OPTIONS in the launcher-built helper env passes (A25-1 v2, CTO cond 1)", [["verification/harness/stream-launcher.mjs", " && !Object.prototype.hasOwnProperty.call(env, 'NODE_OPTIONS');", ";"]], RS_TEST],
+  ["A25-M33 grant liveness not checked before each spawn (A25-1)", [["verification/harness/stream-launcher.mjs", "        if (!grant.live()) throw new Error('evidence grant is not live (A25-1)');\n", ""]], RS_TEST],
+  ["A25-M34 runStreamCore runs without a grant view (A25-1)", [["verification/harness/stream-launcher.mjs", "  if (!grant || typeof grant.base !== 'string' || typeof grant.live !== 'function' || typeof grant.next !== 'function' || typeof grant.proof !== 'function') throw new Error(", "  if (false) throw new Error("]], RS_TEST],
+  ["A25-M35 helper-mode preload leaves the grant token in the env (A25-1)", [["tools/ci/entropy-backstop.mjs", "delete process.env[HELPER_GRANT_ENV];\n", ""]], RS_TEST],
+  ["A25-M36 G-39 hook does not record the proof per child (A25-1)", [["tools/ci/entropy-backstop.mjs", "      if (child && typeof child === 'object') childProofs.set(child, proof);\n", ""]], RS_TEST],
+  ["A25-M37 preload proof carries no digest or token (A25-1 v2, CTO cond 2)", [["tools/ci/entropy-backstop.mjs", "  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN, manifest_sha256: MANIFEST_SHA256, sigusr1_disabled: process.execArgv.includes('--disable-sigusr1') });", "  const body = JSON.stringify({ pid: process.pid });"]], RS_TEST],
+  ["A25-M38 a token that is not base#nonce passes (A25-1 v2, CTO cond 3)", [["verification/harness/stream-launcher.mjs", "!token.startsWith(`${grant.base}#`) || token.length <= grant.base.length + 1 || ", ""]], RS_TEST],
+  ['A30-M1 ABBA broken: a25 always runs first (HoQ A30 1)', [[A30M, "  return i % 2 === 0 ? ['a25', 'plain'] : ['plain', 'a25'];\n", "  return ['a25', 'plain'];\n"]], A30_TEST],
+  ['A30-M2 void pair (load1 > guard) run and counted as valid (HoQ A30 3)', [[A30M, "    if (!(load1 <= guard)) {", "    if (false) {"]], A30_TEST],
+  ['A30-M3 2N attempt cap removed (HoQ A30 3)', [[A30M, "  while (overheads.length < N && attempts < 2 * N) {", "  while (overheads.length < N) {"]], A30_TEST],
+  ['A30-M4 PASS limit rounded to one decimal (10.04% passes; HoQ A30 2)', [[A30M, "  const pass = med <= A30.LIMIT && above", "  const pass = Math.round(med * 1000) / 1000 <= A30.LIMIT && above"]], A30_TEST],
+  // A30-M5 (drop the ceil(N/2)+1 rule) is equivalent: ceil(N/2)+1 pairs above 10% puts the median above 10%, so the
+  // median rule already fails such an entry for every N. Kept in the method as HoQ's stated rule; no mutant here.
+  ['A30-M6 load1 guard widened above 4.0 (HoQ A30 3)', [[A30M, "  if (guard !== A30.GUARD_LOAD1) throw", "  if (false) throw"]], A30_TEST],
+  ['RS-18 voided attempt kept as counted', [['verification/harness/stream-launcher.mjs', "      continue; // the voided attempt's accumulators", "      attempts.at(-1).void = null; // the voided attempt's accumulators"]], RS_TEST],
 ];
 
 const sha = (d, rel) => createHash('sha256').update(readFileSync(join(d, rel))).digest('hex');
@@ -101,12 +188,12 @@ function run(label, edits, testFile = TEST) {
   return new Promise((done) => {
     const d = scratch(edits);
     const env = { ...process.env }; delete env.NODE_OPTIONS;
-    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', testFile], { cwd: d, env });
+    const c = spawn(process.execPath, ['--test', '--test-reporter=tap', ...[testFile].flat()], { cwd: d, env });
     let out = ''; c.stdout.on('data', (b) => { out += b; }); c.stderr.on('data', (b) => { out += b; });
     c.on('close', (status) => {
       rmSync(d, { recursive: true, force: true });
       const failed = [...out.matchAll(/^not ok \d+ - (.*)$/gm)].map((m) => m[1].trim());
-      done({ label, status, failed, behavioural: failed.filter((f) => !DIGEST_TESTS.some((r) => r.test(f))) });
+      done({ label, status, failed, skipped: (out.match(/# SKIP/g) || []).length, behavioural: failed.filter((f) => !DIGEST_TESTS.some((r) => r.test(f))) });
     });
   });
 }
@@ -114,6 +201,10 @@ function run(label, edits, testFile = TEST) {
 const base = await run('baseline (re-pin only)', []);
 console.log(`${base.label}: ${base.status === 0 && base.failed.length === 0 ? 'green' : `NOT green: ${base.failed.join('; ')}`}`);
 let bad = base.status !== 0 || base.failed.length !== 0;
+// A25: the A25 test file, bare parent, unmutated, must be green with no skips before its mutants count.
+const a25 = await run('A25 baseline (bare parent)', [], A25_TEST);
+console.log(`${a25.label}: ${a25.status === 0 && a25.failed.length === 0 ? 'green' : `NOT green: ${a25.failed.join('; ')}`}`);
+if (a25.status !== 0 || a25.failed.length !== 0 || a25.skipped !== 0) { bad = true; if (a25.skipped) console.log(`A25 baseline: ${a25.skipped} skipped (must be 0)`); }
 const P = 4; const res = []; let next = 0;
 await Promise.all(Array.from({ length: P }, async () => { while (next < MUTANTS.length) { const i = next++; res[i] = await run(...MUTANTS[i]); } }));
 for (const r of res) {

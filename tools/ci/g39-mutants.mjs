@@ -39,7 +39,7 @@ export const G45_MUTANTS = [
   ['G45-M4 (HM-18) exec/execSync shell lines not checked', 'function evidenceSpawnCheck(kind, exe, argv, opts) {\n', "function evidenceSpawnCheck(kind, exe, argv, opts) {\n  if (kind === 'shell' || opts.shell) return null;\n", ['exec-sync', 'exec-async']],
   ['G45-M5 (HM-17) RNG_test not an evidence tool', "'assess', 'RNG_test']);", "'assess']);", ['rng-test', 'RW-green-rngtest']],
   ['G45-M6 grant opened without running the guard', '  ev.assertEvidenceRunReady();\n  const g = Object.freeze', '  const g = Object.freeze', ['grant-not-ready']],
-  ['G45-M7 launch without an open grant', "  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');\n", '', ['launch-without-grant']],
+  ['G45-M7 launch without an open grant', "  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');\n  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool:", "  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool:", ['launch-without-grant']],
   ['G45-M8 raw spawn allowed while a grant is open', '    const ok = launching !== null && ', '    const ok = activeGrant !== null || launching !== null && ', ['RW-raw-in-run', 'RW-shell-in-run']],
   ['G45-M9 grant not closed after the run', '  if (activeGrant === g) activeGrant = null;\n  evidenceGrants.delete(g);\n', '', ['RW-after-run-launch']],
   // G-57 (HoQ HM-22, HM-23, HM-25). HM-24 (realpath-basename check) is subsumed by the G-55 pin: the launch
@@ -48,17 +48,22 @@ export const G45_MUTANTS = [
   // real file is a byte-identical, unpinned copy under another name) kills it. The spawn hook's remaining compare with
   // the pinned real path only guards a swap between the pin check and the spawn, which no fixture can force
   // without a race, so a mutant of it is listed as equivalent.
-  ['G57-M1 (HM-22) launch does not re-run the guard', '  grantEntry.assertEvidenceRunReady();\n  if (typeof file', '  if (typeof file', ['RW-ready-flips']],
+  ['G57-M1 (HM-22) launch does not re-run the guard', "  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool:", "  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceTool:", ['RW-ready-flips']],
+  // R-G64 (design §3, Q3 a): the asynchronous launch has its own copy of every check; each copy has a mutant.
+  ['RS-B1 stream launch does not re-run the guard', "  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream:", "  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream:", ['RW-ready-flips/stream']],
+  ['RS-B2 stream launch skips the binary pin (G-55)', "  const real = pinnedBinary(file);\n  const cp = require('node:child_process');\n  launching = { grant: g, file, real };\n  try { return cp.spawn(", "  const real = realpathSync(file);\n  const cp = require('node:child_process');\n  launching = { grant: g, file, real };\n  try { return cp.spawn(", ['RW-pinned-script/stream', 'RW-sha-mismatch/stream', 'RW-bad-source-pin/stream', 'RW-unpinned-path/stream']],
+  ['RS-B3 stream launch without an open grant', "  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');\n  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream:", "  grantEntry.assertEvidenceRunReady();\n  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream:", ['launch-stream-without-grant']],
+  ['RS-B4 stream launch does not force shell:false', 'cp.spawn(file, args, { ...options, shell: false })', 'cp.spawn(file, args, { shell: false, ...options })', ['RW-shell-forced-off/stream']],
   ['G57-M2 (HM-23) several tool names allowed in one launch', '&& EVIDENCE_TOOLS.includes(base) && names.length === 1;', '&& EVIDENCE_TOOLS.includes(base);', ['RW-two-tools']],
   ['G57-M3 (HM-24) pin found by tool name only, real path not compared', '  const pin = bins.find((b) => b && b.tool === tool && b.path === real);', '  const pin = bins.find((b) => b && b.tool === tool);', ['RW-unpinned-path', 'RW-symlink-renamed']],
-  ['G57-M4 (HM-25) launch does not force shell:false', '{ ...options, shell: false }', '{ shell: false, ...options }', ['RW-shell-forced-off']],
+  ['G57-M4 (HM-25) launch does not force shell:false', 'cp.spawnSync(file, args, { ...options, shell: false })', 'cp.spawnSync(file, args, { shell: false, ...options })', ['RW-shell-forced-off']],
   // G-54 / G-55 / G-60 (HoQ report 505599e..96aaf91).
   ['G54-M1 collector preload check off', "  if (!ev) throw new Error('collector refused: no entropy-backstop preload proof (G-54)');\n", '', ['NP-runner-collect'], 'verification/harness/collector.mjs'],
   ['G54-M2 checkCollected stamp check off', '  if (grant) { const g = grantStampError(result); if (g) f.push(g); }\n', '', ['NP-runner-collect', 'RW-unstamped-in-run'], 'verification/harness/collector.mjs'],
   ['G54-M4 collector grant check off', "  if (!ev.active()) throw new Error('collector refused: no open evidence grant (G-54)');\n", '', ['collect-outside-grant'], 'verification/harness/collector.mjs'],
   ['G54-M5 stamp compared by presence of the field only', 'return t !== null && result.grant === t ? null', "return typeof result.grant === 'string' ? null", ['RW-forged-stamp'], 'verification/harness/collector.mjs'],
   ['G54-M3 result stamped outside a grant', "  if (activeGrant === null || !evidenceGrants.has(activeGrant)) refuseChild('result stamp outside", "  if (false) refuseChild('result stamp outside", ['stamp-outside-grant']],
-  ['G55-M1 binary pin check off', '  const real = pinnedBinary(file);\n', '  const real = realpathSync(file);\n', ['RW-unpinned-path', 'RW-pinned-script', 'RW-sha-mismatch', 'RW-bad-source-pin']],
+  ['G55-M1 binary pin check off', "  const real = pinnedBinary(file);\n  const cp = require('node:child_process');\n  launching = { grant: g, file, real };\n  try { return cp.spawnSync(", "  const real = realpathSync(file);\n  const cp = require('node:child_process');\n  launching = { grant: g, file, real };\n  try { return cp.spawnSync(", ['RW-unpinned-path', 'RW-pinned-script', 'RW-sha-mismatch', 'RW-bad-source-pin']],
   ['G55-M2 script check off', "  if (bytes.subarray(0, 2).toString('latin1') === '#!') refuseChild", '  if (false) refuseChild', ['RW-pinned-script']],
   ['G55-M3 binary sha check off', "  if (createHash('sha256').update(bytes).digest('hex') !== pin.sha256) refuseChild", '  if (false) refuseChild', ['RW-sha-mismatch']],
   ['G55-M4 source pin not compared with tool-pins', '  if (!src || !pin.source || pin.source.name !== src.name || pin.source.sha256 !== src.sha256) refuseChild', '  if (false) refuseChild', ['RW-bad-source-pin']],
@@ -159,9 +164,12 @@ function readyWorld(d) {
   const bs = join(d, 'tools/ci/entropy-backstop.mjs');
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
-  for (const [label, green, body, after] of RW_CASES) {
-    const f = join(d, `rw-${label}.mjs`);
-    writeFileSync(f, `import { spawnSync, execSync } from 'node:child_process';\nconst { startEvidenceRun } = await import(${JSON.stringify(pathToFileURL(ee).href)});\nawait startEvidenceRun(async ({ launch }) => { ${body(T)} });\n${after ? after(T) : ''}\nconsole.log('RW-OK');\n`);
+  // R-G64: every case runs twice, through launch (spawnSync) and through launchStream (async spawn, Q3 a).
+  const STREAM = 'const launch = async (f, a, o) => { const c = launchStream(f, a, o); return await new Promise((res) => { c.on(\'error\', (e) => res({ error: e })); c.on(\'close\', (status) => res({ status })); }); };';
+  const cases = [...RW_CASES.map((c) => [...c, false]), ...RW_CASES.filter(([l]) => l !== 'RW-open-never-closed').map(([l, g, b, a]) => [`${l}/stream`, g, (T) => b(T).split('launch(').join('await launch('), a && ((T) => a(T).split('globalThis.__L(').join('await globalThis.__L(')), true])];
+  for (const [label, green, body, after, stream] of cases) {
+    const f = join(d, `rw-${label.replace('/', '-')}.mjs`);
+    writeFileSync(f, `import { spawnSync, execSync } from 'node:child_process';\nconst { startEvidenceRun } = await import(${JSON.stringify(pathToFileURL(ee).href)});\nawait startEvidenceRun(async ({ launch: launchSync, launchStream }) => { ${stream ? STREAM : 'const launch = launchSync;'} ${body(T)} });\n${after ? after(T) : ''}\nconsole.log('RW-OK');\n`);
     const r = spawnSync(process.execPath, ['--import', bs, f], { cwd: d, encoding: 'utf8', timeout: 60_000, env });
     const out = `${r.stdout}\n${r.stderr}`;
     const ok = green === 'G-60' ? r.status !== 0 && /\(G-60\)/.test(out)

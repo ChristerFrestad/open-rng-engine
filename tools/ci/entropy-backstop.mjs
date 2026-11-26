@@ -14,6 +14,10 @@ import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep
 import { mkdtempSync, writeFileSync, writeSync, existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+// A25-2 (split note v1 + Addenda A-D): helper-mode manifest check and post-boot lockdown. Both modules are pure (no
+// backstop import, no CSPRNG use) and are loaded before any hook exists, like this file.
+import { EXIT_A25_MANIFEST_DIGEST, EXIT_A25_MANIFEST_OUTSIDE, MANIFEST_ENV, makeIsManifestUrl, parseGrant, readManifest, verifyLoad } from './a25-manifest.mjs';
+import { ADDON_BUILTINS, EXIT_A25_ADDON, EXIT_A25_CODEGEN, EXIT_A25_FORBIDDEN_MODULE, EXIT_A25_IMPORT, FORBIDDEN_BUILTINS, installLockdown } from './a25-lockdown.mjs';
 
 const require = createRequire(import.meta.url);
 const { syncBuiltinESMExports } = require('node:module');
@@ -209,12 +213,305 @@ function checkCaller(id, stack) {
   }
 }
 
+
+// ---------------- A25-3 / A25-4: evidence-helper mode (HoQ addendum 1 A25; CTO GO 2026-11-25 13:50) ----------------
+// Only an evidence helper started by stream-launcher.mjs runs in this mode (ENTROPY_BACKSTOP_HELPER=a25, refused by the
+// launcher unless the H frame reports it with this file's digest and the plan's k). Dev, test and every non-evidence
+// path keep the per-call stack walk above unchanged.
+//  - A25-3: the one approved entry is fillBuffer in src/entropy/index.ts. Its `import { randomFillSync } from
+//    'node:crypto'` (and only that importer's) resolves to HELPER_GATE_URL, a preload-owned virtual module whose
+//    randomFillSync is helperGate below. helperGate validates its argument WITHOUT running user code, runs the
+//    integrity checks and the A25-4 sampled walk, then sets the gate instance's private token (makeHelperGate closure), calls the ORIGINAL primitive and
+//    clears the token in finally. Every wrapped primitive (any route: import, require, createRequire,
+//    process.getBuiltinModule, webcrypto, globalThis.crypto) aborts in this mode: token clear is the A25-3 abort; token
+//    set means re-entry from inside the native fill, which cannot happen legitimately, and aborts too.
+//  - The gate is handed over only through this module's own export, and the resolve hook lets nothing but the virtual
+//    module resolve this file in helper mode. No global holds it at any time (CTO change 1).
+//  - A25-4: the full checkCaller walk runs on the first HELPER_FIRST_WALK gate calls and then whenever
+//    (index & (2^HELPER_SAMPLE_K - 1)) === 0. A failed walk aborts with its own exit code; the launcher voids the run.
+export const HELPER_MODE_ENV = 'ENTROPY_BACKSTOP_HELPER';
+export const HELPER_MODE_ID = 'a25';
+export const HELPER_FIRST_WALK = 10000;
+export const HELPER_SAMPLE_K = 12;
+// A25-4b: a counted part must reach >= 20 sampled walks after the first F gate calls: F + 20 * 2^k = 91920 (k = 12, A29-1).
+export const HELPER_MIN_SAMPLED_HITS = 20;
+export const HELPER_PART_FLOOR = 91920;
+export const EXIT_A25_TOKEN = 86;   // a wrapped CSPRNG primitive called in helper mode (token clear, or re-entry)
+export const EXIT_A25_GATE = 87;    // the gate refused: bad argument, tampered intrinsics, wrong importer, leak
+export const EXIT_A25_WALK = 88;    // A25-4 sampled stack walk failed
+export const HELPER_GATE_URL = 'rng-backstop-gate:node-crypto';
+const HELPER_MODE = process.env[HELPER_MODE_ENV] === HELPER_MODE_ID;
+// A25-1 (G-54; design v2): the launcher hands each helper spawn a FRESH token (grant-<n>@<pid>#<nonce>). The preload
+// reads it once and removes it from the environment, writes it into this process's G-39 proof file together with
+// its own sha256 (writeProof), and, in helper mode, reports it in the H frame (helperState().grant). The token alone
+// is not a proof of preload (a child without the preload could echo it); the proof file, written by the preload
+// itself and checked per spawn by the launcher, is.
+export const HELPER_GRANT_ENV = 'ENTROPY_BACKSTOP_GRANT';
+// A25-2: in helper mode the grant is '<token>|m=<manifest sha256>' (helperSpawnEnv); the sha reaches the preload ONLY
+// here. The token part is what the proof and the H frame carry (A25-1 unchanged). The preload does not verify the
+// token (the launcher does, from the proof file). A missing or malformed m= part exits 90 before any module loads.
+const RAW_GRANT = typeof process.env[HELPER_GRANT_ENV] === 'string' ? process.env[HELPER_GRANT_ENV] : null;
+const GRANT_PARTS = HELPER_MODE ? parseGrant(RAW_GRANT) : null;
+// F-W5 (found while re-running W5 under the preload): an exit before install still leaves the parent's G-39 proof,
+// marked early_exit with no token or digest, so a preloaded parent sees the preload ran (the exit code voids the run).
+function earlyExit(code, why) {
+  try { writeSync(2, `entropy-backstop[A25]: ${why} (exit ${code})\n`); } catch { /* stderr closed */ }
+  const pf = process.env.ENTROPY_BACKSTOP_PROOF_FILE;
+  if (pf) { try { writeFileSync(pf, JSON.stringify({ pid: process.pid, preload_sha256: null, token: null, manifest_sha256: null, early_exit: code }), { flag: 'wx' }); } catch { /* no proof: red */ } }
+  (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(code);
+}
+if (HELPER_MODE && GRANT_PARTS === null) earlyExit(EXIT_A25_MANIFEST_DIGEST, 'grant carries no manifest digest');
+const SPAWN_TOKEN = HELPER_MODE ? GRANT_PARTS.token : RAW_GRANT;
+const HELPER_GRANT = HELPER_MODE ? SPAWN_TOKEN : null;
+const MANIFEST_SHA256 = HELPER_MODE ? GRANT_PARTS.sha256 : null;
+const MANIFEST_PATH = HELPER_MODE && typeof process.env[MANIFEST_ENV] === 'string' ? process.env[MANIFEST_ENV] : null;
+delete process.env[HELPER_GRANT_ENV];
+delete process.env[MANIFEST_ENV];
+// CTO 22:12 binding ruling: the grant digest is the authority. ENTROPY_BACKSTOP_MANIFEST_SHA256 is advisory only;
+// if present in helper mode it must equal the grant digest, else exit 90 before any module loads. Never trusted.
+export const MANIFEST_SHA256_ADVISORY_ENV = 'ENTROPY_BACKSTOP_MANIFEST_SHA256';
+const ADVISORY_SHA256 = Object.prototype.hasOwnProperty.call(process.env, MANIFEST_SHA256_ADVISORY_ENV) ? process.env[MANIFEST_SHA256_ADVISORY_ENV] : null;
+delete process.env[MANIFEST_SHA256_ADVISORY_ENV];
+if (HELPER_MODE && ADVISORY_SHA256 !== null && ADVISORY_SHA256 !== MANIFEST_SHA256) earlyExit(EXIT_A25_MANIFEST_DIGEST, 'advisory manifest digest differs from the grant digest');
+// Addendum B: one-shot refusal hook. Each backstop refusal site (dlopen, spawn_sync/process_wrap and the other refused
+// bindings, execve) calls it before its throw, so in helper mode the lockdown turns the refusal into an abort.
+let REFUSE_HOOK = null;
+export function registerRefuseHook(fn) {
+  if (REFUSE_HOOK !== null || typeof fn !== 'function') {
+    try { writeSync(2, `entropy-backstop[A25]: registerRefuseHook ${REFUSE_HOOK !== null ? 'called twice' : 'needs a function'} (exit ${EXIT_A25_GATE})\n`); } catch { /* stderr closed */ }
+    (typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process))(EXIT_A25_GATE);
+  }
+  REFUSE_HOOK = fn;
+}
+function refused(kind, detail) { const h = REFUSE_HOOK; if (h !== null) h(kind, detail); }
+if (process.env[HELPER_MODE_ENV] !== undefined && !HELPER_MODE) {
+  writeSync(2, `entropy-backstop: ${HELPER_MODE_ENV}=${process.env[HELPER_MODE_ENV]} is not a known helper mode\n`);
+  process.exit(EXIT_A25_GATE);
+}
+// R-A25-2-SEC item 7: in helper mode the helper-mode variable leaves process.env too (grant, locator and advisory are
+// deleted above). /proc/self/environ keeps the exec-time environment: a named residual (design v1.5).
+if (HELPER_MODE) delete process.env[HELPER_MODE_ENV];
+const SELF_URL = import.meta.url;
+const ENTROPY_URL = pathToFileURL(join(ENTROPY_ROOT, 'index.ts')).href;
+const INDEX_URL = pathToFileURL(join(SRC_ROOT, 'index.ts')).href;
+export const BACKSTOP_SHA256 = createHash('sha256').update(readFileSync(SELF)).digest('hex');
+const HELPER_MASK = (2 ** HELPER_SAMPLE_K) - 1;
+const reallyExit = typeof process.reallyExit === 'function' ? process.reallyExit.bind(process) : process.exit.bind(process);
+function helperAbort(code, why) {
+  if (HELPER) HELPER.clearToken();
+  try { writeSync(2, `entropy-backstop[A25]: ${why} (exit ${code})\n`); } catch { /* stderr closed */ }
+  reallyExit(code);
+}
+// Intrinsics saved at install, before any user code. Every check below is a slot or own-property read on a
+// non-proxy object, so none of them can run user code.
+const U8 = Uint8Array;
+const U8P = Uint8Array.prototype;
+const TAP = Object.getPrototypeOf(U8P);
+const TA_BYTELENGTH = Object.getOwnPropertyDescriptor(TAP, 'byteLength').get;
+const isView = ArrayBuffer.isView;
+const getProto = Object.getPrototypeOf;
+const hasOwn = Object.hasOwn;
+const gopd = Object.getOwnPropertyDescriptor;
+let origFill = null;
+let HELPER = null; // the one installed gate instance (installHelperMode); never exported
+let HELPER_LOADED = () => Object.freeze([]); // R-A25-2-SEC item 1: D22-4 load digests (installHelperMode)
+// R-A25-2-SEC item 2: helper-mode process.binding allowlist, active once the lockdown is installed. Empty: the helper
+// closure makes no process.binding call and node's own modules use internalBinding (design v1.5, with evidence).
+export const HELPER_BINDING_ALLOW = Object.freeze([]);
+let BINDING_ALLOWLIST_ON = false;
+function helperWalk(i) {
+  assertMarkerIdentity('helper-walk');
+  assertIdentitiesAndStack('helper-walk');
+  checkCaller('randomFillSync', new NativeError().stack);
+}
+// Builds a gate around `fill`. installHelperMode is the only caller in this file and passes only the saved original
+// randomFillSync (test/r-g64-a25.test.mjs pins that). Each instance has its own token and counters in its closure, so
+// an instance built elsewhere (test/r-g64-a25-bare.mjs, normal mode, to inject a throwing fill) cannot reach the
+// installed gate's token; in helper mode no module may import this file after the main entry starts (resolve hook).
+export function makeHelperGate(fill, { walk = helperWalk } = {}) {
+  if (typeof fill !== 'function' || typeof walk !== 'function') throw new NativeError('entropy-backstop: makeHelperGate needs a fill and a walk function');
+  let token = false, calls = 0, walks = 0;
+  function helperGate(target) {
+    // CTO change 2: nothing but a real Uint8Array with intrinsic byteLength / BYTES_PER_ELEMENT, and no offset or
+    // size arguments (fillBuffer passes only the target), so node's randomFillSync coerces nothing user-defined.
+    if (arguments.length !== 1) helperAbort(EXIT_A25_GATE, `gate: ${arguments.length} arguments (only the target is allowed)`);
+    if (!isView(target) || getProto(target) !== U8P) helperAbort(EXIT_A25_GATE, 'gate: target is not a plain Uint8Array');
+    // %TypedArray%.prototype and Uint8Array.prototype are frozen at install in helper mode (installHelperMode), so
+    // their byteLength getter, BYTES_PER_ELEMENT and prototype link cannot change; only an own property on the
+    // instance could shadow them.
+    if (hasOwn(target, 'byteLength') || hasOwn(target, 'BYTES_PER_ELEMENT')) helperAbort(EXIT_A25_GATE, 'gate: target shadows byteLength or BYTES_PER_ELEMENT');
+    if (token) helperAbort(EXIT_A25_TOKEN, 'gate re-entered while the token is set');
+    const i = calls++;
+    if (i < HELPER_FIRST_WALK || (i & HELPER_MASK) === 0) {
+      walks++;
+      try { walk(i); } catch (e) { helperAbort(EXIT_A25_WALK, `sampled walk failed at gate call ${i}: ${e && e.message}`); }
+    }
+    token = true;
+    try { fill(target); } finally { token = false; }
+    return target;
+  }
+  return Object.freeze({ gate: helperGate, fill, tokenSet: () => token, clearToken: () => { token = false; }, counts: () => Object.freeze({ gate_calls: calls, walks }) });
+}
+export let HELPER_GATE = null;
+export function helperState() {
+  return HELPER_MODE ? Object.freeze({ mode: HELPER_MODE_ID, sample_k: HELPER_SAMPLE_K, first_walk: HELPER_FIRST_WALK, part_floor: HELPER_PART_FLOOR, backstop_sha256: BACKSTOP_SHA256, grant: HELPER_GRANT }) : null;
+}
+// CTO change 3: after importing src/index.ts the helper hands its namespace here; no export may be the gate.
+function helperAssertNoGateLeak(ns) {
+  if (!HELPER_MODE) return false;
+  if (ns === null || typeof ns !== 'object') helperAbort(EXIT_A25_GATE, 'leak check: not a module namespace');
+  for (const k of Reflect.ownKeys(ns)) {
+    const v = gopd(ns, k)?.value;
+    if (v === HELPER.gate || v === origFill) helperAbort(EXIT_A25_GATE, `leak check: src/index.ts export ${String(k)} is the gated primitive`);
+  }
+  return true;
+}
+function helperCounts() { return HELPER ? HELPER.counts() : Object.freeze({ gate_calls: 0, walks: 0 }); }
+function installHelperMode(cryptoMod) {
+  if (!HELPER_MODE) return;
+  origFill = originals.randomFillSync ?? cryptoMod.randomFillSync;
+  if (typeof origFill !== 'function' || origFill === wrappers.randomFillSync) throw new NativeError('entropy-backstop: helper mode needs the original randomFillSync');
+  // Freeze the two prototypes node's randomFillSync reads through (byteLength, BYTES_PER_ELEMENT), and check the
+  // getter is still the intrinsic one, so the per-call gate needs no descriptor read.
+  if (gopd(TAP, 'byteLength')?.get !== TA_BYTELENGTH || getProto(U8P) !== TAP || hasOwn(U8P, 'byteLength')) throw new NativeError('entropy-backstop: helper mode found a changed Uint8Array prototype chain at install');
+  Object.freeze(TAP); Object.freeze(U8P);
+  if (!Object.isFrozen(TAP) || !Object.isFrozen(U8P)) throw new NativeError('entropy-backstop: helper mode could not freeze the TypedArray prototypes');
+  HELPER = makeHelperGate(origFill);
+  HELPER_GATE = HELPER.gate;
+  // A25-2: the manifest the grant binds (exits 90 on a missing, unreadable, swapped or malformed file).
+  const VIEW = readManifest(MANIFEST_PATH, MANIFEST_SHA256, (c) => helperAbort(c, 'manifest header check failed'));
+  const nodeModule = require('node:module');
+  const { registerHooks } = nodeModule;
+  const MAIN_URL = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
+  const STARTUP_CWD_URL = pathToFileURL(process.cwd() + sep).href;
+  let mainStarted = false;
+  // A25-2 (W1): the lockdown refuses forbidden builtins at resolve; the load step re-checks every node: URL as well.
+  const FORBIDDEN_SET = new Set(FORBIDDEN_BUILTINS), ADDON_SET = new Set(ADDON_BUILTINS);
+  const builtinLoadCheck = (url, where) => {
+    const b = String(url).slice(5);
+    if (FORBIDDEN_SET.has(b)) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `${where}: forbidden builtin ${url}`);
+    if (ADDON_SET.has(b)) helperAbort(EXIT_A25_ADDON, `${where}: addon builtin ${url}`);
+  };
+  const GATE_SOURCE = `import { HELPER_GATE as g } from ${JSON.stringify(SELF_URL)};\nif (typeof g !== 'function') throw new Error('gate missing');\nexport const randomFillSync = g;\nexport default Object.freeze({ randomFillSync: g });\n`;
+  // A25-2 (CTO 22:20 ruling): in helper mode a resolved URL may only be file: (then held to the manifest at load),
+  // node: (builtin checks) or the virtual gate. data:, blob:, http(s): and any other scheme are code outside the
+  // manifest: 89, wherever the resolve came from (our hook or the lockdown chain).
+  const SCHEME_OK = (u) => u === HELPER_GATE_URL || u.startsWith('file:') || u.startsWith('node:');
+  const schemeCheck = (u, where) => {
+    if (typeof u !== 'string' || !SCHEME_OK(u)) helperAbort(EXIT_A25_MANIFEST_OUTSIDE, `${where}: scheme not allowed in helper mode: ${String(u).slice(0, 40)}`);
+  };
+  // R-A25-2-SEC item 1 (D22-4 moved here): the evidence helper's observing load hook is now ours. For the helper main
+  // only, every src/ file is recorded with the digest of the bytes node compiles; helper.loaded() hands the list over.
+  const HELPER_MAIN_REL = 'verification/harness/evidence-helper.mjs';
+  const mainIsHelper = MAIN_URL !== null && VIEW.entries.has(HELPER_MAIN_REL) && MAIN_URL === pathToFileURL(join(VIEW.root, HELPER_MAIN_REL)).href;
+  const loaded = [];
+  HELPER_LOADED = () => Object.freeze(loaded.map((e) => Object.freeze([...e])));
+  const recordLoaded = (rel) => { if (mainIsHelper && rel.startsWith('src/')) loaded.push([rel, VIEW.entries.get(rel)]); };
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const parent = context.parentURL;
+      if (specifier === HELPER_GATE_URL) helperAbort(EXIT_A25_GATE, `resolve: ${HELPER_GATE_URL} requested by ${parent}`);
+      if (parent === ENTROPY_URL && (specifier === 'node:crypto' || specifier === 'crypto')) return { url: HELPER_GATE_URL, format: 'module', shortCircuit: true };
+      const r = nextResolve(specifier, context);
+      schemeCheck(r && r.url, 'resolve');
+      // Before the main entry resolves, a second top-level --import of the preload (NODE_OPTIONS and argv both name it)
+      // is resolved from undefined or the startup cwd; from the main entry on, only the gate URL may import it.
+      if (r.url === MAIN_URL) mainStarted = true;
+      if (r.url === SELF_URL && parent !== HELPER_GATE_URL && (mainStarted || (parent !== undefined && parent !== STARTUP_CWD_URL))) helperAbort(EXIT_A25_GATE, `resolve: the preload is not importable in helper mode (from ${parent})`);
+      if (r.url === ENTROPY_URL && parent !== INDEX_URL) helperAbort(EXIT_A25_GATE, `resolve: src/entropy/index.ts imported by ${parent}, only src/index.ts may`);
+      return r;
+    },
+    load(url, context, nextLoad) {
+      if (url === HELPER_GATE_URL) {
+        return { format: 'module', shortCircuit: true, source: GATE_SOURCE };
+      }
+      // A25-2: every non-builtin load must be a manifest file whose bytes match its entry. The check runs on the
+      // bytes node will compile (r.source), not on a second read, so a swap between check and compile is caught.
+      schemeCheck(url, 'load');
+      if (typeof url === 'string' && url.startsWith('node:')) {
+        builtinLoadCheck(url, 'load');
+        // R-A25-2-SEC item 4: a builtin must come back as node's builtin, with no source a hook could have swapped in.
+        const rb = nextLoad(url, context);
+        if (!rb || rb.format !== 'builtin' || rb.source != null) helperAbort(EXIT_A25_MANIFEST_OUTSIDE, `load: ${url} came back as ${rb && rb.format}${rb && rb.source != null ? ' with a source' : ''}, not the builtin`);
+        return rb;
+      }
+      const v = verifyLoad(VIEW, url);
+      if (!v.ok) helperAbort(v.code, `load: ${v.why}`);
+      const r = nextLoad(url, context);
+      if (r && r.source != null) {
+        const src = typeof r.source === 'string' ? Buffer.from(r.source, 'utf8') : Buffer.from(r.source.buffer ?? r.source, r.source.byteOffset ?? 0, r.source.byteLength);
+        if (createHash('sha256').update(src).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `load: compiled bytes of ${v.rel} differ from the manifest`);
+        recordLoaded(v.rel);
+        return r;
+      }
+      // A6ii-M3 (CTO, int-v8): CommonJS with no source from nextLoad. Node compiles exactly the bytes handed here, never
+      // a re-read from fs; those bytes are hashed against the manifest at this hand-off too (not only inside
+      // verifyLoad), so the compiled bytes of a manifest .cjs either match its digest or the helper exits 90.
+      if (!Buffer.isBuffer(v.bytes) || createHash('sha256').update(v.bytes).digest('hex') !== VIEW.entries.get(v.rel)) helperAbort(EXIT_A25_MANIFEST_DIGEST, `load: CommonJS bytes of ${v.rel} differ from the manifest`);
+      recordLoaded(v.rel);
+      return { ...r, source: v.bytes };
+    },
+  });
+  // A25-2: the lockdown is the LAST preload hook (Addendum B). After it, installHookGuard (install()) refuses every
+  // runtime registerHooks/register call with 94 (R-A25-2-SEC item 1: no late-hook allowance).
+  installLockdown({ isManifestUrl: makeIsManifestUrl(VIEW, A25_DYNAMIC_BUILTINS), abort: helperAbort, registerRefuseHook });
+  // R-A25-2-SEC item 2: from here on process.binding is an allowlist (HELPER_BINDING_ALLOW, empty: design v1.5).
+  BINDING_ALLOWLIST_ON = true;
+  // R-A25-2-SEC item 3: the inspector entry points on process (SIGUSR1-style attach, Sec p9) give 92.
+  for (const k of ['_debugProcess', '_debugEnd', '_startProfilerIdleNotifier', '_stopProfilerIdleNotifier']) {
+    const d = gopd(process, k);
+    if (d && d.configurable === false) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `process.${k} cannot be locked`);
+    const stub = function () { helperAbort(EXIT_A25_FORBIDDEN_MODULE, `process.${k} refused in helper mode (inspector entry point)`); };
+    Object.defineProperty(process, k, { value: stub, writable: false, configurable: false, enumerable: false });
+  }
+  // Residual found while closing item 3 (design v1.5 L-SEC-2): a SIGUSR1 sent from outside starts the inspector even
+  // with the stubs above. A JS listener replaces Node's default handler, so the signal now gives 92 instead. Helper
+  // code that removes every SIGUSR1 listener restores the default; --disable-sigusr1 on the helper spawn would close
+  // that too and is proposed to CTO (it changes the launcher's exact spawn arguments, A25-6 iv).
+  process.on('SIGUSR1', function backstopSigusr1() { helperAbort(EXIT_A25_FORBIDDEN_MODULE, 'SIGUSR1 (inspector activation) received in helper mode'); });
+  // R-A25-2-SEC item 5: WebAssembly compiles and runs code outside the manifest: 91. Node's own TypeScript stripping
+  // (amaro, used for every src/*.ts load) instantiates a wasm module lazily through the same global, so it is primed
+  // here first, once, with its experimental warning held back; later .ts loads reuse that instance.
+  const WA = globalThis.WebAssembly;
+  if (typeof nodeModule.stripTypeScriptTypes === 'function') {
+    const ew = process.emitWarning;
+    process.emitWarning = function () {};
+    try { nodeModule.stripTypeScriptTypes('const a: number = 1;'); } catch { helperAbort(EXIT_A25_CODEGEN, 'could not prime TypeScript stripping before the WebAssembly lock'); } finally { process.emitWarning = ew; }
+  }
+  if (WA && typeof WA === 'object') {
+    for (const k of ['compile', 'instantiate', 'Module', 'compileStreaming', 'instantiateStreaming']) {
+      const stub = function () { helperAbort(EXIT_A25_CODEGEN, `WebAssembly.${k} called in helper mode`); };
+      Object.defineProperty(WA, k, { value: stub, writable: false, configurable: false, enumerable: false });
+    }
+    Object.defineProperty(globalThis, 'WebAssembly', { value: WA, writable: false, configurable: false, enumerable: false });
+  }
+}
+// R-A25-2-SEC item 1: module.registerHooks and module.register are refused at call time with 94, before any hook is
+// installed, in BOTH modes. The preload owns the only hooks (helper mode: ours plus the lockdown's).
+function installHookGuard() {
+  const nodeModule = require('node:module');
+  if (nodeModule.registerHooks && nodeModule.registerHooks._backstopHookGuard) return;
+  const refuseHooks = function registerHooks() { helperAbort(EXIT_A25_IMPORT, 'module.registerHooks after the preload (A25-2: the preload owns the only hooks)'); };
+  const refuseRegister = function register() { helperAbort(EXIT_A25_IMPORT, 'module.register after the preload (A25-2: the preload owns the only hooks)'); };
+  refuseHooks._backstopHookGuard = true; refuseRegister._backstopHookGuard = true;
+  try {
+    Object.defineProperty(nodeModule, 'registerHooks', { value: refuseHooks, writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(nodeModule, 'register', { value: refuseRegister, writable: false, configurable: false, enumerable: true });
+    nodeModule.syncBuiltinESMExports();
+  } catch { helperAbort(EXIT_A25_IMPORT, 'could not install the hook guard'); }
+  if (nodeModule.registerHooks !== refuseHooks || nodeModule.register !== refuseRegister) helperAbort(EXIT_A25_IMPORT, 'hook guard not in place');
+}
+// import() of a builtin in helper mode: none today (the helper's dynamic imports are manifest files); the trace at
+// the A31 prereg re-pins this list together with the pinned helper closure (verification/harness/helper-closure.json).
+const A25_DYNAMIC_BUILTINS = Object.freeze([]);
+
 function wrapFn(id, orig) {
   if (typeof orig !== 'function') {
     throw new NativeError(`entropy-backstop: cannot wrap ${id}: not a function`);
   }
   const wrapped = function entropyBackstopWrapped(...args) {
     counters[id] += 1;
+    if (HELPER_MODE) helperAbort(EXIT_A25_TOKEN, `${id} called in helper mode ${HELPER && HELPER.tokenSet() ? 'while the token is set (re-entry)' : 'with the token clear'}`);
     assertMarkerIdentity(`call:${id}`);
     assertIdentitiesAndStack(`call:${id}`);
     const err = new NativeError();
@@ -587,6 +884,20 @@ export function reportEvidenceResult(result) {
   return resultContentDigest(result);
 }
 export function evidenceGrantActive() { return activeGrant !== null && evidenceGrants.has(activeGrant); }
+// A25-1: the token of g while g is the open grant, else null. The launcher passes it to each helper and re-reads it
+// to decide that the grant is still live.
+export function evidenceGrantToken(g) {
+  return g !== null && typeof g === 'object' && evidenceGrants.has(g) && activeGrant === g ? `grant-${g.grant}@${process.pid}` : null;
+}
+// A25-1 (design v2): a fresh per-spawn token, grant-<n>@<pid>#<128-bit nonce>, from the ORIGINAL randomFillSync (the
+// launcher's own crypto calls would go through the wrapped entry points). null unless g is the open grant.
+export function evidenceSpawnToken(g) {
+  const t = evidenceGrantToken(g);
+  const fill = originals.randomFillSync;
+  if (t === null || typeof fill !== 'function') return null;
+  const b = new Uint8Array(16); fill(b);
+  return `${t}#${Buffer.from(b).toString('hex')}`;
+}
 
 // G-55 (HoQ report 505599e..96aaf91): a battery binary is launched only if its real path and sha256 equal an
 // entry of verification/harness/tool-binaries.json, whose source pin equals the frozen tool-pins-v1.1.json
@@ -624,10 +935,43 @@ export function launchEvidenceTool(g, file, args = [], options = {}) {
   try { return cp.spawnSync(file, args, { ...options, shell: false }); } finally { launching = null; }
 }
 
+// R-G64 (design §3, Q3 a): the same launch, asynchronous, so a battery tool can read one helper's outcomes as
+// they are counted (stdin piped by the launcher). Every check above runs unchanged: open grant, guard re-run,
+// absolute path, pinned binary (G-55), no shell; the spawn-layer G-45 check sees launching set for this call.
+export function launchEvidenceToolStream(g, file, args = [], options = {}) {
+  if (!evidenceGrants.has(g) || activeGrant !== g || grantEntry === null) refuseChild('evidence tool launch without an open grant (G-45)');
+  grantEntry.assertEvidenceRunReady();
+  if (typeof file !== 'string' || !isAbsolute(file) || !EVIDENCE_TOOLS.includes(basename(file))) refuseChild(`launchEvidenceToolStream: ${String(file)} is not an absolute path to an evidence tool (G-45)`);
+  const real = pinnedBinary(file);
+  const cp = require('node:child_process');
+  launching = { grant: g, file, real };
+  try { return cp.spawn(file, args, { ...options, shell: false }); } finally { launching = null; }
+}
+
 export const CHILD_EXECUTABLE_ALLOWLIST = Object.freeze(['node', 'git', 'mkdir', 'ln']);
 const TRUSTED_DIRS = Object.freeze([...new Set(['/usr/bin', '/bin', '/usr/local/bin', dirname(process.execPath)].map((d) => { try { return realpathSync(d); } catch { return d; } }))]);
 const PLAIN_WORD = /^[A-Za-z0-9_./:,@%+=-]+$/;
 const PROOF_ENV = 'ENTROPY_BACKSTOP_PROOF_FILE';
+// A25-1: the proof path of each async node child, so a caller can tie the G-39 proof to one child (a helper part).
+const childProofs = new WeakMap();
+// null: not a node child spawned through this hook; false: no proof file; otherwise the proof the child's preload
+// wrote ({ pid, preload_sha256, token, manifest_sha256, sigusr1_disabled } or { invalid: true }) plus the file's mtime_ms.
+// int-v8: sigusr1_disabled is passed through (without it every header-bound part would void at the launcher's check).
+export function childPreloadProof(child) {
+  const p = child !== null && typeof child === 'object' ? childProofs.get(child) : undefined;
+  if (p === undefined) return null;
+  if (!existsSync(p)) return false;
+  let body;
+  try { body = JSON.parse(readFileSync(p, 'utf8')); } catch { body = null; }
+  const ok = body !== null && typeof body === 'object' && !Array.isArray(body);
+  return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token, manifest_sha256: body.manifest_sha256 ?? null, sigusr1_disabled: body.sigusr1_disabled ?? null } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
+}
+// N-PV-1 (Sec, int-v8 r7): the hook proof file path recorded for an async node child (null for any other value), so
+// a caller binds the bare view of the proof by path, not by mtime. Read-only: the path is the one newProofPath() gave it.
+export function childPreloadProofPath(child) {
+  const p = child !== null && typeof child === 'object' ? childProofs.get(child) : undefined;
+  return typeof p === 'string' ? p : null;
+}
 let proofDir = null;
 let proofSeq = 0;
 export const proofFailures = [];
@@ -799,7 +1143,12 @@ function checkProof(path, label) {
 function writeProof() {
   const p = process.env[PROOF_ENV];
   if (!p) return;
-  try { writeFileSync(p, String(process.pid), { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
+  // A25-1: the proof names this process, the preload's own digest and the spawn token it was started with. 'wx':
+  // a file that already exists is never overwritten, so a stale proof keeps its old pid and token (and voids).
+  // A25-2: the grant-bound manifest digest (null outside helper mode). int-v8 (CTO ruling (a), L-SEC-2): whether node
+  // was started with --disable-sigusr1 (process.execArgv is fixed at startup; this runs at install, before any user code).
+  const body = JSON.stringify({ pid: process.pid, preload_sha256: BACKSTOP_SHA256, token: SPAWN_TOKEN, manifest_sha256: MANIFEST_SHA256, sigusr1_disabled: process.execArgv.includes('--disable-sigusr1') });
+  try { writeFileSync(p, body, { flag: 'wx' }); } catch { /* the parent will see no proof: red */ }
   delete process.env[PROOF_ENV];
 }
 
@@ -841,8 +1190,14 @@ function installBindingGuard() {
   const orig = process.binding;
   if (typeof orig !== 'function' || orig._backstopBinding) return;
   const guarded = function (name) {
+    if (BINDING_ALLOWLIST_ON && !HELPER_BINDING_ALLOW.includes(String(name))) {
+      const msg = `entropy-backstop: process.binding('${String(name)}') refused in helper mode (not on the allowlist)`;
+      refused('binding', msg);
+      helperAbort(EXIT_A25_FORBIDDEN_MODULE, msg); // no refuse hook yet cannot happen (the lockdown registers it first)
+    }
     if (REFUSED_BINDINGS.includes(String(name))) {
       const msg = `entropy-backstop: process.binding('${String(name)}') refused (G-39)`;
+      refused(String(name) === 'spawn_sync' || String(name) === 'process_wrap' ? 'spawn' : 'binding', msg);
       console.error(msg);
       throw new NativeError(msg);
     }
@@ -854,6 +1209,7 @@ function installBindingGuard() {
   if (typeof process.dlopen === 'function' && !process.dlopen._backstopBinding) {
     const dl = function () {
       const msg = 'entropy-backstop: process.dlopen refused (G-39: native addons bypass every hook)';
+      refused('dlopen', msg);
       console.error(msg);
       throw new NativeError(msg);
     };
@@ -865,6 +1221,7 @@ function installBindingGuard() {
   if (typeof process.execve === 'function' && !process.execve._backstopBinding) {
     const ex = function () {
       const msg = 'entropy-backstop: process.execve refused (G-46: replaces the process with an unhooked program)';
+      refused('spawn', msg);
       console.error(msg);
       throw new NativeError(msg);
     };
@@ -880,6 +1237,8 @@ function installChildProcessHook() {
     if (typeof orig !== 'function' || orig._backstopChild) continue;
     const sync = name.endsWith('Sync');
     const hooked = function (...args) {
+      // R-A25-2-SEC item 3: no child in helper mode, through any holder of these exports (node:test's runner included).
+      if (HELPER_MODE) helperAbort(EXIT_A25_FORBIDDEN_MODULE, `child_process.${name} refused in helper mode`);
       const { args: mapped, proof } = mapChildArgs(args, name);
       if (!proof) return orig.apply(this, mapped);
       if (sync) {
@@ -890,6 +1249,7 @@ function installChildProcessHook() {
         return r;
       }
       const child = orig.apply(this, mapped);
+      if (child && typeof child === 'object') childProofs.set(child, proof);
       if (child && typeof child.once === 'function') child.once('exit', () => checkProof(proof, `${name} ${String(args[0]).slice(0, 80)}`));
       return child;
     };
@@ -966,6 +1326,8 @@ export function install(opts = {}) {
     wrappers[t.id] = wrapped;
   }
   try { syncBuiltinESMExports(); } catch { /* not fatal for CJS-only surfaces */ }
+  installHelperMode(crypto);
+  installHookGuard();
   for (const id of ENTRY_POINT_IDS) counters[id] = 0;
   countersAtInstall = Object.freeze(Object.fromEntries(ENTRY_POINT_IDS.map((id) => [id, 0])));
   installed = true;
@@ -983,7 +1345,8 @@ export function install(opts = {}) {
     savedLimit,
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, close: closeEvidenceGrant, active: evidenceGrantActive, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
+    helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts, loaded: () => HELPER_LOADED() }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, token: evidenceGrantToken, spawnToken: evidenceSpawnToken, childProof: childPreloadProof, childProofPath: childPreloadProofPath, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });

@@ -1,0 +1,758 @@
+// R-G64 streamed harness (design verification/r-g64-design.md; HoQ addendum 1 A22, D22-1..8). Mutants of the
+// files tested here are in tools/ci/j-calib-mutants.mjs (RS-*) and tools/ci/g39-mutants.mjs (RS-B*).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as F from '../verification/harness/stream-frames.mjs';
+import * as P from '../verification/harness/run-plan.mjs';
+import * as L from '../verification/harness/stream-launcher.mjs';
+import * as S from '../verification/statistic/wave1-statistic.mjs';
+import { statisticFromRecords } from '../verification/harness/wave1-evidence.mjs';
+import { buildManifest } from '../tools/ci/a25-manifest.mjs';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const FAKE = join(ROOT, 'test/fixtures/r-g64-fake-helper.mjs');
+const K = P.loadKTests(ROOT);
+const kOf = (id) => K.find((k) => k.id === id);
+const env = () => ({ ...process.env }); // under npm test the children load the backstop too (and prove it)
+const tmp = (p) => mkdtempSync(join(tmpdir(), `rg64-${p}-`));
+// A25-2: helper-mode children need a manifest bound through the grant (L.helperSpawnEnv). Test manifests list every
+// file under src/, verification/ and tools/ci/ (a superset of the traced closure); `extra` adds absolute paths outside
+// the tree, which roots the manifest at '/'.
+function walk(abs) { const out = []; for (const e of readdirSync(abs, { withFileTypes: true })) { const p = join(abs, e.name); if (e.isDirectory()) out.push(...walk(p)); else out.push(p); } return out; }
+function testManifest(dir, extra = []) {
+  const files = ['src', 'verification', 'tools/ci'].flatMap((d) => walk(join(ROOT, d)));
+  const root = extra.length ? '/' : ROOT.replace(/\/$/, '');
+  const rel = [...files, ...extra].map((f) => (root === '/' ? f.slice(1) : f.slice(root.length + 1)));
+  const { bytes, sha256 } = buildManifest(root, rel);
+  const manifestPath = join(dir, 'manifest.json');
+  writeFileSync(manifestPath, bytes);
+  return { manifestPath, manifestSha256: sha256 };
+}
+
+// spawnPart for the fixture: the same global sequence whatever the partition. faults: { 'attempt:j': fault }.
+function fakeSpawn(plan, { seed = 's', faults = {} } = {}) {
+  const tries = new Map();
+  return (stream, j, calls, token) => {
+    const a = (tries.get(`${stream.id}:${j}`) ?? 0) + 1; tries.set(`${stream.id}:${j}`, a);
+    const off = stream.parts.slice(0, j).reduce((x, y) => x + y, 0);
+    const fault = faults[`${a}:${j}`] ?? 'none';
+    const c = spawn(process.execPath, [FAKE, '--run', plan.run_id, '--stream', stream.id, '--rep', stream.rep, '--j', String(j), '--calls', String(calls), '--off', String(off), '--seed', seed, '--fault', fault, '--grant', String(token)],
+      { env: { ...env(), ENTROPY_BACKSTOP_GRANT: String(token) }, stdio: ['ignore', 'ignore', 'inherit', 'pipe'] });
+    SPAWNED.set(c, token); return c;
+  };
+}
+const expect = () => ({ src: P.srcManifest(ROOT) });
+// A25-1 (design v2): a test grant view. Each spawn gets a fresh token base#n. Under npm test the proof comes from
+// this process's real G-39 hook (the preloaded fixture child writes it). The j-calib copy runs this file in a bare
+// parent (no hook): there the default proof is the record the preload would write. The hook and the preload's proof
+// are tested through preloaded probe processes, and each launcher proof check through explicit views below.
+const MARKED = () => globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.evidence ?? null;
+const PRELOADED_PARENT = MARKED() !== null;
+const TOKEN = 'grant-1@test';
+const BS_SHA = createHash('sha256').update(readFileSync(join(ROOT, 'tools/ci/entropy-backstop.mjs'))).digest('hex');
+const SPAWNED = new WeakMap(); // child -> the token it was spawned with
+let tokenSeq = 0;
+const goodProof = (c) => ({ pid: c.pid, preload_sha256: BS_SHA, token: SPAWNED.get(c), mtime_ms: Date.now() });
+const grantView = ({ base = TOKEN, live = () => true, next = () => `${base}#${++tokenSeq}`, proof = (c) => (MARKED() ? MARKED().childProof(c) : goodProof(c)) } = {}) => ({ base, live, next, proof });
+// The same sequence, one pass, in this process (what the fixture emits for global indices 0..n-1).
+function onePass(rep, n, seed = 's') {
+  const r = spawnSync(process.execPath, [FAKE, '--run', 'x', '--stream', 'x', '--rep', rep, '--j', '0', '--calls', String(n), '--off', '0', '--seed', seed], { env: env(), stdio: ['ignore', 'ignore', 'inherit', 'pipe'], maxBuffer: 1 << 28 });
+  const rd = new F.FrameReader(); const c = F.codecFor(kOf(rep)); const v = [];
+  for (const f of rd.push(r.output[3])) if (f.type === F.FRAME.D) for (let i = 0; i < f.payload.length; i += c.bytes) v.push(c.decode(f.payload, i));
+  return v;
+}
+
+test('frames: round trip; unknown type, oversize payload and trailing bytes are integrity errors', () => {
+  const r = new F.FrameReader();
+  const b = Buffer.concat([F.jsonFrame(F.FRAME.H, { a: 1 }), F.frame(F.FRAME.D, Buffer.from([1, 2, 3])), F.jsonFrame(F.FRAME.T, { c: 3 })]);
+  const got = [...r.push(b.subarray(0, 7)), ...r.push(b.subarray(7))];
+  assert.deepEqual(got.map((f) => f.type), [F.FRAME.H, F.FRAME.D, F.FRAME.T]);
+  assert.deepEqual([...got[1].payload], [1, 2, 3]); r.end();
+  assert.throws(() => new F.FrameReader().push(Buffer.from([0x5a, 0, 0, 0, 0])), /unknown type/);
+  const big = Buffer.alloc(5); big[0] = F.FRAME.D; big.writeUInt32LE(F.MAX_DATA + 1, 1);
+  assert.throws(() => new F.FrameReader().push(big), /over its limit/);
+  const t = new F.FrameReader(); t.push(Buffer.from([F.FRAME.D, 9, 0])); assert.throws(() => t.end(), /trailing/);
+});
+
+test('codec: exact for every K call shape, including [0, 2^48) and shuffle n=1000', () => {
+  for (const k of K) {
+    const c = F.codecFor(k); const b = Buffer.alloc(c.bytes);
+    const p = k.parameters;
+    const v = k.primitive === 'randomInt' ? p.max - 1 : k.primitive === 'weightedPick' ? F.weightsFor(k).length - 1
+      : k.primitive === 'shuffle' ? Array.from({ length: p.n }, (_, i) => p.n - 1 - i) : Array.from({ length: p.k }, (_, i) => p.n - 1 - i);
+    c.encode(v, b, 0); assert.deepEqual(c.decode(b, 0), v, k.id);
+  }
+  assert.throws(() => F.codecFor(kOf('randomInt/chi2/min-0-max-2')).encode(2, Buffer.alloc(1), 0), /outside/);
+});
+
+test('D22-6: outcome keys are exact up to 128 bits and sha256-128 only above', () => {
+  const a = Buffer.alloc(16, 7), b = Buffer.alloc(17, 7);
+  assert.equal(F.outcomeKey(a), `x${a.toString('hex')}`);
+  assert.equal(F.outcomeKey(b), `h${createHash('sha256').update(b).digest('hex').slice(0, 32)}`);
+  assert.notEqual(F.outcomeKey(Buffer.from([1])), F.outcomeKey(Buffer.from([1, 0])), 'exact keys keep the length');
+});
+
+test('plan: n_j = floor(M/N) + (j < M mod N); M is a parameter; one shared stream per shape; parts are multiples of L', () => {
+  assert.deepEqual(P.partition(10, 4), [3, 3, 2, 2]);
+  assert.deepEqual(P.partition(8, 8), Array(8).fill(1));
+  assert.throws(() => P.partition(3, 4)); assert.throws(() => P.partition(0, 1));
+  const M = Object.fromEntries(K.map((k) => [k.id, 1000 + (k.id.length % 7)]));
+  const plan = P.buildPlan({ runId: 'r', M, N: 7 });
+  assert.equal(plan.streams.length, 24);
+  for (const s of plan.streams) {
+    assert.equal(s.parts.reduce((a, b) => a + b, 0), s.calls);
+    for (const n of s.parts) assert.equal(n % s.L, 0, `${s.id} part not a multiple of L`);
+    for (const e of s.entries) { assert.ok(s.calls >= e.M * e.w); assert.equal(plan.stream_map[e.id], s.id); }
+  }
+  assert.equal(Object.keys(plan.stream_map).length, K.length);
+  assert.throws(() => P.buildPlan({ runId: 'r', N: 2 }), /M per entry/);
+  const two = P.buildPlan({ runId: 'r2', M: { 'shuffle/positional/n-104': 10 }, N: 2, prefix: 'R2-' });
+  assert.equal(two.streams[0].id, 'R2-01');
+});
+
+async function runFake(ids, { M, N, observations = {}, faults = {}, maxAttempts = 3, seed } = {}) {
+  const plan = P.buildPlan({ runId: 'rt', M: Object.fromEntries(ids.map((id) => [id, M[id] ?? M])), N });
+  const stream = plan.streams[0];
+  const dir = tmp('run');
+  try {
+    const consumers = await L.wave1Consumers(stream, { observations });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults, seed }), runDir: dir, consumers, expect: expect(), maxAttempts, grant: grantView() });
+    const stats = res.counted ? L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep))) : null;
+    return { plan, stream, res, stats, consumers };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('merge equals one pass: adjacency (fixed accumulators) for N = 1, 3, 5 equals the one-pass wave-1 statistic', async () => {
+  const id = 'shuffle/adjacency-mod4/n-52';
+  const one = statisticFromRecords(S.ENTRIES.find((e) => e.id === id), onePass(id, 600), 600);
+  for (const N of [1, 3, 5]) {
+    const { res, stats } = await runFake([id], { M: 600, N });
+    assert.equal(res.counted, true, JSON.stringify(res.attempts));
+    assert.equal(stats[id].x2, one.x2, `N=${N}`); assert.equal(stats[id].df, one.df);
+  }
+});
+
+test('merge equals one pass: coupon and duplicates (sequential, payload files in part order) for N = 1, 2, 4', async () => {
+  for (const [id, calls, obs] of [['randomInt/coupon-collector/min-0-max-2', 3000, 300], ['randomInt/duplicates/min-0-max-4294967296', 4096 * 40, 40]]) {
+    const want = statisticFromRecords(S.ENTRIES.find((e) => e.id === id), onePass(id, calls), obs);
+    assert.equal(typeof want.x2, 'number'); assert.ok(want.outcomes > 0);
+    for (const N of [1, 2, 4]) {
+      const { res, stats } = await runFake([id], { M: calls, N, observations: { [id]: obs } });
+      assert.equal(res.counted, true, JSON.stringify(res.attempts));
+      assert.equal(stats[id].x2, want.x2, `${id} N=${N}`); assert.equal(stats[id].outcomes, want.outcomes);
+    }
+  }
+});
+
+test('F-MI-1: a shuffle positional entry streamed through runStreamCore completes at N = 2 and N = 32, and its statistic equals one pass', async () => {
+  const id = 'shuffle/positional/n-52', M = 64, n = 52;
+  const Q = await import('../verification/statistic/positional-statistic.mjs');
+  const one = Q.positionalAccumulator(n); for (const v of onePass(id, M)) one.add(v);
+  const want = Q.positionalStatistic(one.C, n, M);
+  for (const N of [2, 32]) {
+    const plan = P.buildPlan({ runId: 'rt', M: { [id]: M }, N });
+    const stream = plan.streams[0];
+    assert.equal(stream.parts.length, N);
+    const dir = tmp('pos');
+    try {
+      const consumers = await L.positionalConsumers(stream, { kTests: K });
+      assert.equal(consumers.fixed.length, 1);
+      const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
+      assert.equal(res.counted, true, `N=${N} ${JSON.stringify(res.attempts)}`);
+      const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)))[id];
+      assert.equal(st.x2, want.x2, `N=${N}`); assert.equal(st.df, want.df); assert.equal(st.p, want.p);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('D22-3: a shared stream read as w=1 values and w=2 windows; windows never straddle parts; merge equals one pass', async () => {
+  const plan = P.buildPlan({ runId: 'rt', M: { 'randomInt/chi2/min-0-max-38': 50, 'randomInt/ordered-pair-chi2/min-0-max-38': 40 }, N: 3 });
+  const stream = plan.streams[0];
+  assert.equal(stream.L, 2); assert.equal(stream.calls, 80);
+  const pairCount = (w, M) => ({ id: `pairs-${w}`, w, M, create() { const m = new Map(); return { m, add(win) { const key = win.join(','); m.set(key, (m.get(key) ?? 0) + 1); }, merge(o) { for (const [a, b] of o.m) m.set(a, (m.get(a) ?? 0) + b); } }; }, finish(a) { return [...a.m].sort(); } });
+  const consumers = { fixed: [pairCount(1, 50), pairCount(2, 40)], seq: [] };
+  const dir = tmp('w');
+  try {
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
+    const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)));
+    const v = onePass(stream.rep, 80);
+    const tally = (arr) => { const m = new Map(); for (const k of arr) m.set(k, (m.get(k) ?? 0) + 1); return [...m].sort(); };
+    assert.deepEqual(st['pairs-1'], tally(v.slice(0, 50).map(String)));
+    assert.deepEqual(st['pairs-2'], tally(Array.from({ length: 40 }, (_, t) => `${v[2 * t]},${v[2 * t + 1]}`)));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const FAULTS = [
+  ['exit', /helper exit 3/], ['no-t', /no trailer/], ['no-h', /D frame outside H..T|no H frame/], ['short', /count \d+ != n_j/],
+  ['extra', /more than n_j/], ['t-count', /trailer count/], ['t-digest', /trailer digest differs/], ['shape', /outcome 0: /],
+  ['ragged', /not whole outcomes/], ['garbage', /unknown type/], ['h-j', /H frame j\/n_j/], ['h-n', /H frame j\/n_j/],
+  ['src-before', /src_before/], ['src-after', /srcDigest_after/], ['loaded', /as loaded differs .*D22-4/],
+  ['h-nomode', /not in A25 mode/], ['h-k', /differs from the plan a25\/k=\d+.*A25-4/], ['h-bs', /backstop digest differs.*A25-1/], ['h-leak', /leak check did not run/], ['h-nogrant', /H grant is not this spawn's token .*A25-1/], ['h-badgrant', /H grant is not this spawn's token .*A25-1/], ['t-walks', /trailer A25 walks .*A25-4/], ['h-floor', /part floor \d+ differs from the plan .*A25-4b/],
+];
+for (const [fault, why] of FAULTS) {
+  test(`D22-8 integrity void: ${fault} voids the attempt, the void reason is kept, no statistic is computed`, async () => {
+    const id = 'shuffle/adjacency-mod4/n-52';
+    const { res, stream, consumers } = await runFake([id], { M: 40, N: 2, faults: { '1:1': fault }, maxAttempts: 1 });
+    assert.equal(res.counted, false);
+    assert.equal(res.attempts.length, 1); assert.match(res.attempts[0].void, why);
+    assert.throws(() => L.streamStatistics(res, stream, consumers, null), /not counted \(D22-8\)/);
+  });
+}
+
+test('D22-8: a voided attempt is re-run from scratch; attempts and reasons are listed; only the counted attempt is used', async () => {
+  const id = 'shuffle/adjacency-mod4/n-52';
+  const { res, stats } = await runFake([id], { M: 60, N: 3, faults: { '1:2': 't-digest' } });
+  assert.equal(res.counted, true);
+  assert.deepEqual(res.attempts.map((a) => a.void === null), [false, true]);
+  assert.match(res.attempts[0].void, /part 2: trailer digest/);
+  const one = statisticFromRecords(S.ENTRIES.find((e) => e.id === id), onePass(id, 60), 60);
+  assert.equal(stats[id].x2, one.x2);
+});
+
+test('D22-8: the void that happened first is the attempt reason; a part killed because of it says so', async () => {
+  const { res } = await runFake(['shuffle/adjacency-mod4/n-52'], { M: 40, N: 2, faults: { '1:0': 'slow', '1:1': 'garbage' }, maxAttempts: 1 });
+  assert.equal(res.counted, false);
+  assert.match(res.attempts[0].void, /^part 1: .*unknown type/);
+  assert.match(res.attempts[0].all_void_reasons[1], /^part 0: killed after part 1: /);
+});
+
+test('Q3: fixed accumulators are merged in part order', async () => {
+  const plan = P.buildPlan({ runId: 'rt', M: { 'shuffle/adjacency-mod4/n-52': 30 }, N: 3 });
+  const stream = plan.streams[0];
+  const seqAcc = { id: 'order', w: 1, M: 30, create() { const a = { first: [], add(win) { if (!a.first.length) a.first.push(win[0].join(',')); }, merge(o) { a.first.push(...o.first); } }; return a; }, finish(a) { return a.first; } };
+  const consumers = { fixed: [seqAcc], seq: [] };
+  const dir = tmp('ord');
+  try {
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
+    const v = onePass(stream.rep, 30);
+    assert.deepEqual(L.streamStatistics(res, stream, consumers, null).order, [0, 10, 20].map((t) => v[t].join(',')));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D22-8 / A22: a statistic is never computed for a voided attempt, nor for parts that differ from the plan', async () => {
+  const id = 'shuffle/adjacency-mod4/n-52';
+  const { res, stream, consumers } = await runFake([id], { M: 30, N: 3 });
+  const codec = F.codecFor(kOf(stream.rep));
+  assert.throws(() => L.streamStatistics({ ...res, attempts: [...res.attempts, { attempt: 9, void: 'part 0: x' }] }, stream, consumers, codec), /D22-8/);
+  const extra = { ...res, parts: [...res.parts, res.parts[0]], d: [...res.d, res.d[0]] };
+  assert.throws(() => L.streamStatistics(extra, stream, consumers, codec), /differ from the plan/);
+  const fewer = { ...res, parts: res.parts.slice(1), d: res.d.slice(1) };
+  assert.throws(() => L.streamStatistics(fewer, stream, consumers, codec), /differ from the plan/);
+});
+
+test('Q3 (b): the payload file is re-hashed against d_j before use; a changed byte is refused', async () => {
+  const id = 'randomInt/coupon-collector/min-1-max-7';
+  const plan = P.buildPlan({ runId: 'rt', M: { [id]: 400 }, N: 2 });
+  const stream = plan.streams[0];
+  const dir = tmp('sp');
+  try {
+    const consumers = await L.wave1Consumers(stream, { observations: { [id]: 5 } });
+    const res = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), grant: grantView() });
+    assert.equal(res.counted, true);
+    const codec = F.codecFor(kOf(stream.rep));
+    const next = L.payloadReader(res, codec); assert.equal(typeof next(), 'number');
+    const b = readFileSync(res.payloadFiles[0]); b[0] ^= 1; writeFileSync(res.payloadFiles[0], b);
+    assert.throws(() => L.payloadReader(res, codec)(), /differs from d_j/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D22-7: a checkpoint is reusable only when every bound sha256, node version and binary, and src digest are equal', () => {
+  const b = P.bindings(ROOT);
+  assert.deepEqual(P.reuseMismatches(b, structuredClone(b)), []);
+  for (const f of ['verification/k-tests-v1.1.json', 'verification/harness/collector.mjs', 'verification/harness/wave1-evidence.mjs', 'verification/harness/evidence-entry.mjs', 'tools/ci/entropy-backstop.mjs']) {
+    assert.ok(f in b.files, f);
+    const c = structuredClone(b); c.files[f] = '0'.repeat(64);
+    assert.deepEqual(P.reuseMismatches(b, c), [`sha256 of ${f}`]);
+  }
+  for (const k of ['node_version', 'node_binary_sha256', 'src_digest']) { const c = structuredClone(b); c[k] = 'x'; assert.deepEqual(P.reuseMismatches(b, c), [k]); }
+  assert.match(b.node_binary_sha256, /^[0-9a-f]{64}$/); assert.equal(b.node_version, process.version);
+});
+
+test('D22-6: the payload file must fit on disk before a stream starts', () => {
+  assert.ok(L.assertDisk(tmpdir(), 1) > 0);
+  assert.throws(() => L.assertDisk(tmpdir(), 2 ** 60), /D22-6/);
+  const s = { calls: 10, outcome_bytes: 52 };
+  assert.equal(L.payloadBytes(s, { seq: [1] }), 520); assert.equal(L.payloadBytes(s, { seq: [] }), 0);
+});
+
+// A one-commit repository written as loose objects (the backstop's git allowlist has no commit subcommand).
+function oneCommitRepo(dir, files) {
+  const g = (args, cwd) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  g(['init', '--quiet', dir]);
+  const put = (type, body) => {
+    const raw = Buffer.concat([Buffer.from(`${type} ${body.length}\0`), body]);
+    const id = createHash('sha1').update(raw).digest('hex');
+    mkdirSync(join(dir, '.git/objects', id.slice(0, 2)), { recursive: true });
+    writeFileSync(join(dir, '.git/objects', id.slice(0, 2), id.slice(2)), deflateSync(raw));
+    return id;
+  };
+  const tree = put('tree', Buffer.concat(Object.keys(files).sort().map((n) => Buffer.concat([Buffer.from(`100644 ${n}\0`), Buffer.from(put('blob', Buffer.from(files[n])), 'hex')]))));
+  const head = put('commit', Buffer.from(`tree ${tree}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\na\n`));
+  writeFileSync(join(dir, '.git/refs/heads/r-g64'), `${head}\n`); writeFileSync(join(dir, '.git/HEAD'), 'ref: refs/heads/r-g64\n');
+  return { head, tree };
+}
+
+test('D22-5: evidence only from a dedicated, clean clone at the pinned HEAD and tree', () => {
+  const d = tmp('clone');
+  try {
+    const o = join(d, 'origin');
+    const { head, tree } = oneCommitRepo(o, { 'a.txt': '1' });
+    assert.equal(L.pinnedCloneState(o, { head, tree }).ok, false, 'the origin itself is not a dedicated clone');
+    const c = join(d, 'clone'); const pin = L.prepareEvidenceClone(o, head, c);
+    assert.deepEqual(pin, { head, tree });
+    assert.deepEqual(L.pinnedCloneState(c, pin), { head, tree, clean: true, ok: true, why: [] });
+    assert.match(L.pinnedCloneState(c, { head: '0'.repeat(40), tree }).why.join(), /not the pinned/);
+    writeFileSync(join(c, 'stray.txt'), 'x');
+    const s = L.pinnedCloneState(c, pin); assert.equal(s.ok, false); assert.equal(s.clean, false); assert.match(s.why.join(), /not clean/);
+    rmSync(join(c, 'stray.txt'));
+    writeFileSync(join(c, 'a.txt'), '2'); assert.match(L.pinnedCloneState(c, pin).why.join(), /not clean/);
+    writeFileSync(join(c, 'a.txt'), '1'); assert.equal(L.pinnedCloneState(c, pin).ok, true);
+    rmSync(join(c, '.git', L.CLONE_MARK)); assert.match(L.pinnedCloneState(c, pin).why.join(), /not a dedicated evidence clone/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('runStreamPlan checks readiness before anything else (NOT-READY: nothing spawned, nothing written)', async () => {
+  const d = tmp('nr');
+  try {
+    const plan = P.buildPlan({ runId: 'nr', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: true });
+    await assert.rejects(L.runStreamPlan(plan, { runDir: join(d, 'run') }), /harness NOT-READY/);
+    assert.equal(existsSync(join(d, 'run')), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('D22-4 + real helper: the evidence helper under the backstop counts, and its load-hook list matches srcDigest_before', async () => {
+  const id = 'shuffle/adjacency-mod4/n-52';
+  const plan = P.buildPlan({ runId: 'real', M: { [id]: 40 }, N: 2 });
+  const stream = plan.streams[0];
+  const dir = tmp('real');
+  const man = testManifest(mkdtempSync(join(tmpdir(), 'rg64-man-')));
+  const spawnPart = (s, j, calls, token) => { const c = spawn(process.execPath, ['--disable-sigusr1', '--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), join(ROOT, 'verification/harness/evidence-helper.mjs'), '--run', 'real', '--stream', s.id, '--rep', s.rep, '--j', String(j), '--calls', String(calls)], { env: L.helperSpawnEnv(env(), { token, ...man }), stdio: ['ignore', 'ignore', 'inherit', 'pipe'] }); SPAWNED.set(c, token); return c; };
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), grant: grantView() });
+    assert.equal(res.counted, true, JSON.stringify(res.attempts));
+    assert.ok(res.parts.every((p) => p.H.loaded.some(([f]) => f === 'src/entropy/index.ts')));
+    const st = L.streamStatistics(res, stream, consumers, F.codecFor(kOf(stream.rep)));
+    assert.equal(st[id].outcomes, 40);
+    const bad = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: { src: { ...expect().src, list: expect().src.list.map(([f, s]) => [f, f === 'src/errors.ts' ? '1'.repeat(64) : s]) } }, maxAttempts: 1, grant: grantView() });
+    assert.match(bad.attempts[0].void, /src\/errors\.ts as loaded differs .*D22-4/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async () => {
+  const { checkA4, checkA5, checkA8: check8, assertA8Upper, A8_LOWER, A8_UPPER, A8_CONFIG } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const N52 = 'shuffle/adjacency-mod4/n-52', checkA8 = (a, calls, rep = N52) => check8(a, calls, rep);
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40), true, 'A8-CHECK ok');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2838 }, 40), false, 'A8-CHECK walks differ');
+  assert.equal(checkA8({ gate_calls: 39, walks: 39 }, 40), false, 'A8-CHECK below calls');
+  assert.equal(checkA8({ gate_calls: 2839.5, walks: 2839.5 }, 40), false, 'A8-CHECK non-integer');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839, extra: 0 }, 40), false, 'A8-CHECK extra key');
+  assert.equal(checkA8({ gate_calls: 2839 }, 40), false, 'A8-CHECK missing key');
+  assert.equal(checkA8({ walks: 2839, gate_calls: 2839 }, 40), false, 'A8-CHECK key order');
+  assert.equal(checkA8(null, 40), false, 'A8-CHECK not an object');
+  // CTO r5 (Sec N-A8-UB): exact bounds for FIXTURE; derivation in tools/ci/a25-2-launcher-shape.mjs above checkA8.
+  assert.deepEqual([A8_LOWER, A8_UPPER], [2040, 3084], 'A8-BOUNDS pinned');
+  assert.equal(checkA8({ gate_calls: 2040, walks: 2040 }, 40), true, 'A8-CHECK at the minimum 2040');
+  assert.equal(checkA8({ gate_calls: 2039, walks: 2039 }, 40), false, 'A8-CHECK below the minimum 2040');
+  // HoQ r5 (Quant): the bounds are pinned for A8_CONFIG only; any other configuration is a typed REJECT, never bounded.
+  assert.deepEqual({ ...A8_CONFIG }, { rep: N52, calls: 40 }, 'A8-CONFIG pinned');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 41), false, 'A8-CHECK unpinned config calls');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40, 'shuffle/adjacency-mod4/n-51'), false, 'A8-CHECK unpinned config n');
+  assert.equal(check8({ gate_calls: 2839, walks: 2839 }, 40, undefined), false, 'A8-CHECK unpinned config missing rep');
+  assert.doesNotThrow(() => assertA8Upper({ gate_calls: 3084, walks: 3084 }), 'A8-UB at U');
+  assert.equal(checkA8({ gate_calls: 3085, walks: 3085 }, 40), true, 'A8-UB is not a REJECT');
+  assert.throws(() => assertA8Upper({ gate_calls: 3085, walks: 3085 }), /^Error: A8-UB FINDING\+HOLD: gate_calls 3085 > A8_UPPER 3084/, 'A8-UB above U is a FINDING+HOLD');
+  const me = process.pid, kid = me + 7, d = 'a'.repeat(64);
+  assert.equal(checkA4(kid, kid, me), true, 'A4-CHECK ok');
+  assert.equal(checkA4(me, me, me), false, 'A4-CHECK parent pid');
+  assert.equal(checkA4(kid + 0.5, kid + 0.5, me), false, 'A4-CHECK non-integer');
+  assert.equal(checkA4(String(kid), String(kid), me), false, 'A4-CHECK non-integer');
+  assert.equal(checkA4(1, 1, me), false, 'A4-CHECK pid 1');
+  assert.equal(checkA4(kid, kid + 1, me), false, 'A4-CHECK other child');
+  assert.equal(checkA5(d, d), true, 'A5-CHECK ok');
+  assert.equal(checkA5(d, 'b'.repeat(64)), false, 'A5-CHECK recompute mismatch');
+  assert.equal(checkA5(d.toUpperCase(), d.toUpperCase()), false, 'A5-CHECK not lowercase hex');
+  assert.equal(checkA5(null, null), false, 'A5-CHECK not a string');
+});
+test('Sec N-BG-1: the bare gate refuses a parent whose NODE_OPTIONS carries -r, --loader or --experimental-loader', async () => {
+  const { notBare } = await import('../tools/ci/a25-2-bare-gate.mjs');
+  const nb = (o) => notBare(o, [], {});
+  assert.equal(nb(''), false, 'N-BG-1 empty is bare'); assert.equal(nb(undefined), false, 'N-BG-1 unset is bare');
+  assert.equal(nb('--max-old-space-size=64 --no-warnings'), false, 'N-BG-1 harmless flags are bare');
+  assert.equal(nb('-r ./x.cjs'), true, 'N-BG-1 -r');
+  assert.equal(nb('--no-warnings -r=./x.cjs'), true, 'N-BG-1 -r (after another flag)');
+  assert.equal(nb('--loader ./l.mjs'), true, 'N-BG-1 --loader');
+  assert.equal(nb('--loader=./l.mjs'), true, 'N-BG-1 --loader=');
+  assert.equal(nb('--experimental-loader ./l.mjs'), true, 'N-BG-1 --experimental-loader');
+  assert.equal(nb('--experimental-loader=./l.mjs'), true, 'N-BG-1 --experimental-loader=');
+  assert.equal(nb('--import ./i.mjs'), true, 'N-BG-1 --import (kept)'); assert.equal(nb('--require=./x.cjs'), true, 'N-BG-1 --require (kept)');
+  assert.equal(notBare('', ['--no-warnings'], {}), true, 'N-BG-1 execArgv (kept)');
+  assert.equal(notBare('', [], { [Symbol.for('open-rng-engine/entropy-backstop/v1')]: {} }), true, 'N-BG-1 backstop marker (kept)');
+});
+// CTO/HoQ r5, M3b ruling (b): the backstop's null-source CommonJS hand-off (entropy-backstop.mjs load hook) is
+// unreachable on product routes at the pinned node only while no CommonJS route exists in the product tree.
+test('CTO/HoQ r5 M3b (b): no CommonJS route under src/ or verification/harness (.cjs, .cts, .node, require(, createRequire, process.dlopen, Module._load, module.require)', () => {
+  const BASE = ROOT.replace(/\/+$/, ''); // ROOT is fileURLToPath('..'), with a trailing '/'
+  const walkAll = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walkAll(join(d, e.name)) : [join(d, e.name)]);
+  const files = ['src', 'verification/harness'].flatMap((x) => walkAll(join(ROOT, x))).map((f) => f.slice(BASE.length + 1));
+  assert.ok(files.length > 10 && files.includes('src/entropy/index.ts'), 'CJS-GUARD walked the tree');
+  assert.deepEqual(files.filter((f) => f.endsWith('.cjs')), [], 'CJS-GUARD .cjs');
+  // CTO r6 (i): .node is checked over every manifest root (src, verification, tools/ci). The lockdown resolve (93) stays
+  // the enforcing layer; this is the tripwire.
+  const roots = ['src', 'verification', 'tools/ci'].flatMap((x) => walkAll(join(ROOT, x))).map((f) => f.slice(BASE.length + 1));
+  assert.ok(roots.length > files.length && roots.some((f) => f.startsWith('tools/ci/')), 'CJS-GUARD walked the manifest roots');
+  assert.deepEqual(roots.filter((f) => f.endsWith('.node') && !f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in src/verification');
+  assert.deepEqual(roots.filter((f) => f.endsWith('.node') && f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in tools/ci');
+  // Sec N-CJS-1 (CTO/HoQ, int-v8 r7): .cts over every manifest root; the native/CJS loader strings over the code files
+  // (.ts/.mts/.cts/.js/.mjs/.cjs) under src/, verification/ and tools/ci (docs describe the refusals in prose). Checked
+  // before require( so a module.require plant fails on its own assert. Closed exemption (HoQ r7 (i)): the enforcing layers,
+  // their probes and the mutant tables name these strings as data; each is pinned to its exact count.
+  assert.deepEqual(roots.filter((f) => f.endsWith('.cts')), [], 'CJS-GUARD .cts');
+  const CODE = /\.(?:[cm]?ts|[cm]?js)$/;
+  const code = roots.filter((f) => CODE.test(f)).map((f) => [f, readFileSync(join(ROOT, f), 'latin1')]);
+  assert.ok(code.length > files.length / 2 && code.some(([f]) => f === 'src/entropy/index.ts') && code.some(([f]) => f.startsWith('verification/') && !f.startsWith('verification/harness/')) && code.some(([f]) => f.startsWith('tools/ci/')), 'CJS-GUARD scanned the code files');
+  const EXEMPT = { // exact occurrence counts (HoQ r7): fewer = stale, more = new use; product trees (src/, verification/) have none
+    'tools/ci/entropy-backstop.mjs': { 'process.dlopen': 3 },
+    'tools/ci/a25-lockdown.mjs': { 'process.dlopen': 5 },
+    'tools/ci/import-allowlist.mjs': { 'process.dlopen': 1, 'module.require': 3 },
+    'tools/ci/entropy-backstop-check.mjs': { 'process.dlopen': 1 },
+    'tools/ci/g39-mutants.mjs': { 'process.dlopen': 2 },
+    'tools/ci/a25-2-wiring-mutants.mjs': { 'process.dlopen': 4, 'Module._load': 2, 'module.require': 2 },
+  };
+  for (const [f, by] of Object.entries(EXEMPT)) { const b = code.find(([g]) => g === f)?.[1] ?? ''; for (const [s, n] of Object.entries(by)) assert.strictEqual(b.split(s).length - 1, n, `CJS-GUARD exemption count ${f} ${s}`); }
+  for (const s of ['process.dlopen', 'Module._load', 'module.require']) assert.deepEqual(code.filter(([f, b]) => b.includes(s) && !(s in (EXEMPT[f] ?? {}))).map(([f]) => f), [], `CJS-GUARD ${s}`);
+  const text = files.map((f) => [f, readFileSync(join(ROOT, f), 'latin1')]);
+  assert.deepEqual(text.filter(([, b]) => b.includes('require(')).map(([f]) => f), [], 'CJS-GUARD require(');
+  assert.deepEqual(text.filter(([, b]) => b.includes('createRequire')).map(([f]) => f), [], 'CJS-GUARD createRequire');
+});
+// N-PV-1 (Sec, int-v8 r7): PROOF-VIEWS-EQUAL binds the bare view by the proof path the G-39 hook recorded for the child
+// (evidence.childProofPath), not by mtime_ms. Pure unit test of proofViewsEqual with a planted proof file.
+test('N-PV-1: PROOF-VIEWS-EQUAL binds the bare proof view by the hook-recorded path, not by mtime', async () => {
+  const { proofViewsEqual } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'ebs-proof-'));
+  try {
+    const fields = { pid: 4242, preload_sha256: 'c'.repeat(64), token: 'grant-1@pv#0001', manifest_sha256: 'd'.repeat(64), sigusr1_disabled: true };
+    const file = join(dir, `${process.pid}-1`);
+    writeFileSync(file, JSON.stringify(fields));
+    const child = {};
+    const ev = (view, path = file) => ({ childProof: (c) => (c === child ? Object.freeze({ ...view, mtime_ms: 1 }) : null), childProofPath: (c) => (c === child ? path : null) });
+    assert.deepEqual(proofViewsEqual(ev(fields), child), fields, 'PV-PATH equal');
+    assert.throws(() => proofViewsEqual(ev({ ...fields, token: 'grant-1@pv#0002' }), child), /PROOF-VIEWS-EQUAL: preloaded/, 'PV-PATH mismatch refused');
+    const { token, ...noToken } = fields;
+    assert.throws(() => proofViewsEqual(ev(noToken), child), /PROOF-VIEWS-EQUAL: preloaded/, 'PV-PATH missing field refused');
+    assert.throws(() => proofViewsEqual(ev(fields, null), child), /no hook proof path bound/, 'PV-PATH unbound refused');
+    assert.throws(() => proofViewsEqual({ childProof: ev(fields).childProof }, child), /no hook proof path bound/, 'PV-PATH no accessor refused');
+    const other = join(dir, `${process.pid + 1}-1`); writeFileSync(other, JSON.stringify(fields));
+    assert.throws(() => proofViewsEqual(ev(fields, other), child), /no hook proof path bound/, 'PV-PATH foreign pid refused');
+    const outside = mkdtempSync(join(tmpdir(), 'pv-other-')); const f2 = join(outside, `${process.pid}-1`); writeFileSync(f2, JSON.stringify(fields));
+    try { assert.throws(() => proofViewsEqual(ev(fields, f2), child), /no hook proof path bound/, 'PV-PATH outside ebs-proof refused'); } finally { rmSync(outside, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+// ---------- A9 (int-v8 r8; CTO ruling (i)+ and HoQ ruling, 2026-11-26) ----------
+// r8 edits src/entropy/index.ts, so three launcher-facing src digests differ from the 9b7a1d8 golden: H.src_before,
+// T.src_after and the src/entropy/index.ts entry (index 1) of H.loaded. A9 is a typed substitution for exactly those
+// three values: each is 64 lowercase hex, equals an independent recompute over this tree's bytes (own code below; it
+// does not import run-plan srcManifest, the helper or the launcher), and equals the pinned r8 literal, so any later src
+// edit fails again on purpose. H.src_before === T.src_after. Everything else, including the loaded path list and order
+// and the other three loaded shas, stays byte-identical. The golden file is not re-recorded.
+// Old -> new: src digest fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e -> R8_SRC_DIGEST;
+// src/entropy/index.ts 91f08be8ac4f304b65de9f4dd70201aff4affe511a2670508b903f58a398c3ca -> R8_ENTROPY_SHA.
+const R8_SRC_DIGEST = 'd9f4cece218863d9179c06dad961649b64acb536eb567c6ba2029f37c20b446b';
+const R8_ENTROPY_SHA = 'cc5e56ac120597059d19354b400fff3dd636b8edb50bea685c51ab8f7059b46e';
+const A9_ENTROPY = 'src/entropy/index.ts';
+const A9_HEX = /^[0-9a-f]{64}$/;
+function a9Recompute(root) {
+  const files = [];
+  const dfs = (rel) => { for (const e of readdirSync(join(root, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) { if (e.isDirectory()) dfs(`${rel}/${e.name}`); else files.push(`${rel}/${e.name}`); } };
+  dfs('src');
+  const h = createHash('sha256');
+  let entropy = null;
+  for (const r of files) {
+    const s = createHash('sha256').update(readFileSync(join(root, r))).digest('hex');
+    if (r === A9_ENTROPY) entropy = s;
+    h.update(`${r}\0${s}\n`);
+  }
+  return { src: h.digest('hex'), entropy };
+}
+function a9Check(v, recomputed, pin, label) {
+  assert.match(String(v), A9_HEX, `A9(a) ${label} is 64 lowercase hex`);
+  assert.equal(v, recomputed, `A9(b) ${label} equals the independent recompute`);
+  assert.equal(v, pin, `A9(c) ${label} equals the pinned r8 literal`);
+}
+// h, t: the live H and T objects; gold: { H, T } parsed from the golden; rc: a9Recompute(root). Returns copies with the
+// three A9 values replaced by the golden's (key order kept); every other value is left as it came.
+function a9Apply(h, t, gold, rc) {
+  a9Check(h.src_before, rc.src, R8_SRC_DIGEST, 'H.src_before');
+  a9Check(t.src_after, rc.src, R8_SRC_DIGEST, 'T.src_after');
+  assert.equal(h.src_before, t.src_after, 'A9(b) H.src_before === T.src_after');
+  assert.ok(Array.isArray(h.loaded) && h.loaded.length > 1 && h.loaded[1][0] === A9_ENTROPY, 'A9 entropy entry is H.loaded[1]');
+  a9Check(h.loaded[1][1], rc.entropy, R8_ENTROPY_SHA, 'H.loaded[src/entropy/index.ts]');
+  const loaded = h.loaded.map(([p, s]) => (p === A9_ENTROPY ? [p, gold.H.loaded.find(([q]) => q === p)[1]] : [p, s]));
+  return { H: { ...h, src_before: gold.H.src_before, loaded }, T: { ...t, src_after: gold.T.src_after } };
+}
+test('A9 (int-v8 r8): typed src-digest substitution, closed to three values, recompute and pin enforced', () => {
+  const g = JSON.parse(readFileSync(join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json'), 'utf8'));
+  const gold = { H: JSON.parse(g.H), T: JSON.parse(g.T) };
+  const rc = { src: R8_SRC_DIGEST, entropy: R8_ENTROPY_SHA };
+  const live = () => { const h = structuredClone(gold.H), t = structuredClone(gold.T); h.src_before = R8_SRC_DIGEST; t.src_after = R8_SRC_DIGEST; h.loaded[1][1] = R8_ENTROPY_SHA; return { h, t }; };
+  // Positive: the r8 values substitute back to the golden exactly.
+  { const { h, t } = live(); const out = a9Apply(h, t, gold, rc); assert.equal(JSON.stringify(out.H), g.H, 'A9 positive H'); assert.equal(JSON.stringify(out.T), g.T, 'A9 positive T'); }
+  // Closed set: a non-A9 loaded sha (src/index.ts) is never substituted, so it still differs from the golden.
+  { const { h, t } = live(); h.loaded[0][1] = 'e'.repeat(64); const out = a9Apply(h, t, gold, rc); assert.equal(out.H.loaded[0][1], 'e'.repeat(64), 'A9 closed: src/index.ts sha is never substituted'); }
+  // Recompute and pin: a well-formed 64-hex value that is neither the recompute nor the pin is refused.
+  { const { h, t } = live(); h.src_before = t.src_after = 'a'.repeat(64);
+    let threw = null; try { a9Apply(h, t, gold, rc); } catch (e) { threw = e; }
+    assert.ok(threw && /A9\((b|c)\)/.test(threw.message), 'A9 tampered 64-hex value refused'); }
+  { const { h, t } = live(); h.loaded[1][1] = 'b'.repeat(64);
+    let threw = null; try { a9Apply(h, t, gold, rc); } catch (e) { threw = e; }
+    assert.ok(threw && /A9\((b|c)\)/.test(threw.message), 'A9 tampered 64-hex entropy sha refused'); }
+  // The pin alone (recompute agrees with a different tree): a changed src byte fails A9(c).
+  { const { h, t } = live(); const x = 'f'.repeat(64); h.src_before = t.src_after = x;
+    assert.throws(() => a9Apply(h, t, gold, { src: x, entropy: R8_ENTROPY_SHA }), /A9\(c\) H\.src_before/, 'A9(c) pin holds when the recompute agrees'); }
+});
+test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A9)', async (t) => {
+  const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
+  assert.ok(existsSync(gold), 'GOLDEN-MISSING: record it from a 9b7a1d8 checkout with tools/ci/a25-2-launcher-shape.mjs');
+  const { launcherShape } = await import(pathToFileURL(join(ROOT, 'tools/ci/a25-2-launcher-shape.mjs')).href);
+  const audit = {};
+  let now;
+  // CTO A8 (3): the raw values the allowlist replaced are kept in the run record (this test's diagnostics), never
+  // discarded, also when the shape throws (an A8-UB FINDING+HOLD).
+  try { now = await launcherShape(ROOT, process.env, audit); } finally { t.diagnostic(`A8-RAW ${JSON.stringify(audit)}`); }
+  assert.ok(audit.raw && audit.raw.a25 && Number.isInteger(audit.raw.a25.gate_calls) && Number.isInteger(audit.raw.a25.walks), `A8-RAW: raw T.a25 not recorded (${JSON.stringify(audit.raw)})`);
+  assert.equal(audit.raw.gate_calls_per_call, audit.raw.a25.gate_calls / 40, 'A8-RAW ratio gate_calls/calls recorded');
+  // Harness fix (a): under a preloaded parent the childProof view was checked field-equal to the bare view of its file.
+  assert.equal(audit.proof_views?.mode, PRELOADED_PARENT ? 'preloaded' : 'bare', 'PROOF-VIEWS-EQUAL mode');
+  if (PRELOADED_PARENT) assert.equal(audit.proof_views.equal, true, 'PROOF-VIEWS-EQUAL');
+  if (PRELOADED_PARENT) assert.equal(audit.proof_views.bound, 'path', 'PROOF-VIEWS-EQUAL bound by path (N-PV-1)');
+  const goldTxt = readFileSync(gold, 'utf8'), go = JSON.parse(goldTxt), no = JSON.parse(now);
+  const rc = a9Recompute(ROOT), nh = JSON.parse(no.H), nt = JSON.parse(no.T);
+  t.diagnostic(`A9-RAW ${JSON.stringify({ src_before: nh.src_before, src_after: nt.src_after, entropy: nh.loaded?.[1], recompute: rc })}`);
+  const a9 = a9Apply(nh, nt, { H: JSON.parse(go.H), T: JSON.parse(go.T) }, rc);
+  no.H = JSON.stringify(a9.H); no.T = JSON.stringify(a9.T);
+  assert.equal(JSON.stringify(no, null, 1) + '\n', goldTxt, 'SHAPE-9B7A1D8: launcher-facing output differs from 9b7a1d8');
+  assert.ok(JSON.parse(JSON.parse(now).H).loaded.some(([f]) => f === 'src/entropy/index.ts'));
+});
+
+// ---------- A25-4b: part floor for counted runs (CTO answer b) ----------
+test('A25-4b: the plan carries the part floor F + 20 * 2^k and a counted flag (default false); the header shows both', () => {
+  const H = P.HELPER_PLAN;
+  assert.equal(H.part_floor, H.first_walk + H.min_sampled_hits * 2 ** H.sample_k);
+  assert.equal(H.part_floor, 91920);
+  const a = P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+  assert.equal(a.counted, false); assert.equal(a.helper.part_floor, 91920);
+  assert.equal(P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: true }).counted, true);
+  assert.throws(() => P.buildPlan({ runId: 'f', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1, counted: 'yes' }), /counted must be true or false/);
+  assert.equal(L.header(a, {}, {}).counted, false); assert.equal(L.header(a, {}, {}).helper.part_floor, 91920);
+});
+test('A25-4b: a counted plan with a part below the floor is refused before any part is spawned', async () => {
+  const plan = P.buildPlan({ runId: 'cf', M: { 'shuffle/adjacency-mod4/n-52': 40 }, N: 2, counted: true });
+  const stream = plan.streams[0]; const dir = tmp('cf'); let spawned = 0;
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    await assert.rejects(L.runStreamCore(plan, stream, { spawnPart: (...a) => { spawned++; return fakeSpawn(plan)(...a); }, runDir: dir, consumers, expect: expect(), grant: grantView() }), /counted plan part 0 has 20 outcomes, below the A25 part floor 91920 .*A25-4b/);
+    assert.equal(spawned, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('A25-4b: a counted part at the floor counts; one whose trailer reports fewer gate calls than the floor voids', async () => {
+  const id = 'randomInt/chi2/min-0-max-38';
+  const plan = P.buildPlan({ runId: 'cf2', M: { [id]: P.HELPER_PLAN.part_floor }, N: 1, counted: true });
+  const stream = plan.streams[0]; const dir = tmp('cf2');
+  assert.equal(stream.parts[0], P.HELPER_PLAN.part_floor);
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    const ok = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan), runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant: grantView() });
+    assert.equal(ok.counted, true, JSON.stringify(ok.attempts));
+    const bad = await L.runStreamCore(plan, stream, { spawnPart: fakeSpawn(plan, { faults: { '1:0': 't-floor' } }), runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant: grantView() });
+    assert.equal(bad.counted, false); assert.match(bad.attempts[0].void, /gate calls 91919 below the part floor 91920 in a counted run .*A25-4b/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('A25-4b: runStreamPlan (the evidence path) refuses a plan that is not counted; nothing is written', async () => {
+  const d = tmp('nc');
+  try {
+    const plan = P.buildPlan({ runId: 'nc', M: { 'shuffle/adjacency-mod4/n-52': 2 }, N: 1 });
+    await assert.rejects(L.runStreamPlan(plan, { runDir: join(d, 'run') }), /counted plans only .*A25-4b/);
+    assert.equal(existsSync(join(d, 'run')), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---------- A25-1 (design v2): parts run inside a live grant, with fresh per-spawn tokens and per-spawn proofs ----------
+const A25_1_ID = 'shuffle/adjacency-mod4/n-52';
+async function runGrant(grant, { faults = {}, manifestSha256 = null } = {}) {
+  const plan = P.buildPlan({ runId: 'g1', M: { [A25_1_ID]: 40 }, N: 2 });
+  const stream = plan.streams[0]; const dir = tmp('g1'); let spawned = 0;
+  try {
+    const consumers = await L.wave1Consumers(stream);
+    const fs = fakeSpawn(plan, { faults });
+    const spawnPart = (...a) => { spawned++; return fs(...a); };
+    const res = await L.runStreamCore(plan, stream, { spawnPart, runDir: dir, consumers, expect: expect(), maxAttempts: 1, grant, manifestSha256 });
+    return { res, spawned };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+const preloadedProbe = (body, extraEnv = {}) => {
+  const d = tmp('probe'); const f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, body);
+    const e = { ...env(), ...extraEnv }; delete e.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+};
+test('A25-1: runStreamCore refuses to start without a grant view; nothing is spawned', async () => {
+  const f = () => 'x';
+  for (const g of [undefined, null, {}, { base: TOKEN, live: f, next: f }, { base: TOKEN, live: f, proof: f }, { base: 1, live: f, next: f, proof: f }]) {
+    await assert.rejects(runGrant(g), /needs a live evidence grant \(A25-1\)/);
+  }
+});
+test('A25-1: with a live grant each part gets its own fresh token, recorded per part, and the attempt counts', async () => {
+  const { res, spawned } = await runGrant(grantView());
+  assert.equal(res.counted, true, JSON.stringify(res.attempts)); assert.equal(spawned, 2);
+  const t = res.attempts[0].tokens;
+  assert.equal(t.length, 2); assert.notEqual(t[0], t[1]); for (const x of t) assert.match(x, /^grant-1@test#.+/);
+  assert.deepEqual(res.parts.map((p) => p.token), t);
+});
+test('A25-1: a token reused across spawns voids the part (old M31)', async () => {
+  const { res, spawned } = await runGrant(grantView({ next: () => `${TOKEN}#same` }));
+  assert.equal(res.counted, false); assert.equal(spawned, 1);
+  assert.match(res.attempts[0].void, /spawn token is not fresh \(A25-1\)/);
+});
+test('A25-1: a token that is not base#nonce voids the part', async () => {
+  for (const next of [() => `grant-2@test#${++tokenSeq}`, () => `${TOKEN}#`, () => TOKEN, () => null]) {
+    const { res } = await runGrant(grantView({ next }));
+    assert.equal(res.counted, false); assert.match(res.attempts[0].void, /spawn token is not fresh \(A25-1\)/);
+  }
+});
+test('A25-1: a grant that is not live before a spawn voids the part and spawns nothing', async () => {
+  const { res, spawned } = await runGrant(grantView({ live: () => false }));
+  assert.equal(res.counted, false); assert.equal(spawned, 0);
+  assert.match(res.attempts[0].void, /evidence grant is not live \(A25-1\)/);
+});
+test('A25-1: a grant that closes after the spawns voids at the H frame', async () => {
+  let calls = 0;
+  const { res, spawned } = await runGrant(grantView({ live: () => ++calls <= 2 }));
+  assert.equal(spawned, 2); assert.equal(res.counted, false);
+  assert.match(res.attempts[0].void, /evidence grant closed before the H frame \(A25-1\)/);
+});
+test('A25-1: each proof check voids the part on its own (missing, invalid, another spawn, digest, pid, older than the spawn)', async () => {
+  const cases = [
+    [() => false, /did not prove the backstop preload/], [() => null, /did not prove the backstop preload/],
+    [(c) => ({ invalid: true, mtime_ms: Date.now() }), /did not prove the backstop preload/],
+    [(c) => ({ ...goodProof(c), token: `${TOKEN}#other-spawn` }), /proof token is not this spawn's token/],
+    [(c) => ({ ...goodProof(c), preload_sha256: 'a'.repeat(64) }), /proof preload digest differs from the bound backstop/],
+    [(c) => ({ ...goodProof(c), pid: c.pid + 1 }), /proof names another process/],
+    [(c) => ({ ...goodProof(c), mtime_ms: Date.now() - 60000 }), /proof older than the spawn/],
+  ];
+  for (const [proof, why] of cases) {
+    const { res } = await runGrant(grantView({ proof }));
+    assert.equal(res.counted, false, String(why)); assert.match(res.attempts[0].void, why);
+    assert.match(res.attempts[0].void, /\(A25-1\)/);
+  }
+  const ok = await runGrant(grantView({ proof: goodProof }));
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+});
+test('W6 (A25-2): with a header-bound manifest digest, a proof whose manifest_sha256 differs (or is missing) voids the part; an equal one counts', async () => {
+  const M = 'c'.repeat(64);
+  for (const pm of ['d'.repeat(64), undefined, null]) {
+    // slot 1: sigusr1_disabled true, so only the manifest digest is wrong (else the int-v8 L-SEC-2 check voids first and
+    // masks mutant M45).
+    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: pm, sigusr1_disabled: true }) }), { manifestSha256: M });
+    assert.equal(res.counted, false, String(pm)); assert.match(res.attempts[0].void, /proof manifest digest differs from the header-bound manifest \(A25-2\)/);
+  }
+  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: true }) }), { manifestSha256: M });
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+  await assert.rejects(() => runGrant(grantView({ proof: goodProof }), { manifestSha256: 'C'.repeat(64) }), /manifestSha256 must be 64 lowercase hex/);
+});
+test('L-SEC-2 (int-v8): with a header-bound manifest, a helper proof without sigusr1_disabled === true voids the part; true counts', async () => {
+  const M = 'c'.repeat(64);
+  for (const v of [false, undefined, null, 'true', 1]) {
+    const { res } = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: v }) }), { manifestSha256: M });
+    assert.equal(res.counted, false, `PROOF-SIGUSR1 ${String(v)}`); assert.match(res.attempts[0].void, /proof: helper was not started with --disable-sigusr1 \(A25-1, L-SEC-2\)/);
+  }
+  const ok = await runGrant(grantView({ proof: (c) => ({ ...goodProof(c), manifest_sha256: M, sigusr1_disabled: true }) }), { manifestSha256: M });
+  assert.equal(ok.res.counted, true, JSON.stringify(ok.res.attempts));
+});
+test('A25-1: the proof is written by the preload itself: child pid, preload sha256 and the spawn token (probe)', () => {
+  const tok = 'grant-9@probe#00ff';
+  const got = preloadedProbe([
+    "import { spawn } from 'node:child_process';",
+    "const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;",
+    `const c = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', env: { ...process.env, ENTROPY_BACKSTOP_GRANT: '${tok}' } });`,
+    "const t0 = Date.now();",
+    "c.on('close', () => { const p = ev.childProof(c); process.stdout.write(JSON.stringify({ p, pid: c.pid, fresh: p && p.mtime_ms >= t0 - 20, pp: ev.childProofPath(c), other: [ev.childProof({}), ev.childProof(null), ev.token({ grant: 1 }), ev.spawnToken({ grant: 1 }), ev.childProofPath({}), ev.childProofPath(null)] })); });",
+  ].join('\n'));
+  assert.equal(got.p.pid, got.pid); assert.equal(got.p.preload_sha256, BS_SHA); assert.equal(got.p.token, tok); assert.equal(got.fresh, true);
+  assert.equal(got.p.sigusr1_disabled, false); // a child started without --disable-sigusr1 says so in its proof (int-v8)
+  assert.deepEqual(got.other, [null, null, null, null, null, null]);
+  assert.match(String(got.pp), /\/ebs-proof-[^/]+\/\d+-\d+$/, 'N-PV-1: childProofPath is the hook proof path of this child');
+});
+test('A25-1: a helper is spawned only as exactly --disable-sigusr1 --import <bound backstop> <helper> <args>, without NODE_OPTIONS', () => {
+  const plan = P.buildPlan({ runId: 'a', M: { [A25_1_ID]: 2 }, N: 1 });
+  const want = L.helperSpawnArgs(plan, plan.streams[0], 0, 2);
+  const BS = join(ROOT, 'tools/ci/entropy-backstop.mjs');
+  assert.equal(want[0], '--disable-sigusr1', 'ARGV-SIGUSR1: the helper argv must start with --disable-sigusr1 (int-v8, L-SEC-2)');
+  assert.equal(want[1], '--import'); assert.equal(want[2], BS); assert.ok(want[2].startsWith('/'));
+  assert.deepEqual(L.assertHelperSpawn([...want], {}, want), want);
+  const old = want.slice(1); // the 9b7a1d8..d75175d shape (no --disable-sigusr1) is refused now
+  const bad = [
+    [old, old], [old, {}], [want.slice(3), {}], [['--require', ...want.slice(2)], {}], [[...want.slice(0, 3), '--require', '/tmp/x.cjs', ...want.slice(3)], {}],
+    [[...want.slice(0, 3), '--import', '/tmp/x.mjs', ...want.slice(3)], {}], [[want[0], '--import', `${BS}x`, ...want.slice(3)], {}],
+    [['--require', '/tmp/x.cjs', ...want], {}], [['--import', '/tmp/x.mjs', ...want], {}], [['--inspect', ...want.slice(1)], {}],
+    [[want[0], want[1], want[2], FAKE, ...want.slice(4)], {}], [[...want.slice(0, -1), '3'], {}], [[...want, '--extra'], {}],
+    [[...want], { NODE_OPTIONS: '' }], [[...want], { NODE_OPTIONS: '--require /tmp/x.cjs' }], [null, {}], [[...want], null],
+  ];
+  for (const [args, e] of bad) {
+    const w = e === old ? old : want; // [old, old]: even a caller that passes the old shape as `want` is refused
+    assert.throws(() => L.assertHelperSpawn(args, e === old ? {} : e, w), /not exactly --disable-sigusr1 --import <bound backstop> <helper> <args> without NODE_OPTIONS: refused \(A25-1, A25-6 iv\)/);
+  }
+});
+test('A25-1: liveGrant refuses no grant and a grant object the backstop never opened', () => {
+  const why = MARKED() ? /no open evidence grant \(A25-1\)/ : /backstop preload is not loaded \(A25-1\)/;
+  for (const g of [null, undefined, { grant: 1 }]) assert.throws(() => L.liveGrant(g), why);
+});
+test('A25-1: the header names the preload (path, digest of the bound file, helper mode, grant)', () => {
+  const plan = P.buildPlan({ runId: 'h', M: { [A25_1_ID]: 2 }, N: 1 });
+  const h = L.header(plan, P.bindings(ROOT), {}, L.preloadRecord(TOKEN));
+  assert.deepEqual(h.preload, { path: 'tools/ci/entropy-backstop.mjs', sha256: h.bindings.files['tools/ci/entropy-backstop.mjs'], helper_mode: P.HELPER_PLAN.mode, grant: TOKEN });
+  assert.equal(h.preload.sha256, BS_SHA);
+});
+test('A25-1: the helper-mode preload reads the spawn token once, removes it from the env and reports it', () => {
+  const body = "const s = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].helper.state; process.stdout.write(JSON.stringify({ grant: s.grant, env: process.env.ENTROPY_BACKSTOP_GRANT ?? null }));\n";
+  // A25-2: the helper env comes from the launcher's builder (grant '<token>|m=<manifest sha>'); the preload reports the
+  // token part only, and a helper-mode spawn with no grant (so no bound manifest digest) exits 90 before main.
+  const d = tmp('probe-man'), f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, body.replace('env: process.env.ENTROPY_BACKSTOP_GRANT ?? null', 'env: process.env.ENTROPY_BACKSTOP_GRANT ?? null, man: process.env.ENTROPY_BACKSTOP_MANIFEST ?? null'));
+    const e = L.helperSpawnEnv(env(), { token: `${TOKEN}#7`, ...testManifest(d, [f]) });
+    const r = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { grant: `${TOKEN}#7`, env: null, man: null });
+    const e2 = { ...env(), ENTROPY_BACKSTOP_HELPER: 'a25' }; delete e2.NODE_OPTIONS; delete e2.ENTROPY_BACKSTOP_GRANT;
+    const r2 = spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e2, encoding: 'utf8' });
+    assert.equal(r2.status, 90, r2.stderr); assert.equal(r2.stdout, '');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+test('A25-2 (CTO 22:12 ruling): the grant digest is the authority; ENTROPY_BACKSTOP_MANIFEST_SHA256 is advisory, removed, and a differing value exits 90 before main', () => {
+  const d = tmp('probe-adv'), f = join(d, 'probe.mjs');
+  try {
+    writeFileSync(f, "process.stdout.write(JSON.stringify({ adv: process.env.ENTROPY_BACKSTOP_MANIFEST_SHA256 ?? null }));\n");
+    const m = testManifest(d, [f]);
+    const base = L.helperSpawnEnv(env(), { token: `${TOKEN}#8`, ...m });
+    const run = (e) => spawnSync(process.execPath, ['--import', join(ROOT, 'tools/ci/entropy-backstop.mjs'), f], { env: e, encoding: 'utf8' });
+    const same = run({ ...base, ENTROPY_BACKSTOP_MANIFEST_SHA256: m.manifestSha256 });
+    assert.equal(same.status, 0, same.stderr); assert.deepEqual(JSON.parse(same.stdout), { adv: null });
+    const forged = run({ ...base, ENTROPY_BACKSTOP_MANIFEST_SHA256: 'f'.repeat(64) });
+    assert.equal(forged.status, 90, forged.stderr); assert.equal(forged.stdout, '');
+    // a forged advisory sha cannot stand in for the grant digest: grant digest wrong + advisory matching the file still exits 90
+    const g = `${TOKEN}#8|m=${'0'.repeat(64)}`;
+    const swapped = run({ ...base, ENTROPY_BACKSTOP_GRANT: g, ENTROPY_BACKSTOP_MANIFEST_SHA256: m.manifestSha256 });
+    assert.equal(swapped.status, 90, swapped.stderr); assert.equal(swapped.stdout, '');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});

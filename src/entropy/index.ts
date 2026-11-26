@@ -4,9 +4,10 @@
 // no-fewer as a missing-pair hit. The typings ignore is because this repo
 // pins typescript 5.9.3 only (no @types/node); a typings package would be a
 // new devDependency (B8 / L825(7) G4 PASS is PENDING).
+// int-v8 r8 (CTO): the import is never re-exported; this module exports exactly
+// {fillBuffer} (test/entropy-exports.test.mjs 'r8 ENTROPY-EXPORTS', mutant M86).
 // @ts-expect-error node:crypto typings are not in the pinned devDependencies.
 import { randomFillSync } from 'node:crypto';
-export { randomFillSync };
 
 export function fillBuffer(target: Uint8Array): Uint8Array {
   randomFillSync(target);
