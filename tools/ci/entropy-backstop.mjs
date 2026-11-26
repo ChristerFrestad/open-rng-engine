@@ -966,6 +966,12 @@ export function childPreloadProof(child) {
   const ok = body !== null && typeof body === 'object' && !Array.isArray(body);
   return Object.freeze({ ...(ok ? { pid: body.pid, preload_sha256: body.preload_sha256, token: body.token, manifest_sha256: body.manifest_sha256 ?? null, sigusr1_disabled: body.sigusr1_disabled ?? null } : { invalid: true }), mtime_ms: statSync(p).mtimeMs });
 }
+// N-PV-1 (Sec, int-v8 r7): the hook proof file path recorded for an async node child (null for any other value), so
+// a caller binds the bare view of the proof by path, not by mtime. Read-only: the path is the one newProofPath() gave it.
+export function childPreloadProofPath(child) {
+  const p = child !== null && typeof child === 'object' ? childProofs.get(child) : undefined;
+  return typeof p === 'string' ? p : null;
+}
 let proofDir = null;
 let proofSeq = 0;
 export const proofFailures = [];
@@ -1340,7 +1346,7 @@ export function install(opts = {}) {
     nodeVersion: BACKSTOP_NODE_VERSION,
     randomUUIDv7Present: RANDOMUUIDV7_PRESENT,
     helper: Object.freeze({ state: helperState(), assertNoGateLeak: helperAssertNoGateLeak, counts: helperCounts, loaded: () => HELPER_LOADED() }),
-    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, token: evidenceGrantToken, spawnToken: evidenceSpawnToken, childProof: childPreloadProof, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
+    evidence: Object.freeze({ open: openEvidenceGrant, launch: launchEvidenceTool, launchStream: launchEvidenceToolStream, close: closeEvidenceGrant, active: evidenceGrantActive, token: evidenceGrantToken, spawnToken: evidenceSpawnToken, childProof: childPreloadProof, childProofPath: childPreloadProofPath, stamp: stampEvidenceResult, stamped: evidenceStamp, report: reportEvidenceResult }),
   };
   Object.defineProperty(marker, 'wrappers', { value: wrappers, writable: false, configurable: false, enumerable: true });
   Object.defineProperty(marker, 'counters', { value: counters, writable: false, configurable: false, enumerable: true });

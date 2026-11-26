@@ -4,7 +4,7 @@
 // HoQ slot (Addendum A). `--dry` is light: it only checks that every edit applies exactly once on this tree.
 // Usage: node tools/ci/a25-2-wiring-mutants.mjs [--dry] [--only M39,M40]
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,12 +60,19 @@ export const MUTANTS = Object.freeze([
   { id: 'M81', what: 'CTO r5 (Sec N-A8-UB): the A8 upper bound is removed, so gate_calls > U is no FINDING+HOLD', file: 'tools/ci/a25-2-launcher-shape.mjs', from: '{ if (a25.gate_calls > A8_UPPER) throw new Error(', to: '{ if (false) throw new Error(', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-UB above U is a FINDING\+HOLD/ },
   { id: 'M82', what: 'CTO r5: the A8 lower bound goes back to >= calls instead of the exact minimum 2040', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && a25.gate_calls >= A8_LOWER; }', to: ' && a25.gate_calls >= calls; }', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK below the minimum 2040/ },
   { id: 'M83', what: 'HoQ r5 (Quant): checkA8 applies the A8 bounds without asserting the pinned configuration (shuffle n=52, calls 40)', file: 'tools/ci/a25-2-launcher-shape.mjs', from: ' && rep === A8_CONFIG.rep && calls === A8_CONFIG.calls && ', to: ' && ', test: [ST, 'allowlist A4/A5 are typed'], killOn: /A8-CHECK unpinned config calls/ },
-  { id: 'M84', what: 'CTO/HoQ r5 M3b ruling (b): a CommonJS route appears under src/ or verification/harness, or a .node under any manifest root (CTO r6 (i)) (one plant per run)', test: [ST, 'no CommonJS route under src'], plants: {
+  { id: 'M84', what: 'CTO/HoQ r5 M3b ruling (b): a CommonJS route appears under src/ or verification/harness, or a .node under any manifest root (CTO r6 (i)); Sec N-CJS-1 (r7): .cts, process.dlopen, Module._load, module.require (one plant per run, 11 plants: + ci-dlopen, exempt-grow (HoQ r7))', test: [ST, 'no CommonJS route under src'], plants: {
     cjs: { path: 'src/a25-plant.cjs', content: 'module.exports = 1;\n', killOn: /CJS-GUARD \.cjs/ },
     node: { path: 'verification/harness/a25-plant.node', content: '', killOn: /CJS-GUARD \.node in src\/verification/ },
     'node-toolsci': { path: 'tools/ci/a25-plant.node', content: '', killOn: /CJS-GUARD \.node in tools\/ci/ },
+    cts: { path: 'src/a25-plant.cts', content: 'export const x = 1;\n', killOn: /CJS-GUARD \.cts/ },
+    dlopen: { path: 'verification/harness/a25-plant-dl.mjs', content: "export const f = (m) => process.dlopen(m, 'a25-plant.node');\n", killOn: /CJS-GUARD process\.dlopen/ },
+    'module-load': { path: 'tools/ci/a25-plant-ml.mjs', content: "import Module from 'node:module';\nexport const f = () => Module._load('node:fs');\n", killOn: /CJS-GUARD Module\._load/ },
+    'module-require': { path: 'src/a25-plant-mr.ts', content: "export const f = () => module.require('node:fs');\n", killOn: /CJS-GUARD module\.require/ },
     require: { path: 'verification/harness/a25-plant-req.mjs', content: "export const x = require('node:fs');\n", killOn: /CJS-GUARD require\(/ },
-    createRequire: { path: 'src/a25-plant-cr.ts', content: "import { createRequire } from 'node:module';\nexport const r = createRequire(import.meta.url);\n", killOn: /CJS-GUARD createRequire/ } } },
+    createRequire: { path: 'src/a25-plant-cr.ts', content: "import { createRequire } from 'node:module';\nexport const r = createRequire(import.meta.url);\n", killOn: /CJS-GUARD createRequire/ },
+    'ci-dlopen': { path: 'tools/ci/a25-plant-ci.mjs', content: "export const f = (m) => process.dlopen(m, 'a25-plant-ci.node');\n", killOn: /CJS-GUARD process\.dlopen/ },
+    'exempt-grow': { path: 'tools/ci/g39-mutants.mjs', append: true, content: "\n// a25 exempt-grow plant\nexport const g = (m) => process.dlopen(m, 'a25-plant-grow.node');\n", killOn: /CJS-GUARD exemption count tools\/ci\/g39-mutants\.mjs process\.dlopen/ } } },
+  { id: 'M85', what: 'Sec N-PV-1 (int-v8 r7): PROOF-VIEWS-EQUAL no longer compares the path-bound bare view with childProof', file: 'tools/ci/a25-2-launcher-shape.mjs', from: '  if (JSON.stringify(bare) !== JSON.stringify(pr)) throw new Error(`PROOF-VIEWS-EQUAL: preloaded', to: '  if (false) throw new Error(`PROOF-VIEWS-EQUAL: preloaded', test: [ST, 'N-PV-1: PROOF-VIEWS-EQUAL binds'], killOn: /PV-PATH mismatch refused/ },
   { id: 'M80', what: 'CTO A8 (4b): the raw frame split reads the length big-endian', file: 'tools/ci/a25-2-launcher-shape.mjs', from: 'len = raw.readUInt32LE(o + 1)', to: 'len = raw.readUInt32BE(o + 1)', test: [ST, 'CTO \\(1\\) on helper'], killOn: /FRAME-SPLIT/ },
   { id: 'M77', what: 'AI Eng note 1: the lockdown test re-types a stale backstop marker key instead of reading it', file: LDT, from: '  return m[0][1];\n})();', to: "  return 'open-rng-engine/entropy-backstop/v0';\n})();", test: [LDT, 'marker key'], killOn: /MARK-KEY/ },
 ]);
@@ -82,7 +89,8 @@ for (const m of list) {
 }
 for (const m of list) for (const [name, p] of Object.entries(m.plants ?? {})) {
   let exists = true; try { readFileSync(join(ROOT, p.path)); } catch { exists = false; }
-  if (exists) { bad++; process.stdout.write(`${m.id} BAD-PLANT ${name}: ${p.path} already exists\n`); }
+  // append plants (HoQ r7 exempt-grow) add to an existing file; all other plants create a new one.
+  if (exists !== Boolean(p.append)) { bad++; process.stdout.write(`${m.id} BAD-PLANT ${name}: ${p.path} ${exists ? 'already exists' : 'missing (append plant)'}\n`); }
 }
 if (bad) process.exit(2);
 if (process.argv.includes('--dry')) { process.stdout.write(`dry: ${list.length} edits apply exactly once\n`); process.exit(0); }
@@ -102,14 +110,16 @@ for (const m of list) {
     const runs = m.plants ? Object.entries(m.plants).map(([name, p]) => [name, p.killOn, p]) : m.modes ? Object.entries(m.modes) : [['bare', m.killOn ?? null]];
     const per = runs.map(([mode, killOn, plant]) => {
       const pre = mode === 'preloaded' ? ['--import', './tools/ci/entropy-backstop.mjs'] : [];
-      if (plant) { mkdirSync(dirname(join(d, plant.path)), { recursive: true }); writeFileSync(join(d, plant.path), plant.content, { flag: 'wx' }); }
+      const orig = plant?.append ? readFileSync(join(d, plant.path)) : null;
+      if (plant?.append) appendFileSync(join(d, plant.path), plant.content);
+      else if (plant) { mkdirSync(dirname(join(d, plant.path)), { recursive: true }); writeFileSync(join(d, plant.path), plant.content, { flag: 'wx' }); }
       try {
       const r = spawnSync(process.execPath, [...pre, '--test', '--test-name-pattern', m.test[1], m.test[0]], { cwd: d, env, encoding: 'utf8', timeout: 300000 });
       const pass = Number((/^ℹ pass (\d+)/m.exec(r.stdout) || [])[1] ?? -1), fail = Number((/^ℹ fail (\d+)/m.exec(r.stdout) || [])[1] ?? -1);
       // HoQ 22:22: a kill counts only on the named exit-code assertion (killOn), not on any failure.
       const onTarget = killOn ? killOn.test(r.stdout + r.stderr) : true;
       return { mode, pass, fail, verdict: pass + fail <= 0 ? 'NO-TESTS' : fail === 0 ? 'SURVIVED' : onTarget ? 'KILLED' : 'KILLED-OTHER' };
-      } finally { if (plant) unlinkSync(join(d, plant.path)); }
+      } finally { if (plant?.append) writeFileSync(join(d, plant.path), orig); else if (plant) unlinkSync(join(d, plant.path)); }
     });
     const verdict = per.every((x) => x.verdict === 'KILLED') ? 'KILLED' : (per.find((x) => x.verdict !== 'KILLED') ?? per[0]).verdict;
     const pass = per.reduce((a, x) => a + x.pass, 0), fail = per.reduce((a, x) => a + x.fail, 0);

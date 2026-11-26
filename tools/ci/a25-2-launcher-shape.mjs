@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const FIXTURE = Object.freeze({ run: 'golden', stream: 'golden-s0', rep: 'shuffle/adjacency-mod4/n-52', j: 0, calls: 40, token: 'grant-1@golden#0001' });
@@ -60,6 +60,22 @@ export function independentManifestSha(root, relpaths, manifestBytes) {
   return a === h(manifestBytes) ? a : null;
 }
 const exact = (raw, what) => { const o = JSON.parse(raw); if (JSON.stringify(o) !== raw) throw new Error(`launcherShape: ${what} does not round-trip byte-exactly`); return o; };
+// Harness fix (a), CTO A8 (4); N-PV-1 (Sec, int-v8 r7): under a preloaded parent the preloaded view (childProof) must be
+// field-equal, in key order, to the bare view of the SAME file. The file is bound by the path the G-39 hook recorded for
+// this child (evidence.childProofPath: <tmpdir>/ebs-proof-*/<this pid>-<seq>), no longer by matching mtime_ms.
+export function proofViewsEqual(ev, child, pid = process.pid) {
+  const p = ev.childProof(child);
+  if (!p || typeof p !== 'object' || p.invalid) throw new Error(`launcherShape: no valid hook-recorded proof (${JSON.stringify(p)})`);
+  const pr = { ...p }; delete pr.mtime_ms;
+  if (pr.sigusr1_disabled === null) delete pr.sigusr1_disabled; // childProof's null = field absent in the file
+  const path = typeof ev.childProofPath === 'function' ? ev.childProofPath(child) : null;
+  if (typeof path !== 'string' || !isAbsolute(path) || dirname(dirname(path)) !== resolve(tmpdir()) || !basename(dirname(path)).startsWith('ebs-proof-') || !basename(path).startsWith(`${pid}-`)) {
+    throw new Error(`PROOF-VIEWS-EQUAL: no hook proof path bound to this child (${JSON.stringify(path)})`);
+  }
+  const bare = exact(readFileSync(path, 'utf8'), 'proof');
+  if (JSON.stringify(bare) !== JSON.stringify(pr)) throw new Error(`PROOF-VIEWS-EQUAL: preloaded ${JSON.stringify(pr)} != bare ${JSON.stringify(bare)}`);
+  return pr;
+}
 const walk = (d) => readdirSync(d).flatMap((n) => { const p = join(d, n); return statSync(p).isDirectory() ? walk(p) : [p]; });
 
 // audit (optional object, CTO A8 (3) and harness fix (a)): filled with the raw values each substitution replaced
@@ -112,18 +128,8 @@ export async function launcherShape(tree, baseEnv = process.env, audit = null) {
     const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')]?.evidence ?? null;
     let pr;
     if (ev) {
-      const p = ev.childProof(r.child);
-      if (!p || typeof p !== 'object' || p.invalid) throw new Error(`launcherShape: no valid hook-recorded proof (${JSON.stringify(p)})`);
-      pr = { ...p }; delete pr.mtime_ms;
-      if (pr.sigusr1_disabled === null) delete pr.sigusr1_disabled; // childProof's null = field absent in the file
-      // Harness fix (a), CTO A8 (4): the preloaded view (childProof) must be field-equal, in order, to the bare view of the
-      // same file (the hook's proof file, <tmpdir>/ebs-proof-*/<this pid>-<seq>, matched by childProof's mtime_ms).
-      const file = readdirSync(tmpdir()).filter((n) => n.startsWith('ebs-proof-')).flatMap((n) => { try { return readdirSync(join(tmpdir(), n)).filter((f) => f.startsWith(`${process.pid}-`)).map((f) => join(tmpdir(), n, f)); } catch { return []; } })
-        .filter((f) => statSync(f).mtimeMs === p.mtime_ms);
-      if (file.length !== 1) throw new Error(`PROOF-VIEWS-EQUAL: ${file.length} hook proof files match childProof's mtime_ms`);
-      const bare = exact(readFileSync(file[0], 'utf8'), 'proof');
-      if (JSON.stringify(bare) !== JSON.stringify(pr)) throw new Error(`PROOF-VIEWS-EQUAL: preloaded ${JSON.stringify(pr)} != bare ${JSON.stringify(bare)}`);
-      if (audit) audit.proof_views = { mode: 'preloaded', equal: true, fields: Object.keys(pr) };
+      pr = proofViewsEqual(ev, r.child);
+      if (audit) audit.proof_views = { mode: 'preloaded', equal: true, bound: 'path', fields: Object.keys(pr) };
     } else {
       pr = exact(readFileSync(proofPath, 'utf8'), 'proof');
       if (audit) audit.proof_views = { mode: 'bare', equal: null, fields: Object.keys(pr) };

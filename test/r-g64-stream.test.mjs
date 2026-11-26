@@ -398,7 +398,7 @@ test('Sec N-BG-1: the bare gate refuses a parent whose NODE_OPTIONS carries -r, 
 });
 // CTO/HoQ r5, M3b ruling (b): the backstop's null-source CommonJS hand-off (entropy-backstop.mjs load hook) is
 // unreachable on product routes at the pinned node only while no CommonJS route exists in the product tree.
-test('CTO/HoQ r5 M3b (b): no CommonJS route under src/ or verification/harness (.cjs, .node, require(, createRequire)', () => {
+test('CTO/HoQ r5 M3b (b): no CommonJS route under src/ or verification/harness (.cjs, .cts, .node, require(, createRequire, process.dlopen, Module._load, module.require)', () => {
   const BASE = ROOT.replace(/\/+$/, ''); // ROOT is fileURLToPath('..'), with a trailing '/'
   const walkAll = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walkAll(join(d, e.name)) : [join(d, e.name)]);
   const files = ['src', 'verification/harness'].flatMap((x) => walkAll(join(ROOT, x))).map((f) => f.slice(BASE.length + 1));
@@ -410,9 +410,50 @@ test('CTO/HoQ r5 M3b (b): no CommonJS route under src/ or verification/harness (
   assert.ok(roots.length > files.length && roots.some((f) => f.startsWith('tools/ci/')), 'CJS-GUARD walked the manifest roots');
   assert.deepEqual(roots.filter((f) => f.endsWith('.node') && !f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in src/verification');
   assert.deepEqual(roots.filter((f) => f.endsWith('.node') && f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in tools/ci');
+  // Sec N-CJS-1 (CTO/HoQ, int-v8 r7): .cts over every manifest root; the native/CJS loader strings over the code files
+  // (.ts/.mts/.cts/.js/.mjs/.cjs) under src/, verification/ and tools/ci (docs describe the refusals in prose). Checked
+  // before require( so a module.require plant fails on its own assert. Closed exemption (HoQ r7 (i)): the enforcing layers,
+  // their probes and the mutant tables name these strings as data; each is pinned to its exact count.
+  assert.deepEqual(roots.filter((f) => f.endsWith('.cts')), [], 'CJS-GUARD .cts');
+  const CODE = /\.(?:[cm]?ts|[cm]?js)$/;
+  const code = roots.filter((f) => CODE.test(f)).map((f) => [f, readFileSync(join(ROOT, f), 'latin1')]);
+  assert.ok(code.length > files.length / 2 && code.some(([f]) => f === 'src/entropy/index.ts') && code.some(([f]) => f.startsWith('verification/') && !f.startsWith('verification/harness/')) && code.some(([f]) => f.startsWith('tools/ci/')), 'CJS-GUARD scanned the code files');
+  const EXEMPT = { // exact occurrence counts (HoQ r7): fewer = stale, more = new use; product trees (src/, verification/) have none
+    'tools/ci/entropy-backstop.mjs': { 'process.dlopen': 3 },
+    'tools/ci/a25-lockdown.mjs': { 'process.dlopen': 5 },
+    'tools/ci/import-allowlist.mjs': { 'process.dlopen': 1, 'module.require': 3 },
+    'tools/ci/entropy-backstop-check.mjs': { 'process.dlopen': 1 },
+    'tools/ci/g39-mutants.mjs': { 'process.dlopen': 2 },
+    'tools/ci/a25-2-wiring-mutants.mjs': { 'process.dlopen': 4, 'Module._load': 2, 'module.require': 2 },
+  };
+  for (const [f, by] of Object.entries(EXEMPT)) { const b = code.find(([g]) => g === f)?.[1] ?? ''; for (const [s, n] of Object.entries(by)) assert.strictEqual(b.split(s).length - 1, n, `CJS-GUARD exemption count ${f} ${s}`); }
+  for (const s of ['process.dlopen', 'Module._load', 'module.require']) assert.deepEqual(code.filter(([f, b]) => b.includes(s) && !(s in (EXEMPT[f] ?? {}))).map(([f]) => f), [], `CJS-GUARD ${s}`);
   const text = files.map((f) => [f, readFileSync(join(ROOT, f), 'latin1')]);
   assert.deepEqual(text.filter(([, b]) => b.includes('require(')).map(([f]) => f), [], 'CJS-GUARD require(');
   assert.deepEqual(text.filter(([, b]) => b.includes('createRequire')).map(([f]) => f), [], 'CJS-GUARD createRequire');
+});
+// N-PV-1 (Sec, int-v8 r7): PROOF-VIEWS-EQUAL binds the bare view by the proof path the G-39 hook recorded for the child
+// (evidence.childProofPath), not by mtime_ms. Pure unit test of proofViewsEqual with a planted proof file.
+test('N-PV-1: PROOF-VIEWS-EQUAL binds the bare proof view by the hook-recorded path, not by mtime', async () => {
+  const { proofViewsEqual } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'ebs-proof-'));
+  try {
+    const fields = { pid: 4242, preload_sha256: 'c'.repeat(64), token: 'grant-1@pv#0001', manifest_sha256: 'd'.repeat(64), sigusr1_disabled: true };
+    const file = join(dir, `${process.pid}-1`);
+    writeFileSync(file, JSON.stringify(fields));
+    const child = {};
+    const ev = (view, path = file) => ({ childProof: (c) => (c === child ? Object.freeze({ ...view, mtime_ms: 1 }) : null), childProofPath: (c) => (c === child ? path : null) });
+    assert.deepEqual(proofViewsEqual(ev(fields), child), fields, 'PV-PATH equal');
+    assert.throws(() => proofViewsEqual(ev({ ...fields, token: 'grant-1@pv#0002' }), child), /PROOF-VIEWS-EQUAL: preloaded/, 'PV-PATH mismatch refused');
+    const { token, ...noToken } = fields;
+    assert.throws(() => proofViewsEqual(ev(noToken), child), /PROOF-VIEWS-EQUAL: preloaded/, 'PV-PATH missing field refused');
+    assert.throws(() => proofViewsEqual(ev(fields, null), child), /no hook proof path bound/, 'PV-PATH unbound refused');
+    assert.throws(() => proofViewsEqual({ childProof: ev(fields).childProof }, child), /no hook proof path bound/, 'PV-PATH no accessor refused');
+    const other = join(dir, `${process.pid + 1}-1`); writeFileSync(other, JSON.stringify(fields));
+    assert.throws(() => proofViewsEqual(ev(fields, other), child), /no hook proof path bound/, 'PV-PATH foreign pid refused');
+    const outside = mkdtempSync(join(tmpdir(), 'pv-other-')); const f2 = join(outside, `${process.pid}-1`); writeFileSync(f2, JSON.stringify(fields));
+    try { assert.throws(() => proofViewsEqual(ev(fields, f2), child), /no hook proof path bound/, 'PV-PATH outside ebs-proof refused'); } finally { rmSync(outside, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A8)', async (t) => {
   const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
@@ -428,6 +469,7 @@ test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for 
   // Harness fix (a): under a preloaded parent the childProof view was checked field-equal to the bare view of its file.
   assert.equal(audit.proof_views?.mode, PRELOADED_PARENT ? 'preloaded' : 'bare', 'PROOF-VIEWS-EQUAL mode');
   if (PRELOADED_PARENT) assert.equal(audit.proof_views.equal, true, 'PROOF-VIEWS-EQUAL');
+  if (PRELOADED_PARENT) assert.equal(audit.proof_views.bound, 'path', 'PROOF-VIEWS-EQUAL bound by path (N-PV-1)');
   assert.equal(now, readFileSync(gold, 'utf8'), 'SHAPE-9B7A1D8: launcher-facing output differs from 9b7a1d8');
   assert.ok(JSON.parse(JSON.parse(now).H).loaded.some(([f]) => f === 'src/entropy/index.ts'));
 });
@@ -577,11 +619,12 @@ test('A25-1: the proof is written by the preload itself: child pid, preload sha2
     "const ev = globalThis[Symbol.for('open-rng-engine/entropy-backstop/v1')].evidence;",
     `const c = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', env: { ...process.env, ENTROPY_BACKSTOP_GRANT: '${tok}' } });`,
     "const t0 = Date.now();",
-    "c.on('close', () => { const p = ev.childProof(c); process.stdout.write(JSON.stringify({ p, pid: c.pid, fresh: p && p.mtime_ms >= t0 - 20, other: [ev.childProof({}), ev.childProof(null), ev.token({ grant: 1 }), ev.spawnToken({ grant: 1 })] })); });",
+    "c.on('close', () => { const p = ev.childProof(c); process.stdout.write(JSON.stringify({ p, pid: c.pid, fresh: p && p.mtime_ms >= t0 - 20, pp: ev.childProofPath(c), other: [ev.childProof({}), ev.childProof(null), ev.token({ grant: 1 }), ev.spawnToken({ grant: 1 }), ev.childProofPath({}), ev.childProofPath(null)] })); });",
   ].join('\n'));
   assert.equal(got.p.pid, got.pid); assert.equal(got.p.preload_sha256, BS_SHA); assert.equal(got.p.token, tok); assert.equal(got.fresh, true);
   assert.equal(got.p.sigusr1_disabled, false); // a child started without --disable-sigusr1 says so in its proof (int-v8)
-  assert.deepEqual(got.other, [null, null, null, null]);
+  assert.deepEqual(got.other, [null, null, null, null, null, null]);
+  assert.match(String(got.pp), /\/ebs-proof-[^/]+\/\d+-\d+$/, 'N-PV-1: childProofPath is the hook proof path of this child');
 });
 test('A25-1: a helper is spawned only as exactly --disable-sigusr1 --import <bound backstop> <helper> <args>, without NODE_OPTIONS', () => {
   const plan = P.buildPlan({ runId: 'a', M: { [A25_1_ID]: 2 }, N: 1 });
