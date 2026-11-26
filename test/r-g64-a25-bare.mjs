@@ -29,7 +29,8 @@ for (const [name, body] of Object.entries(BAD_ARGS)) {
 }
 
 test('A25-3 / CTO change 3: src/index.ts re-exporting the gate fails the leak check: exit 87', () => {
-  const r = withHostile({ 'src/index.ts': (t) => `${t}\nexport { randomFillSync as __leak } from './entropy/index.ts';\n` },
+  // CTO int-v8 r8: entropy/index.ts no longer re-exports the gate, so the hostile tree re-adds it before leaking it.
+  const r = withHostile({ 'src/entropy/index.ts': (t) => `${t}\nexport { randomFillSync };\n`, 'src/index.ts': (t) => `${t}\nexport { randomFillSync as __leak } from './entropy/index.ts';\n` },
     `const E = await import(SRC); M().assertNoGateLeak(E); process.stdout.write('ALIVE');`);
   assert.equal(r.status, 87, `${r.status} ${r.err}`); assert.match(r.err, /leak|gate/i); assert.equal(r.out, '');
 });

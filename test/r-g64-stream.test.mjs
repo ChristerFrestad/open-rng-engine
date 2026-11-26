@@ -455,7 +455,69 @@ test('N-PV-1: PROOF-VIEWS-EQUAL binds the bare proof view by the hook-recorded p
     try { assert.throws(() => proofViewsEqual(ev(fields, f2), child), /no hook proof path bound/, 'PV-PATH outside ebs-proof refused'); } finally { rmSync(outside, { recursive: true, force: true }); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A8)', async (t) => {
+// ---------- A9 (int-v8 r8; CTO ruling (i)+ and HoQ ruling, 2026-11-26) ----------
+// r8 edits src/entropy/index.ts, so three launcher-facing src digests differ from the 9b7a1d8 golden: H.src_before,
+// T.src_after and the src/entropy/index.ts entry (index 1) of H.loaded. A9 is a typed substitution for exactly those
+// three values: each is 64 lowercase hex, equals an independent recompute over this tree's bytes (own code below; it
+// does not import run-plan srcManifest, the helper or the launcher), and equals the pinned r8 literal, so any later src
+// edit fails again on purpose. H.src_before === T.src_after. Everything else, including the loaded path list and order
+// and the other three loaded shas, stays byte-identical. The golden file is not re-recorded.
+// Old -> new: src digest fc6cc4f4bd53ef42c6900d579dfa27e653af0914b0be8e4a9f6ff62668d45c0e -> R8_SRC_DIGEST;
+// src/entropy/index.ts 91f08be8ac4f304b65de9f4dd70201aff4affe511a2670508b903f58a398c3ca -> R8_ENTROPY_SHA.
+const R8_SRC_DIGEST = 'd9f4cece218863d9179c06dad961649b64acb536eb567c6ba2029f37c20b446b';
+const R8_ENTROPY_SHA = 'cc5e56ac120597059d19354b400fff3dd636b8edb50bea685c51ab8f7059b46e';
+const A9_ENTROPY = 'src/entropy/index.ts';
+const A9_HEX = /^[0-9a-f]{64}$/;
+function a9Recompute(root) {
+  const files = [];
+  const dfs = (rel) => { for (const e of readdirSync(join(root, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) { if (e.isDirectory()) dfs(`${rel}/${e.name}`); else files.push(`${rel}/${e.name}`); } };
+  dfs('src');
+  const h = createHash('sha256');
+  let entropy = null;
+  for (const r of files) {
+    const s = createHash('sha256').update(readFileSync(join(root, r))).digest('hex');
+    if (r === A9_ENTROPY) entropy = s;
+    h.update(`${r}\0${s}\n`);
+  }
+  return { src: h.digest('hex'), entropy };
+}
+function a9Check(v, recomputed, pin, label) {
+  assert.match(String(v), A9_HEX, `A9(a) ${label} is 64 lowercase hex`);
+  assert.equal(v, recomputed, `A9(b) ${label} equals the independent recompute`);
+  assert.equal(v, pin, `A9(c) ${label} equals the pinned r8 literal`);
+}
+// h, t: the live H and T objects; gold: { H, T } parsed from the golden; rc: a9Recompute(root). Returns copies with the
+// three A9 values replaced by the golden's (key order kept); every other value is left as it came.
+function a9Apply(h, t, gold, rc) {
+  a9Check(h.src_before, rc.src, R8_SRC_DIGEST, 'H.src_before');
+  a9Check(t.src_after, rc.src, R8_SRC_DIGEST, 'T.src_after');
+  assert.equal(h.src_before, t.src_after, 'A9(b) H.src_before === T.src_after');
+  assert.ok(Array.isArray(h.loaded) && h.loaded.length > 1 && h.loaded[1][0] === A9_ENTROPY, 'A9 entropy entry is H.loaded[1]');
+  a9Check(h.loaded[1][1], rc.entropy, R8_ENTROPY_SHA, 'H.loaded[src/entropy/index.ts]');
+  const loaded = h.loaded.map(([p, s]) => (p === A9_ENTROPY ? [p, gold.H.loaded.find(([q]) => q === p)[1]] : [p, s]));
+  return { H: { ...h, src_before: gold.H.src_before, loaded }, T: { ...t, src_after: gold.T.src_after } };
+}
+test('A9 (int-v8 r8): typed src-digest substitution, closed to three values, recompute and pin enforced', () => {
+  const g = JSON.parse(readFileSync(join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json'), 'utf8'));
+  const gold = { H: JSON.parse(g.H), T: JSON.parse(g.T) };
+  const rc = { src: R8_SRC_DIGEST, entropy: R8_ENTROPY_SHA };
+  const live = () => { const h = structuredClone(gold.H), t = structuredClone(gold.T); h.src_before = R8_SRC_DIGEST; t.src_after = R8_SRC_DIGEST; h.loaded[1][1] = R8_ENTROPY_SHA; return { h, t }; };
+  // Positive: the r8 values substitute back to the golden exactly.
+  { const { h, t } = live(); const out = a9Apply(h, t, gold, rc); assert.equal(JSON.stringify(out.H), g.H, 'A9 positive H'); assert.equal(JSON.stringify(out.T), g.T, 'A9 positive T'); }
+  // Closed set: a non-A9 loaded sha (src/index.ts) is never substituted, so it still differs from the golden.
+  { const { h, t } = live(); h.loaded[0][1] = 'e'.repeat(64); const out = a9Apply(h, t, gold, rc); assert.equal(out.H.loaded[0][1], 'e'.repeat(64), 'A9 closed: src/index.ts sha is never substituted'); }
+  // Recompute and pin: a well-formed 64-hex value that is neither the recompute nor the pin is refused.
+  { const { h, t } = live(); h.src_before = t.src_after = 'a'.repeat(64);
+    let threw = null; try { a9Apply(h, t, gold, rc); } catch (e) { threw = e; }
+    assert.ok(threw && /A9\((b|c)\)/.test(threw.message), 'A9 tampered 64-hex value refused'); }
+  { const { h, t } = live(); h.loaded[1][1] = 'b'.repeat(64);
+    let threw = null; try { a9Apply(h, t, gold, rc); } catch (e) { threw = e; }
+    assert.ok(threw && /A9\((b|c)\)/.test(threw.message), 'A9 tampered 64-hex entropy sha refused'); }
+  // The pin alone (recompute agrees with a different tree): a changed src byte fails A9(c).
+  { const { h, t } = live(); const x = 'f'.repeat(64); h.src_before = t.src_after = x;
+    assert.throws(() => a9Apply(h, t, gold, { src: x, entropy: R8_ENTROPY_SHA }), /A9\(c\) H\.src_before/, 'A9(c) pin holds when the recompute agrees'); }
+});
+test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A9)', async (t) => {
   const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
   assert.ok(existsSync(gold), 'GOLDEN-MISSING: record it from a 9b7a1d8 checkout with tools/ci/a25-2-launcher-shape.mjs');
   const { launcherShape } = await import(pathToFileURL(join(ROOT, 'tools/ci/a25-2-launcher-shape.mjs')).href);
@@ -470,7 +532,12 @@ test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for 
   assert.equal(audit.proof_views?.mode, PRELOADED_PARENT ? 'preloaded' : 'bare', 'PROOF-VIEWS-EQUAL mode');
   if (PRELOADED_PARENT) assert.equal(audit.proof_views.equal, true, 'PROOF-VIEWS-EQUAL');
   if (PRELOADED_PARENT) assert.equal(audit.proof_views.bound, 'path', 'PROOF-VIEWS-EQUAL bound by path (N-PV-1)');
-  assert.equal(now, readFileSync(gold, 'utf8'), 'SHAPE-9B7A1D8: launcher-facing output differs from 9b7a1d8');
+  const goldTxt = readFileSync(gold, 'utf8'), go = JSON.parse(goldTxt), no = JSON.parse(now);
+  const rc = a9Recompute(ROOT), nh = JSON.parse(no.H), nt = JSON.parse(no.T);
+  t.diagnostic(`A9-RAW ${JSON.stringify({ src_before: nh.src_before, src_after: nt.src_after, entropy: nh.loaded?.[1], recompute: rc })}`);
+  const a9 = a9Apply(nh, nt, { H: JSON.parse(go.H), T: JSON.parse(go.T) }, rc);
+  no.H = JSON.stringify(a9.H); no.T = JSON.stringify(a9.T);
+  assert.equal(JSON.stringify(no, null, 1) + '\n', goldTxt, 'SHAPE-9B7A1D8: launcher-facing output differs from 9b7a1d8');
   assert.ok(JSON.parse(JSON.parse(now).H).loaded.some(([f]) => f === 'src/entropy/index.ts'));
 });
 
