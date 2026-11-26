@@ -38,11 +38,15 @@ export function checkA4(pid, childPid, parentPid) { return Number.isInteger(pid)
 // P(gate_calls > 3084) = 9.10e-10 <= 1e-9. Derivation: a8-ub-derivation.py sha256 e17d4714..., its output
 // a8-ub-derivation.out sha256 9ada03d0... (rng-backup a25-2/backend/int-v8-wip). Observed in runs: 2802..2862.
 // Below A8_LOWER is impossible, so it is a typed <REJECT:A8> (fail-closed). Above A8_UPPER is possible but
-// improbable: an A8-UB FINDING+HOLD, thrown, never a silent REJECT, so the golden stays clean. The bounds hold for
-// FIXTURE.calls only, so checkA8 refuses any other calls (A8_LOWER >= calls replaces the earlier '>= calls').
+// improbable: an A8-UB FINDING+HOLD, thrown, never a silent REJECT, so the golden stays clean. A8_LOWER >= calls
+// replaces the earlier '>= calls'.
+// Quant CONFIRMED both bounds (quant-a8-ub-check.md sha256 886f2eff..., HoQ-verified): U is the smallest u with
+// P(X > u) <= 1e-9 (9.097e-10); 2040 = 40 x 51 is structural. They are valid ONLY for A8_CONFIG: any other rep or
+// calls is a typed <REJECT:A8> (no bound is pinned for it), checked before the bounds.
+export const A8_CONFIG = Object.freeze({ rep: 'shuffle/adjacency-mod4/n-52', calls: 40 });
 export const A8_LOWER = 2040;
 export const A8_UPPER = 3084;
-export function checkA8(a25, calls) { return !!a25 && typeof a25 === 'object' && Object.keys(a25).join() === 'gate_calls,walks' && Number.isInteger(a25.gate_calls) && a25.walks === a25.gate_calls && calls === FIXTURE.calls && a25.gate_calls >= A8_LOWER; }
+export function checkA8(a25, calls, rep) { return !!a25 && typeof a25 === 'object' && Object.keys(a25).join() === 'gate_calls,walks' && Number.isInteger(a25.gate_calls) && a25.walks === a25.gate_calls && rep === A8_CONFIG.rep && calls === A8_CONFIG.calls && a25.gate_calls >= A8_LOWER; }
 export function assertA8Upper(a25) { if (a25.gate_calls > A8_UPPER) throw new Error(`A8-UB FINDING+HOLD: gate_calls ${a25.gate_calls} > A8_UPPER ${A8_UPPER} (P <= 1e-9 for a correct tree): hold the run and report, do not re-record the golden`); }
 export function checkA5(v, recomputed) { return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) && v === recomputed; }
 // Independent of the tree's own a25-manifest.mjs: the manifest format (version 1, root, sorted entries, indent 1, '\n')
@@ -130,8 +134,8 @@ export async function launcherShape(tree, baseEnv = process.env, audit = null) {
     if (audit && audit.raw.a25 && Number.isInteger(audit.raw.a25.gate_calls)) audit.raw.gate_calls_per_call = audit.raw.a25.gate_calls / FIXTURE.calls;
     if (h.backstop && typeof h.backstop === 'object' && 'backstop_sha256' in h.backstop) h.backstop.backstop_sha256 = '<ALLOW:A1>';
     if ('payload_sha256' in t) t.payload_sha256 = '<ALLOW:A3>';
-    if ('a25' in t && checkA8(t.a25, FIXTURE.calls)) assertA8Upper(t.a25);
-    if ('a25' in t) t.a25 = checkA8(t.a25, FIXTURE.calls) ? { gate_calls: '<ALLOW:A8>', walks: '<ALLOW:A8>' } : '<REJECT:A8>';
+    if ('a25' in t && checkA8(t.a25, FIXTURE.calls, FIXTURE.rep)) assertA8Upper(t.a25);
+    if ('a25' in t) t.a25 = checkA8(t.a25, FIXTURE.calls, FIXTURE.rep) ? { gate_calls: '<ALLOW:A8>', walks: '<ALLOW:A8>' } : '<REJECT:A8>';
     if ('pid' in pr) pr.pid = checkA4(pr.pid, r.pid, process.pid) ? '<ALLOW:A4>' : '<REJECT:A4>';
     if ('preload_sha256' in pr) pr.preload_sha256 = '<ALLOW:A1>';
     if ('manifest_sha256' in pr) pr.manifest_sha256 = checkA5(pr.manifest_sha256, independentManifestSha(root, rel, bytes)) ? '<ALLOW:A5>' : '<REJECT:A5>';

@@ -347,7 +347,8 @@ test('D22-4 + real helper: the evidence helper under the backstop counts, and it
 });
 
 test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async () => {
-  const { checkA4, checkA5, checkA8, assertA8Upper, A8_LOWER, A8_UPPER } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const { checkA4, checkA5, checkA8: check8, assertA8Upper, A8_LOWER, A8_UPPER, A8_CONFIG } = await import('../tools/ci/a25-2-launcher-shape.mjs');
+  const N52 = 'shuffle/adjacency-mod4/n-52', checkA8 = (a, calls, rep = N52) => check8(a, calls, rep);
   assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40), true, 'A8-CHECK ok');
   assert.equal(checkA8({ gate_calls: 2839, walks: 2838 }, 40), false, 'A8-CHECK walks differ');
   assert.equal(checkA8({ gate_calls: 39, walks: 39 }, 40), false, 'A8-CHECK below calls');
@@ -360,7 +361,11 @@ test('CTO int-v8 r2 (1): allowlist A4/A5 are typed checks, not wildcards', async
   assert.deepEqual([A8_LOWER, A8_UPPER], [2040, 3084], 'A8-BOUNDS pinned');
   assert.equal(checkA8({ gate_calls: 2040, walks: 2040 }, 40), true, 'A8-CHECK at the minimum 2040');
   assert.equal(checkA8({ gate_calls: 2039, walks: 2039 }, 40), false, 'A8-CHECK below the minimum 2040');
-  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 41), false, 'A8-CHECK other fixture calls');
+  // HoQ r5 (Quant): the bounds are pinned for A8_CONFIG only; any other configuration is a typed REJECT, never bounded.
+  assert.deepEqual({ ...A8_CONFIG }, { rep: N52, calls: 40 }, 'A8-CONFIG pinned');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 41), false, 'A8-CHECK unpinned config calls');
+  assert.equal(checkA8({ gate_calls: 2839, walks: 2839 }, 40, 'shuffle/adjacency-mod4/n-51'), false, 'A8-CHECK unpinned config n');
+  assert.equal(check8({ gate_calls: 2839, walks: 2839 }, 40, undefined), false, 'A8-CHECK unpinned config missing rep');
   assert.doesNotThrow(() => assertA8Upper({ gate_calls: 3084, walks: 3084 }), 'A8-UB at U');
   assert.equal(checkA8({ gate_calls: 3085, walks: 3085 }, 40), true, 'A8-UB is not a REJECT');
   assert.throws(() => assertA8Upper({ gate_calls: 3085, walks: 3085 }), /^Error: A8-UB FINDING\+HOLD: gate_calls 3085 > A8_UPPER 3084/, 'A8-UB above U is a FINDING+HOLD');
@@ -390,6 +395,24 @@ test('Sec N-BG-1: the bare gate refuses a parent whose NODE_OPTIONS carries -r, 
   assert.equal(nb('--import ./i.mjs'), true, 'N-BG-1 --import (kept)'); assert.equal(nb('--require=./x.cjs'), true, 'N-BG-1 --require (kept)');
   assert.equal(notBare('', ['--no-warnings'], {}), true, 'N-BG-1 execArgv (kept)');
   assert.equal(notBare('', [], { [Symbol.for('open-rng-engine/entropy-backstop/v1')]: {} }), true, 'N-BG-1 backstop marker (kept)');
+});
+// CTO/HoQ r5, M3b ruling (b): the backstop's null-source CommonJS hand-off (entropy-backstop.mjs load hook) is
+// unreachable on product routes at the pinned node only while no CommonJS route exists in the product tree.
+test('CTO/HoQ r5 M3b (b): no CommonJS route under src/ or verification/harness (.cjs, .node, require(, createRequire)', () => {
+  const BASE = ROOT.replace(/\/+$/, ''); // ROOT is fileURLToPath('..'), with a trailing '/'
+  const walkAll = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walkAll(join(d, e.name)) : [join(d, e.name)]);
+  const files = ['src', 'verification/harness'].flatMap((x) => walkAll(join(ROOT, x))).map((f) => f.slice(BASE.length + 1));
+  assert.ok(files.length > 10 && files.includes('src/entropy/index.ts'), 'CJS-GUARD walked the tree');
+  assert.deepEqual(files.filter((f) => f.endsWith('.cjs')), [], 'CJS-GUARD .cjs');
+  // CTO r6 (i): .node is checked over every manifest root (src, verification, tools/ci). The lockdown resolve (93) stays
+  // the enforcing layer; this is the tripwire.
+  const roots = ['src', 'verification', 'tools/ci'].flatMap((x) => walkAll(join(ROOT, x))).map((f) => f.slice(BASE.length + 1));
+  assert.ok(roots.length > files.length && roots.some((f) => f.startsWith('tools/ci/')), 'CJS-GUARD walked the manifest roots');
+  assert.deepEqual(roots.filter((f) => f.endsWith('.node') && !f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in src/verification');
+  assert.deepEqual(roots.filter((f) => f.endsWith('.node') && f.startsWith('tools/ci/')), [], 'CJS-GUARD .node in tools/ci');
+  const text = files.map((f) => [f, readFileSync(join(ROOT, f), 'latin1')]);
+  assert.deepEqual(text.filter(([, b]) => b.includes('require(')).map(([f]) => f), [], 'CJS-GUARD require(');
+  assert.deepEqual(text.filter(([, b]) => b.includes('createRequire')).map(([f]) => f), [], 'CJS-GUARD createRequire');
 });
 test('CTO (1) on helper.loaded(): the real helper\'s launcher-facing output for the fixed fixture is byte-identical to 9b7a1d8 except the closed allowlist ALLOW (A1-A8)', async (t) => {
   const gold = join(ROOT, 'test/fixtures/a25-2-launcher-shape-9b7a1d8.json');
